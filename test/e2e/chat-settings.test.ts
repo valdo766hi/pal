@@ -153,7 +153,10 @@ describe("saved chat settings", () => {
     const loaded = await modelControl(page, width);
     expect(await loaded.getAttribute("title")).toContain("Anthropic API");
     await dismissTools(page, width);
+    const admitted = admission(page, saved.id);
     await page.getByRole("button", { name: "Send", exact: true }).click();
+    // Admission is asserted separately so a slow run start is distinguishable from a lost or refused send.
+    expect((await admitted).status()).toBe(200);
     await expect.poll(() => provider.requests.map((request) => request.path)).toEqual(["/v1/messages"]);
     expect(provider.requests[0]?.body.model).toBe("claude-haiku-4-5");
     expect(mutations).toEqual([`POST /api/chats/${saved.id}/inputs`]);
@@ -249,11 +252,19 @@ describe("saved chat settings", () => {
     await held.done;
     await page.getByLabel("Message", { exact: true }).fill("Use the other chat");
     await expect.poll(() => page.getByRole("button", { name: "Send", exact: true }).isEnabled()).toBe(true);
+    const admitted = admission(page, other.id);
     await page.getByRole("button", { name: "Send", exact: true }).click();
+    expect((await admitted).status()).toBe(200);
     await expect.poll(() => provider.requests.map((request) => request.path)).toEqual(["/api/v1/chat/completions"]);
     expect(errors).toEqual([]);
   });
 });
+
+function admission(page: Page, id: string) {
+  return page.waitForResponse(
+    (reply) => new URL(reply.url()).pathname === `/api/chats/${id}/inputs` && reply.request().method() === "POST",
+  );
+}
 
 async function attach(page: Page, name: string) {
   const response = page.waitForResponse(
@@ -1355,6 +1366,110 @@ describe("chat code rendering", () => {
     expect(await page.locator(".code pre code").allTextContents()).toEqual([code, code]);
     expect(await page.locator(".code img").count()).toBe(0);
     await screenshot(page, `highlight-long-lines-${width}`);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("long transcript updates", () => {
+  it("keeps history, draft, scroll and approval order while live text changes and reconnects reset it", async () => {
+    const { pal, page, base, saved, provider, errors } = await setup(1440);
+    const conversation = await pal.harness.conversation(saved.conversationId, context);
+    if (conversation === undefined) throw new Error("missing fixture chat");
+    for (let index = 0; index < 80; index++) {
+      await conversation.submit(
+        { type: "write", entry: { kind: "pi.assistant", model: [fauxAssistantMessage(`History ${index}`)] } },
+        context,
+      );
+    }
+    // Marks the chat stream's first snapshot and approvals view, and forwards test events into that stream.
+    await page.addInitScript(() => {
+      const Native = window.EventSource;
+      window.EventSource = class extends Native {
+        constructor(url: string | URL, options?: EventSourceInit) {
+          super(url, options);
+          if (!String(url).includes("/events")) return;
+          const marks = document.documentElement.dataset;
+          this.addEventListener("snapshot", (event) => (marks.chatSnapshot ??= (event as MessageEvent<string>).data));
+          this.addEventListener("approvals", () => (marks.chatApprovals = "seen"));
+          addEventListener("chat-test-event", (event) => {
+            const { name, data } = (event as CustomEvent<{ name: string; data?: string }>).detail;
+            this.dispatchEvent(data === undefined ? new Event(name) : new MessageEvent(name, { data }));
+          });
+        }
+      };
+    });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await page.getByText("History 79", { exact: true }).waitFor();
+    // Synthetic approvals must not race the server's initial view.
+    await expect.poll(() => page.locator("html").getAttribute("data-chat-approvals")).toBe("seen");
+    const emit = (name: string, data?: unknown) =>
+      page.evaluate(
+        (detail) => dispatchEvent(new CustomEvent("chat-test-event", { detail })),
+        data === undefined ? { name } : { name, data: JSON.stringify(data) },
+      );
+    const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as {
+      entries: { id: number }[];
+    };
+    expect(snapshot.entries).toHaveLength(80);
+    const pending = (id: string, assistant: number | null, command: string) => ({
+      id,
+      assistant,
+      tool: "shell_run",
+      command,
+      cwd: "/fixture",
+      timeout: 30,
+      digest: "a".repeat(64),
+      state: "pending",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+      decidedAt: null,
+    });
+    await emit("approvals", {
+      mode: "ask",
+      approvals: [pending("turn", snapshot.entries[40]?.id ?? null, "echo turn"), pending("loose", null, "echo loose")],
+    });
+    const input = page.getByLabel("Message", { exact: true });
+    await input.fill("Keep this draft");
+    await page.locator(".scroller").evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    const scrollBefore = await page.locator(".scroller").evaluate((node) => node.scrollTop);
+    const order = () =>
+      page
+        .locator(".transcript > .item")
+        .evaluateAll((items) =>
+          items.map(
+            (item) => item.querySelector(".cmd")?.textContent ?? item.querySelector(".md")?.textContent?.trim(),
+          ),
+        );
+    await emit("event", { type: "message_start", message: fauxAssistantMessage("Live") });
+    for (let index = 0; index < 20; index++)
+      await emit("event", { type: "message_update", changes: [{ type: "text_delta", contentIndex: 0, delta: "." }] });
+    const history = Array.from({ length: 80 }, (_, index) => `History ${index}`);
+    await expect
+      .poll(order)
+      .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "echo loose", `Live${".".repeat(20)}`]);
+    expect(await page.locator(".scroller").evaluate((node) => node.scrollTop)).toBe(scrollBefore);
+    expect(await input.inputValue()).toBe("Keep this draft");
+    expect(await input.evaluate((node) => node === document.activeElement)).toBe(true);
+
+    // A reconnect replaces live state from the server snapshot: the stale partial goes, new history arrives.
+    await emit("error");
+    await page.getByRole("status").filter({ hasText: "Reconnecting to Pal" }).waitFor();
+    const appended = { id: Math.max(...snapshot.entries.map((entry) => entry.id)) + 1, kind: "pi.assistant" };
+    await emit("snapshot", {
+      ...snapshot,
+      entries: [...snapshot.entries, { ...appended, model: [fauxAssistantMessage("History 80")] }],
+    });
+    await expect
+      .poll(order)
+      .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "History 80", "echo loose"]);
+    expect(await page.getByRole("status").filter({ hasText: "Reconnecting to Pal" }).count()).toBe(0);
+    await emit("snapshot", { ...snapshot, generation: { message: fauxAssistantMessage("Resumed") } });
+    await expect
+      .poll(order)
+      .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "echo loose", "Resumed"]);
+    expect(await input.inputValue()).toBe("Keep this draft");
     expect(provider.requests).toEqual([]);
     expect(errors).toEqual([]);
   });

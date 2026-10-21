@@ -184,7 +184,9 @@
     };
   });
 
-  const items = $derived.by(() => build(stream?.entries ?? [], stream?.partial, stream?.approvals ?? []));
+  // Live text changes often; keep committed history from being rebuilt for each partial update.
+  const historyItems = $derived(build(stream?.entries ?? [], undefined, stream?.approvals ?? []));
+  const items = $derived(historyItems.concat(build([], stream?.partial, [])));
   const awaiting = $derived((stream?.approvals ?? []).some((approval) => approval.state === "pending"));
   const connected = $derived(app.chatgpt?.account != null);
   const effective = $derived.by(() => {

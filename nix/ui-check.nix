@@ -3,30 +3,8 @@
   git,
   coreutils,
   writeShellApplication,
-  playwright-driver,
-  makeFontsConf,
-  dejavu_fonts,
-  tests,
+  ui,
 }:
-let
-  fixture = tests.overrideAttrs {
-    pname = "pal-ui-fixture";
-    buildPhase = ''
-      runHook preBuild
-      pnpm build
-      runHook postBuild
-    '';
-    installPhase = ''
-      mkdir -p $out
-      cp -a . $out/
-    '';
-  };
-  browsers = playwright-driver.browsers.override {
-    withFirefox = false;
-    withWebkit = false;
-    withFfmpeg = false;
-  };
-in
 writeShellApplication {
   name = "pal-ui-check";
   runtimeInputs = [
@@ -44,11 +22,11 @@ writeShellApplication {
     output=$(realpath -- "$1")
     work=$(mktemp -d)
     trap 'rm -rf -- "$work"' EXIT
-    cp -a ${fixture}/. "$work/"
+    cp -a ${ui.fixture}/. "$work/"
     chmod -R u+w "$work"
     cd "$work"
-    export PLAYWRIGHT_BROWSERS_PATH=${browsers}
-    export FONTCONFIG_FILE=${makeFontsConf { fontDirectories = [ dejavu_fonts ]; }}
+    export PLAYWRIGHT_BROWSERS_PATH=${ui.browsers}
+    export FONTCONFIG_FILE=${ui.fonts}
     export PAL_E2E_SCREENSHOTS="$output/screenshots"
     status=0
     node node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts test/e2e/chat-settings.test.ts \

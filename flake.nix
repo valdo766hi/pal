@@ -26,6 +26,9 @@
         pkgs:
         let
           pal = pkgs.callPackage ./nix/package.nix { pkgsPath = pkgs.path; };
+          ui = pkgs.callPackage ./nix/ui-fixture.nix {
+            tests = pkgs.callPackage ./nix/tests.nix { inherit pal; };
+          };
           startupBenchmarkSource = pkgs.lib.fileset.toSource {
             root = ./scripts;
             fileset = pkgs.lib.fileset.unions [
@@ -36,9 +39,8 @@
         in
         {
           default = pal;
-          ui-check = pkgs.callPackage ./nix/ui-check.nix {
-            tests = pkgs.callPackage ./nix/tests.nix { inherit pal; };
-          };
+          ui-check = pkgs.callPackage ./nix/ui-check.nix { inherit ui; };
+          transcript-benchmark = pkgs.callPackage ./nix/transcript-benchmark.nix { inherit ui; };
           startup-benchmark = pkgs.writeShellApplication {
             name = "pal-benchmark-startup";
             runtimeInputs = [

@@ -87,6 +87,17 @@ jobs:
             "$PWD/baseline-package" 7 > startup-baseline.json
           ./startup-benchmark/bin/pal-benchmark-startup \
             "$PWD/candidate-package" 7 > startup-candidate.json
+      - name: Long-chat transcript measurements, not model evaluations
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link transcript-benchmark \
+            ".#packages.$SYSTEM.transcript-benchmark"
+          for name in baseline candidate; do
+            ./transcript-benchmark/bin/pal-benchmark-transcript \
+              "$PWD/$name-package/lib/pal/dist/public" 7 \
+              > "transcript-$name.json"
+          done
       - name: Publish bounded coverage summary
         run: |
           printf '### Portable subset only\n\n' >> "$GITHUB_STEP_SUMMARY"
@@ -101,6 +112,10 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
           tee -a "$GITHUB_STEP_SUMMARY" < startup-baseline.json
           tee -a "$GITHUB_STEP_SUMMARY" < startup-candidate.json
+          printf '\n### Long-chat transcript; selected web bundles\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < transcript-baseline.json
+          tee -a "$GITHUB_STEP_SUMMARY" < transcript-candidate.json
           if test -f native-ui/summary.json; then
             printf '\n### Native chat UI subset\n\n' \
               >> "$GITHUB_STEP_SUMMARY"
@@ -116,6 +131,8 @@ jobs:
             grading-summary.json
             startup-baseline.json
             startup-candidate.json
+            transcript-baseline.json
+            transcript-candidate.json
             native-ui/summary.json
             native-ui/screenshots/
           retention-days: 7

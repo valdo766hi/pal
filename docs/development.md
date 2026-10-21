@@ -144,8 +144,25 @@ CI measures the fixed pre-extraction `0ac668e` baseline and exact candidate pack
 builds finish. These are sequential batches with fresh processes/stores, **not flushed filesystem caches**, peak or
 aggregate worker RSS, configured chat latency, model quality, or full platform acceptance. Compare like hosts and
 repeat before attributing a difference to code. No regression budget or optimization claim is established by the
-runner alone. Browser/PTY/search activation, long transcripts and cached/live MCP measurements remain required
-for #14; do not change isolation or transcript derivation without profiling and correctness regressions.
+runner alone. Browser/PTY/search activation and cached/live MCP measurements remain required for #14; do not change
+isolation without profiling and correctness regressions.
+
+### Long-chat transcript measurements
+
+```sh
+nix build --out-link package .#default
+nix build --out-link transcript-benchmark .#transcript-benchmark
+./transcript-benchmark/bin/pal-benchmark-transcript "$PWD/package/lib/pal/dist/public" 7 > transcript.json
+```
+
+Each sample opens a fresh in-process Pal fixture with fake provider keys and 500 assistant history entries in a new
+1440×900 sandboxed Chromium context limited to loopback, then sends 60 live text updates through the chat's own
+event stream. JSON keeps every sample's Chromium task/script/layout/style time and animation-frame waits, their
+nearest-rank p50/p95, and web-bundle, browser and host identity. A sample fails unless all history and the exact
+live text render, the draft, focus and scroll position are unchanged, no provider request is made and the page
+reports no errors. Only the web bundle is selected: the server, fixture and browser come from the runner's tree,
+so compare bundles that speak the same API. These are not network, model or page-load latency results. CI runs
+the same pre-extraction baseline and candidate bundles on each native host.
 
 ### Platform acceptance matrix
 
