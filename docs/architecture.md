@@ -65,12 +65,35 @@ because nothing was recorded as started.
 - `src/core/folders.ts`: read-only reference folders, bound to a run when it starts.
 - `src/core/uploads.ts`: device uploads stored under the data directory, up to 25 MiB each.
 
+## Instruction sources
+
+`src/core/instructions.ts` loads `~/.agents/AGENTS.md` from the Pal host account and the actual chat workspace's
+`AGENTS.md` before each model preparation. Global guidance precedes project guidance; deeper instructions apply
+only within their subtree. Core policy and the current user always take precedence. Skills are separate: this
+instruction loader does not discover or eagerly inject `SKILL.md` bodies.
+
+Context shows current source paths, SHA-256 identities, limits and diagnostics. Project-specific source settings use
+revision checks; the global file can be disabled or explicitly changed to an absolute host path, including
+`~/AGENTS.md`. There is no implicit home alias or ancestor/sibling crawl. Disabled resolved paths do not fall back
+to another file. Local, Read-only and Worktree use their actual workspace, not another source checkout.
+
+`instructions_scope` selects up to eight relative directories. File reads/listings/writes/edits stop before execution
+if applicable guidance differs from the last prepared request; the next preparation includes that scoped chain.
+Shell commands cannot be reliably parsed for every affected path: declare nested scopes before using `cd` or
+commands targeting a subtree. This is guidance coordination, not a shell sandbox or filesystem-race guarantee.
+
+Files are UTF-8 regular files without symlinks or hardlinks, at most 8 KiB each. Source context is bounded to 32 KiB,
+32 sources, depth 16, four concurrent inspections and 2,048 entries per source directory; omissions and read failures
+are visible, not represented as applied instructions. Loading never executes code or changes grants. Pi journals the
+prepared section and tool results, preserving the bytes used by an earlier request after source edits or restart.
+
 ## Agent tools
 
 | Namespace | Tools                                                                                 | Source                    |
 | --------- | ------------------------------------------------------------------------------------- | ------------------------- |
 | files     | `files_folders`, `files_list`, `files_read`, `files_find`, `files_search`, `files_write`, `files_edit` | `src/core/files.ts` |
 | shell     | `shell_run`                                                                           | `src/core/execution.ts`   |
+| instructions | `instructions_scope` | `src/core/instructions.ts` |
 | memory    | `memory_search`                                                                       | `src/core/memory.ts`      |
 | browser   | `browser_observe`, `browser_act` (only while the owner has handed control over)       | `src/pi/browser-tools.ts` |
 | MCP       | one tool per approved server tool, such as Exa search or Context7 docs                | `src/pi/mcp-tools.ts`     |

@@ -722,6 +722,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           selected: chat.extensions,
           requests: await pal.extensions.pins(chat.conversationId, pal.harness, context),
         });
+      if (action === "instructions" && path.length === 3) {
+        if (method === "PUT") await pal.instructions.configure(chat.conversationId, await readJson(request));
+        if (method === "GET" || method === "PUT")
+          return send(200, await pal.instructions.inspect(chat.conversationId, context));
+      }
       if (action === "context" && path.length === 3 && method === "GET")
         return send(200, await pal.context.inspect(chat, context));
       if (action === "context" && path.length === 4) {

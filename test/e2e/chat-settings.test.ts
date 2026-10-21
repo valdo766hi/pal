@@ -28,7 +28,15 @@ async function setup(width: number) {
   cleanups.push(provider.close);
   const root = await mkdtemp(join(tmpdir(), "pal-chat-settings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const pal = await openPal({ dataRoot: root, installRoot: "/nonexistent", providerOrigin: provider.origin }, context);
+  const pal = await openPal(
+    {
+      dataRoot: root,
+      installRoot: "/nonexistent",
+      providerOrigin: provider.origin,
+      guidanceHome: join(root, "host-home"),
+    },
+    context,
+  );
   cleanups.push(() => pal.close());
   const token = await pal.owner.setup(pal.owner.setupToken, "correct horse battery");
   const server = await startServer({
@@ -898,6 +906,108 @@ describe("review comment drafts", () => {
     expect((await pal.changes.list(project.id, "normal", workspace.id)).comments).toMatchObject([
       { path: "a.txt", body: "Only about a.txt" },
     ]);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("scoped instruction sources", () => {
+  async function openInstructions(page: Page, base: string, id: string, width: number) {
+    await page.goto(`${base}/#/chat/${id}`);
+    if (width < 700) await page.getByRole("button", { name: "Workspace tools" }).click();
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    const panel = page.getByRole("region", { name: "Scoped instruction sources", exact: true });
+    await panel.getByRole("button", { name: "Configure instruction sources" }).waitFor();
+    return panel;
+  }
+
+  it.each([1440, 390])("inspects escaped source bytes and retains stale settings drafts at %s px", async (width) => {
+    const { pal, page, base, project, saved, errors, provider } = await setup(width);
+    const text = 'Fixture guidance <img src=x onerror="alert(1)">';
+    await writeFile(join(project.root, "AGENTS.md"), text);
+    const panel = await openInstructions(page, base, saved.id, width);
+    await panel.getByText("project · . · loaded", { exact: true }).click();
+    expect(await panel.locator("pre").textContent()).toBe(text);
+    expect(await panel.locator("img").count()).toBe(0);
+    await panel.evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await screenshot(page, `instruction-sources-loaded-${width}`);
+    await panel.getByRole("button", { name: "Configure instruction sources" }).click();
+    const field = panel.getByRole("textbox", { name: "Global instructions file on the host" });
+    await field.fill("/fixture/my-unsaved-AGENTS.md");
+    const current = await pal.instructions.settings(project.id);
+    await pal.instructions.configure(saved.conversationId, { ...current, globalFile: null });
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().endsWith(`/api/chats/${saved.id}/instructions`) && res.request().method() === "PUT",
+      ),
+      panel.getByRole("button", { name: "Save instruction sources" }).click(),
+    ]);
+    expect(response.status()).toBe(409);
+    await panel.getByRole("alert").filter({ hasText: "draft is retained" }).waitFor();
+    expect(await field.inputValue()).toBe("/fixture/my-unsaved-AGENTS.md");
+    await panel.getByRole("button", { name: "Refresh sources" }).click();
+    await expect.poll(async () => (await pal.instructions.settings(project.id)).revision).toBe(1);
+    expect(await field.inputValue()).toBe("/fixture/my-unsaved-AGENTS.md");
+    await panel.getByRole("button", { name: "Reload current source settings" }).click();
+    expect(await field.inputValue()).toBe("");
+    await panel.getByRole("checkbox", { name: "Load project and nested AGENTS.md files" }).uncheck();
+    await panel.getByRole("button", { name: "Save instruction sources" }).click();
+    await panel.getByRole("button", { name: "Configure instruction sources" }).waitFor();
+    expect(await pal.instructions.settings(project.id)).toMatchObject({
+      revision: 2,
+      globalFile: null,
+      project: false,
+    });
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+    await panel.evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await screenshot(page, `instruction-sources-${width}`);
+  });
+
+  it("does not apply a late source-settings acknowledgement to another project", async () => {
+    const { pal, page, base, project, saved, errors } = await setup(1440);
+    const otherProject = await pal.projects.create("other-instruction-project", { name: "Other instructions" });
+    const other = await pal.chats.createChat("other-instruction-chat", { projectId: otherProject.id }, context);
+    const panel = await openInstructions(page, base, saved.id, 1440);
+    await panel.getByRole("button", { name: "Configure instruction sources" }).click();
+    await panel
+      .getByRole("textbox", { name: "Global instructions file on the host" })
+      .fill("/fixture/original-project-AGENTS.md");
+    const seen = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const done = Promise.withResolvers<undefined>();
+    let entered = false;
+    await page.route(`**/api/chats/${saved.id}/instructions`, async (route) => {
+      if (route.request().method() !== "PUT") {
+        await route.continue();
+        return;
+      }
+      entered = true;
+      try {
+        const response = await route.fetch();
+        seen.resolve(undefined);
+        await release.promise;
+        await route.fulfill({ response });
+      } finally {
+        done.resolve(undefined);
+      }
+    });
+    cleanups.push(async () => {
+      release.resolve(undefined);
+      if (entered) await done.promise;
+    });
+    await panel.getByRole("button", { name: "Save instruction sources" }).click();
+    await seen.promise;
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    const next = await openInstructions(page, base, other.id, 1440);
+    await next.getByRole("button", { name: "Configure instruction sources" }).click();
+    const field = next.getByRole("textbox", { name: "Global instructions file on the host" });
+    const expected = (await pal.instructions.settings(otherProject.id)).globalFile;
+    expect(await field.inputValue()).toBe(expected);
+    release.resolve(undefined);
+    await done.promise;
+    expect(await field.inputValue()).toBe(expected);
+    expect((await pal.instructions.settings(project.id)).globalFile).toBe("/fixture/original-project-AGENTS.md");
+    expect((await pal.instructions.settings(otherProject.id)).revision).toBe(0);
     expect(errors).toEqual([]);
   });
 });

@@ -61,8 +61,9 @@ refuses an unfinished replay rather than silently resetting its budget.
   Without rtk, or without an equivalent, the command runs unchanged.
 
 Treat workspace files, web pages and tool results as untrusted input. They can contain instructions meant for the
-model (prompt injection), and Pal does not grant them any authority. Keep Ask mode on for chats that read content
-you do not control.
+model (prompt injection), and Pal never grants them tool permissions or policy authority. Loaded AGENTS.md guidance
+is subordinate to core policy and the current user. Its source settings grant bounded document reads, not execution
+or access to the rest of the home directory. Keep Ask mode on for chats that read content you do not control.
 
 ## Internet tools
 

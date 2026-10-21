@@ -21,6 +21,8 @@ export type { GrantedFolder } from "../../../src/core/folders.ts";
 export type { Workspace, WorkspaceMode } from "../../../src/core/workspaces.ts";
 export type { MemoryItem, MemoryInput } from "../../../src/core/memory.ts";
 export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
+import type { InstructionInfo, InstructionSettings } from "../../../src/core/instructions.ts";
+export type { InstructionInfo, InstructionSettings };
 export type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
 export type { CompatibleConfig, KeyCheck, ProviderModel, ProviderView } from "../../../src/pi/providers.ts";
 export type ModelRef = { provider: string; modelId: string };
@@ -125,6 +127,10 @@ export const requestId = (): string =>
   Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 export const api = {
+  instructions: (id: string, signal?: AbortSignal) =>
+    call<InstructionInfo>("GET", `chats/${id}/instructions`, undefined, signal),
+  configureInstructions: (id: string, settings: InstructionSettings) =>
+    call<InstructionInfo>("PUT", `chats/${id}/instructions`, settings),
   releases: () => call<ReleaseView>("GET", "releases"),
   releaseReview: (digest: string, path: string) =>
     call<ReleaseReview>("GET", `releases/${digest}/review?path=${encodeURIComponent(path)}`),

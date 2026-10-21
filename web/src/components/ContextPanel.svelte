@@ -15,6 +15,7 @@
   } from "../lib/api.ts";
   import Icon from "../lib/Icon.svelte";
   import ConfirmRemoval from "./ConfirmRemoval.svelte";
+  import InstructionSources from "./InstructionSources.svelte";
 
   let { project, chat, workspace }: { project: Project; chat: ChatSummary; workspace?: Workspace | null } = $props();
   let info: ContextInfo | undefined = $state.raw();
@@ -271,8 +272,8 @@
     <section aria-label="Project instructions">
       <h3 class="h3">Project instructions</h3>
       <p class="sub">
-        Stored instructions for this chat. Folder contents are untrusted data; Pal does not automatically load
-        instruction files.
+        Core instructions and owner-pinned guidance for this chat. Global, project and scoped AGENTS.md sources are
+        inspected separately below; none of them grants tool permissions.
       </p>
       <details>
         <summary>View stored instructions</summary>
@@ -333,6 +334,7 @@
           : `Context head entry #${info.head}. Original history remains retained.`}
       </p>
     </section>
+    {#key chat.id}<InstructionSources chatId={chat.id} />{/key}
     {#if extensions}
       <section aria-label="Extension pins">
         <h3 class="h3">Extension pins</h3>
