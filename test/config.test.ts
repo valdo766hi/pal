@@ -33,6 +33,12 @@ describe("parseCommand", () => {
     expect(parseCommand(["--help"], linux)).toEqual({ kind: "help" });
     expect(parseCommand(["-v"], linux)).toEqual({ kind: "version" });
     expect(parseCommand(["probe"], linux)).toEqual({ kind: "probe" });
+    expect(parseCommand(["doctor", "--json"], linux)).toEqual({
+      kind: "doctor",
+      dataRoot: "/home/owner/.local/share/pal",
+      json: true,
+    });
+    expect(() => parseCommand(["doctor", "--port", "1"], linux)).toThrow(/does not accept --port/);
   });
 
   it.each([

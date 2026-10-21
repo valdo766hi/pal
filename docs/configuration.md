@@ -5,6 +5,7 @@
 ```
 pal [serve] [--host <address>] [--port <number>] [--data-dir <path>] [--public-origin <url>]
 pal probe
+pal doctor [--data-dir <path>] [--json]
 pal supervise [serve options]
 pal check-release --candidate <absolute worktree path> [--data-dir <path>]
 pal backup --output <absolute path> [--data-dir <path>] [--include-credential-key] [--include-browser-profiles]
@@ -18,6 +19,7 @@ The Nix package installs the same program as `pal`.
 | --------------- | ----------------------------------------------------------------------------------------------- |
 | `serve`         | Runs Pal; this is the default command.                                                          |
 | `probe`         | Checks SQLite FTS5, fff, Code Mode and the terminal on this host, then exits.                   |
+| `doctor`        | Reports build identity, supported schema, core prerequisites and optional capability prerequisites. `--json` emits a support report. |
 | `supervise`     | Runs Pal under the release supervisor (Linux, Nix package). See [Releases](#releases).          |
 | `check-release` | Tests a candidate worktree with the running package's protected recipes. It never approves or activates anything. |
 | `backup`, `restore` | Copy a stopped data directory, verify a backup, or restore it. See [Backup and restore](#backup-and-restore). |
@@ -28,6 +30,14 @@ The Nix package installs the same program as `pal`.
 | `--port`          | TCP port, default `7337`. `0` picks a free port.                                              |
 | `--data-dir`      | Absolute path for Pal's data. The default is `$XDG_DATA_HOME/pal` or `~/.local/share/pal` on Linux and `~/Library/Application Support/pal` on macOS. |
 | `--public-origin` | The exact origin browsers use, such as `https://pal.example` (no path, query or credentials). |
+
+`pal doctor` exits 1 for a broken core and 0 when only optional prerequisites are missing. It checks native modules,
+Git/GNU timeout/Bash versions, and data-directory permissions and writability without creating the directory. A
+running store is reported as busy; its schema is not inspected. A stopped store is checked for a readable Pal schema,
+not fully integrity-checked or migrated. Doctor neither reads credentials nor contacts model providers, starts a
+browser, or activates a release. Browser program checks do not prove namespace, egress or user-scope protection;
+those remain mandatory at browser start. Missing macOS browser/release adapters are reported as unavailable, not
+parity. Review paths and other metadata before sharing the report.
 
 ## Data directory
 

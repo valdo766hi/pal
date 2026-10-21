@@ -39,6 +39,12 @@ async function main(argv: readonly string[]): Promise<number> {
       for (const result of results) process.stdout.write(`${JSON.stringify(result)}\n`);
       return results.every((result) => result.ok) ? 0 : 1;
     }
+    case "doctor": {
+      const { formatDoctor, runDoctor } = await import("./doctor.ts");
+      const report = await runDoctor({ installRoot, dataRoot: command.dataRoot });
+      process.stdout.write(command.json ? `${JSON.stringify(report)}\n` : formatDoctor(report));
+      return report.core === "ok" ? 0 : 1;
+    }
     case "check-release": {
       const { evaluateRelease } = await import("./core/release-check.ts");
       try {

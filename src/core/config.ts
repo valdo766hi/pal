@@ -11,6 +11,7 @@ export type Command =
   | { kind: "help" }
   | { kind: "version" }
   | { kind: "probe" }
+  | { kind: "doctor"; dataRoot: string; json: boolean }
   | { kind: "serve" | "supervise"; config: ServeConfig }
   | { kind: "check-release"; dataRoot: string; candidate: string }
   | {
@@ -38,6 +39,7 @@ export const USAGE = `Usage: pal [serve] [--host <address>] [--port <number>] [-
                  [--public-origin <url>]
        pal supervise [serve options]
        pal probe
+       pal doctor [--data-dir <path>] [--json]
        pal check-release --candidate <worktree> [--data-dir <path>]
        pal backup --output <path> [--data-dir <path>] [--include-credential-key]
                   [--include-browser-profiles]
@@ -47,6 +49,7 @@ Commands:
   serve              Run the Pal server (default)
   supervise          Run the owner-approved Nix release with guarded health/recovery (Linux)
   probe              Check SQLite FTS5, fff, Code Mode and PTY support on this host, then exit
+  doctor             Report this build's identity, core health and unavailable optional capabilities
   check-release      Run protected offline candidate tests/evals; never approve or activate
   backup             Copy a stopped data directory to a new folder with a checksummed manifest
   restore            Verify a backup (--check), or restore it to its original, absent data directory
@@ -74,6 +77,7 @@ const ARGUMENTS = {
   check: { type: "boolean" },
   "include-credential-key": { type: "boolean" },
   "include-browser-profiles": { type: "boolean" },
+  json: { type: "boolean" },
   help: { type: "boolean", short: "h" },
   version: { type: "boolean", short: "v" },
 } as const;
@@ -83,6 +87,7 @@ const OPTIONS: Partial<Record<string, readonly string[]>> = {
   serve: SERVE,
   supervise: SERVE,
   probe: [],
+  doctor: ["data-dir", "json"],
   "check-release": ["candidate", "data-dir"],
   backup: ["data-dir", "output", "include-credential-key", "include-browser-profiles"],
   restore: ["from", "data-dir", "check", "credential-key"],
@@ -110,6 +115,8 @@ export function parseCommand(argv: readonly string[], host: HostFacts): Command 
   const given = Object.keys(values).find((option) => !accepted.includes(option));
   if (given !== undefined) throw new UsageError(`'${name}' does not accept --${given}`);
   if (name === "probe") return { kind: "probe" };
+  if (name === "doctor")
+    return { kind: "doctor", dataRoot: resolveDataRoot(values["data-dir"], host), json: values.json === true };
   if (name === "backup") return parseBackup(values, host);
   if (name === "restore") return parseRestore(values, host);
   if (name === "check-release") {

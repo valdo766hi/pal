@@ -27,6 +27,23 @@ runCommand "pal-smoke-${pal.version}"
     JS
     pal probe | tee probe.jsonl
     test "$(grep -c '"ok":true' probe.jsonl)" -eq 5
+    pal doctor --data-dir "$TMPDIR/doctor/new/data" --json > doctor.json
+    test ! -e "$TMPDIR/doctor"
+    ${nodejs_24}/bin/node --input-type=module <<'JS'
+    import assert from 'node:assert/strict';
+    import { createHash } from 'node:crypto';
+    import { readFile } from 'node:fs/promises';
+    const report = JSON.parse(await readFile('doctor.json', 'utf8'));
+    const manifest = JSON.parse(await readFile('${pal}/lib/pal/release.json', 'utf8'));
+    assert.equal(report.format, 1);
+    assert.equal(report.core, 'ok');
+    assert.equal(report.identity.version, '${pal.version}');
+    assert.equal(report.identity.package, '${pal}');
+    assert.equal(report.identity.release, createHash('sha256').update('${pal}').digest('hex'));
+    assert.equal(report.identity.supportedSchema, manifest.schema);
+    for (const name of ['sqlite', 'codemode', 'git', 'timeout', 'bash'])
+      assert(report.checks.some(check => check.check === name && check.kind === 'core' && check.ok));
+    JS
 
     pal --port 0 --data-dir "$TMPDIR/data" > server.log 2>&1 &
     server=$!
@@ -71,5 +88,5 @@ runCommand "pal-smoke-${pal.version}"
       ${pal}/lib/pal/dist/main.js "$TMPDIR/supervised"
 
     mkdir -p $out
-    cp probe.jsonl health.json backup.json restore-check.json restored.json $out/
+    cp probe.jsonl doctor.json health.json backup.json restore-check.json restored.json $out/
   ''
