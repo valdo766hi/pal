@@ -153,6 +153,10 @@ repeat before attributing a difference to code. No regression budget or optimiza
 runner alone. Browser/PTY/search activation and cached/live MCP measurements remain required for #14; do not change
 isolation without profiling and correctness regressions.
 
+Optional capabilities start nothing until the owner uses them: `test/idle-capabilities.test.ts` checks that
+startup and ordinary chat setup create no worker threads, child processes, terminal addon, browser or search index,
+then shows the same observations detect a search index and terminal once used.
+
 ### Long-chat transcript measurements
 
 ```sh
