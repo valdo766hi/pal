@@ -87,6 +87,9 @@ for chats that read content you do not control.
 
 ## Browser
 
+The project browser currently requires Linux. Native macOS DOM-policy fixtures do not provide a production
+macOS browser sandbox.
+
 - **Sandbox.** Each project browser runs Chromium with its own sandbox inside bubblewrap, with every namespace
   unshared. It sees only the read-only Nix store, a private `/tmp` and its profile, and has no network at all.
 - **Egress.** Its only way out is a broker on the host that resolves each destination itself and connects only to
@@ -98,7 +101,20 @@ for chats that read content you do not control.
 - **Agent handoff.**
   - The agent uses the browser only after you hand control over, and you can take it back at any time.
   - It sees bounded page text, not your frames, and acts only on elements it has just inspected.
-  - It cannot type into username, password or one-time-code fields; sign-ins are yours.
+  - Every action still needs exact owner approval, including in Full access mode.
+  - Native password/email inputs and known credential cues (autocomplete, names, labels and placeholders for
+    usernames, passwords, PIN/OTP codes, API keys, tokens and payment-card fields) require owner control. This also
+    covers hidden/offscreen declarations and multi-step email/OTP forms.
+  - Editable/custom textbox widgets, frames/embedded documents, open shadow roots, custom elements and oversized
+    DOMs or field metadata conservatively require the owner. Their page text, title and targets are withheld.
+  - Native input, textarea and select values are not read for observations. Public text fields remain available
+    through freshly inspected targets; privacy and target metadata are rechecked before a DOM action.
+
+These are bounded, English-cue/DOM heuristics, **not universal credential recognition or data-loss prevention**.
+Canvas controls, closed shadow roots on ordinary elements, unusual/localized semantics and secrets copied into
+ordinary page text may not be recognized. Closed/inaccessible widget interiors are not inspected or offered as
+input targets. Keep sensitive pages under owner control; do not hand them to the agent based only on a detection
+result. Privacy heuristics are separate from the enforced network/process isolation above.
 
 ## Not covered
 

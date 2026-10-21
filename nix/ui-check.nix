@@ -29,7 +29,8 @@ writeShellApplication {
     export FONTCONFIG_FILE=${ui.fonts}
     export PAL_E2E_SCREENSHOTS="$output/screenshots"
     status=0
-    node node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts test/e2e/chat-settings.test.ts \
+    node node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts \
+      test/e2e/chat-settings.test.ts test/e2e/browser-page.test.ts --maxWorkers 1 \
       --reporter=default --reporter=json --outputFile="$output/results.json" || status=$?
     node --input-type=module - "$output" <<'JS'
     import assert from "node:assert/strict";

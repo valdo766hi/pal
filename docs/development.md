@@ -98,8 +98,9 @@ No host policy is disabled. Nix may reuse an identical derivation; a successful 
 necessarily a fresh runtime execution. Both full and portable checks repeat the PTY suite with readline-enabled
 Bash, testing bracketed paste on/off without assuming a newline immediately precedes command output.
 
-The macOS job also runs an independent chat UI fixture (loading, failure/retry, navigation, cross-provider
-configuration conflicts and bounded code rendering). Its artifact is built by Nix, then run on the native host: Chromium's
+The macOS job also runs independent chat UI and browser DOM-policy fixtures (loading, failure/retry, navigation,
+cross-provider conflicts, bounded code rendering, sensitive fields and ambiguous widgets). One test file runs at a
+time to retain the single-browser resource bound. Its artifact is built by Nix, then run on the native host: Chromium's
 macOS sandbox cannot nest inside Nix's build sandbox. Chromium's own sandbox stays enabled; production browser
 confinement is not replaced by this fixture. The same runner can be exercised on a capable Linux host:
 
@@ -109,8 +110,9 @@ nix build .#ui-check
 ```
 
 It uses a private temporary copy, local fake providers and isolated Pal data. The results directory contains counts
-and fixture screenshots; zero tests, skips and todos fail the gate. This is a rendered chat subset, not a full
-macOS browser-runtime, onboarding or release-security gate.
+and fixture screenshots; zero tests, skips and todos fail the gate. The DOM-policy suite uses only controlled
+pages; it proves neither production browser confinement nor real-site credential recognition. These are rendered
+chat/DOM subsets, not a full macOS browser-runtime, onboarding or release-security gate.
 
 This is an initial CI foundation for [#15](https://github.com/valdo766hi/pal/issues/15), not full platform
 acceptance. Build logs distinguish prerequisite errors from assertions; a failure before a suite runs
@@ -173,7 +175,7 @@ platform-specific isolation, locks and lifecycle belong behind narrow adapters.
 
 | Surface | Linux implementation / test entry point | macOS gap or required native evidence |
 | --- | --- | --- |
-| Owner, providers, chat and responsive UI | `owner`, `providers`, `api`; `test/e2e/app.test.ts` | Native `ui-check` covers saved settings and code rendering only; same full onboarding, revocation and immutable-submission flows still required |
+| Owner, providers, chat and responsive UI | `owner`, `providers`, `api`; `test/e2e/app.test.ts` | Native `ui-check` covers isolated chat regressions and DOM policy; full onboarding, revocation and immutable-submission flows still required |
 | Projects, uploads, worktrees and review | `projects`, `uploads`, `workspaces`, `changes`; corresponding tests | Case/Unicode aliases, symlinks, permissions, long paths and revision rules |
 | Durable runs, Code Mode, memory and search | Pi/SQLite/QuickJS/fff; recovery, context, search and probe tests | Native locks/WAL/fullfsync, watcher changes/gaps and crash recovery |
 | Shell and human terminal | `execution`, `terminals`; process/PTY tests | Native descendant/deadline cleanup, Unicode, resize and reconnect |

@@ -15,7 +15,9 @@ import { WebSocket } from "ws";
 import { createApi } from "../../src/core/api.ts";
 import { openPal, type Pal } from "../../src/core/app.ts";
 import { type BrowserRuntime, browserRuntime, sandboxArgs } from "../../src/core/browser.ts";
+import { BrowserOwnerNeeded, BrowserPage } from "../../src/core/browser-page.ts";
 import { startServer } from "../../src/core/server.ts";
+import { privateBrowserPages } from "../fixtures/private-browser-pages.ts";
 
 const packaged = browserRuntime();
 // Nix builders lack a user manager. The separate host run exercises the same tests with real resource scopes.
@@ -52,14 +54,20 @@ beforeAll(async () => {
           '<input name="query" value="input-canary"><textarea name="note">textarea-canary</textarea>' +
           '<script>String.prototype.slice = () => "prototype-canary"; fetch("/agent-ready")</script>',
       );
-    else if (path.startsWith("/private-page"))
+    else if (path === "/embedded") response.end('<input type="password" value="protected-canary">');
+    else if (path.startsWith("/private-ready")) response.end("ready");
+    else if (path.startsWith("/private-page")) {
+      const id = URL.parse(path, "http://fixture.invalid")?.searchParams.get("case");
+      const fixture = privateBrowserPages.find((fixture) => fixture.id === id);
       response.end(
         "<title>private-title-canary</title><p>private-text-canary</p>" +
-          (path.endsWith("otp")
-            ? '<input autocomplete="one-time-code" value="otp-canary">'
-            : '<input type="password" value="password-canary">'),
+          (fixture?.html.replaceAll("https://embedded.invalid/login", `http://localhost:${site}/embedded`) ??
+            (path.endsWith("otp")
+              ? '<input autocomplete="one-time-code" value="otp-canary">'
+              : '<input type="password" value="password-canary">')) +
+          `<script>addEventListener("load",()=>fetch(${JSON.stringify(`/private-ready${path.slice("/private-page".length)}`)}))</script>`,
       );
-    else
+    } else
       response.end(
         `<title>Fixture ${path}</title><style>body{margin:0}</style>` +
           `<button style="position:absolute;left:0;top:0;width:200px;height:100px" onclick="location='/clicked'">go</button>` +
@@ -200,6 +208,15 @@ async function agentFixture() {
         Boolean,
         "parsed fixture",
       );
+    if (path.startsWith("/private-page"))
+      await until(
+        () =>
+          requests
+            .slice(before)
+            .some((request) => request.path === `/private-ready${path.slice("/private-page".length)}`),
+        Boolean,
+        "parsed private fixture",
+      );
     return url;
   };
   const handoff = async () => {
@@ -270,7 +287,11 @@ describe("agent browser", () => {
 
   it("never exposes login content, even when handed to the agent", async () => {
     const { pal, chat, client, visit, handoff } = await agentFixture();
-    for (const path of ["/private-page", "/private-page?otp"]) {
+    for (const path of [
+      "/private-page",
+      "/private-page?otp",
+      ...privateBrowserPages.map(({ id }) => `/private-page?case=${id}`),
+    ]) {
       await visit(path);
       await handoff();
       let failure: unknown;
@@ -285,6 +306,32 @@ describe("agent browser", () => {
       expect(pal.browsers.allows(chat.conversationId)).toBe(false);
       client.send({ type: "take" });
       await until(client.state, (state) => state?.control === true, "owner retakes");
+    }
+  });
+
+  it("revokes the agent lease when the last page-action guard requires owner control", async () => {
+    const { pal, chat, client, handoff } = await agentFixture();
+    await handoff();
+    const observed = await pal.browsers.observe(chat.conversationId);
+    const target = observed.targets.find((target) => target.label === "Public action");
+    if (target === undefined) throw new Error("missing public target");
+    const before = requests.length;
+    const dispatch = vi.spyOn(BrowserPage.prototype, "act").mockRejectedValueOnce(new BrowserOwnerNeeded());
+    try {
+      await expect(
+        pal.browsers.act(chat.conversationId, {
+          session: observed.session,
+          epoch: observed.epoch,
+          observation: observed.observation,
+          action: { type: "click", target: target.id },
+        }),
+      ).rejects.toMatchObject({ code: "browser_owner_needed" });
+      await until(client.state, (state) => state?.mode === "private-login" && !state.control, "private handback");
+      expect(pal.browsers.allows(chat.conversationId)).toBe(false);
+      expect(requests.slice(before).some((request) => request.path === "/agent-clicked")).toBe(false);
+      await expect(pal.browsers.observe(chat.conversationId)).rejects.toMatchObject({ code: "browser_not_granted" });
+    } finally {
+      dispatch.mockRestore();
     }
   });
 
