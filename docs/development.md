@@ -162,7 +162,8 @@ nearest-rank p50/p95, and web-bundle, browser and host identity. A sample fails 
 live text render, the draft, focus and scroll position are unchanged, no provider request is made and the page
 reports no errors. Only the web bundle is selected: the server, fixture and browser come from the runner's tree,
 so compare bundles that speak the same API. These are not network, model or page-load latency results. CI runs
-the same pre-extraction baseline and candidate bundles on each native host.
+the same pre-extraction baseline and candidate bundles on macOS and on Ubuntu 22.04; hosted Ubuntu 24.04 disallows
+the user namespaces Chromium's sandbox needs, and the runner never launches Chromium without its sandbox.
 
 ### Platform acceptance matrix
 
