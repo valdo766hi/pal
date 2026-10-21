@@ -188,6 +188,34 @@ The current catalog is compiled into Pal, not a public plug-in SDK or a download
 servers are today's way to add tools without rebuilding Pal. Extensions never bypass host policy, and in-process
 code requires full application-code trust.
 
+`src/capabilities/contract.ts` is the first internal compiled-capability adapter. The kernel retains authentication,
+one database owner, credentials, grants, approvals, native task/replay policy and release verification. A capability
+supplies a bounded manifest and a factory, not registry access or replacement kernel hooks. Its manifest declares
+identity/version, compatible capability-API range, Code Mode namespace, tool names/replay/output bounds, permissions,
+named precompiled panels and the existing new-chat selection setting. Factories may dispose ephemeral resources after
+durable work stops; failed opens must release their own unfinished acquisitions. Previously opened contributions are
+disposed in reverse order, once, including partial-startup failures.
+
+Memory is composed through `src/capabilities/memory.ts`; `src/capabilities/compiled.ts` is the build-time selection.
+Removing its entry removes its service, native tools and namespace, not saved data or core Context/guidance inspection.
+Unavailable saved defaults remain visible for explicit removal. Existing chats never silently adopt another capability
+version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid
+new-chat defaults are refused before recording provisioning. Existing creation/admission receipts still deduplicate;
+changing another default never silently upgrades a version pin. Unfinished work also blocks startup under a changed
+release or compiled catalog. Request inspection retains each used implementation identity;
+historical records without those identities stay historical, without invented digests.
+
+The implementation digest binds the manifest to the verified **whole Pal release**, not an independently upgradable
+package. `project.read` is this first adapter's only declared permission; the kernel checks live folder authority around
+every native tool execution, requires Code Mode-only callers and verifies replay declarations. Trusted source can still
+use Node APIs: declarations are not a sandbox or proof of read-only behavior. Effectful adapters require further reviewed
+kernel integration, not a permission string supplied by a skill or manifest.
+
+Copy `src/capabilities/example.ts` for a tiny opt-in bounded echo tool. Add the reviewed definition to the compiled list
+and rebuild; no runtime directory scan or package install occurs. Its new-chat switch and manifest/identity appear in
+Settings; Context inspects request pins. The optional panel declaration references an already compiled named panel,
+not executable or downloaded UI. `test/capabilities.test.ts` exercises the contract and composition boundaries.
+
 - `src/core/extensions.ts`: built-in contributions (files, shell, memory, browser, compact) can be switched for new
   chats. Each chat freezes its selection and the implementation versions it ran with. Compact output is opt-in: in
   a chat that selected it, `shell_run` asks `rtk rewrite` for an equivalent before recording its intent, runs that

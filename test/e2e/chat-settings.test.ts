@@ -8,6 +8,8 @@ import { type Browser, chromium, type Page } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
+import type { CompiledCapability } from "../../src/capabilities/contract.ts";
+import { exampleCapability } from "../../src/capabilities/example.ts";
 import { startServer } from "../../src/core/server.ts";
 import { runGit } from "../../src/core/git.ts";
 import { GOOD_KEY, startProviderFixture } from "../fixtures/provider-server.ts";
@@ -23,7 +25,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-async function setup(width: number) {
+async function setup(width: number, definitions?: readonly CompiledCapability[]) {
   const provider = await startProviderFixture();
   cleanups.push(provider.close);
   const root = await mkdtemp(join(tmpdir(), "pal-chat-settings-"));
@@ -36,6 +38,7 @@ async function setup(width: number) {
       guidanceHome: join(root, "host-home"),
     },
     context,
+    definitions,
   );
   cleanups.push(() => pal.close());
   const token = await pal.owner.setup(pal.owner.setupToken, "correct horse battery");
@@ -1010,6 +1013,89 @@ describe("scoped instruction sources", () => {
     expect(await field.inputValue()).toBe(expected);
     expect((await pal.instructions.settings(project.id)).globalFile).toBe("/fixture/original-project-AGENTS.md");
     expect((await pal.instructions.settings(otherProject.id)).revision).toBe(0);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("compiled capability composition", () => {
+  it.each([1440, 390])("keeps core Context usable without the compiled memory package at %s px", async (width) => {
+    const { page, base, saved, errors, provider } = await setup(width, []);
+    const memoryRequests: string[] = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.includes("/memory")) memoryRequests.push(request.url());
+    });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+    const response = page.waitForResponse(`${base}/api/chats/${saved.id}/context`);
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    expect((await response).status()).toBe(200);
+    expect(memoryRequests).toEqual([]);
+    await page.getByRole("button", { name: "Configure instruction sources", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Choose skills for this chat", exact: true }).waitFor();
+    expect(await page.getByRole("region", { name: "Curated memory", exact: true }).count()).toBe(0);
+    expect(await page.getByRole("button", { name: "Add memory", exact: true }).count()).toBe(0);
+    expect(memoryRequests).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+    await screenshot(page, `core-context-without-memory-${width}`);
+  });
+
+  it("shows the compiled template's bounded tool, compatibility, identity and new-chat setting", async () => {
+    const { pal, page, base, errors } = await setup(390, [exampleCapability]);
+    await page.goto(`${base}/#/settings/extensions`);
+    const row = page.locator(".extension").filter({ has: page.getByText("Example echo", { exact: true }) });
+    await row.getByRole("switch", { name: "Enable Example echo for new chats", exact: true }).waitFor();
+    expect(await row.innerText()).toContain("Core API 1–1");
+    expect(await row.innerText()).toContain("example_echo · safe · project.read");
+    expect(await row.innerText()).toContain("Contributes: Context");
+    const item = (await pal.extensions.view()).catalog.find((item) => item.id === "example");
+    if (item === undefined) throw new Error("missing compiled template");
+    expect(await row.innerText()).toContain(item.implementation);
+    expect(await row.getByRole("switch").isChecked()).toBe(false);
+    await row.getByRole("switch").check();
+    await expect
+      .poll(async () => (await pal.extensions.view()).selected.some((item) => item.id === "example"))
+      .toBe(true);
+    expect(errors).toEqual([]);
+    await screenshot(page, "compiled-capability-template-390");
+  });
+
+  it("does not silently upgrade another capability default while toggling a different contribution", async () => {
+    const second = { ...exampleCapability, manifest: { ...exampleCapability.manifest, version: 2 } };
+    const { pal, page, base, errors, provider } = await setup(390, [second]);
+    await pal.store.database.run(
+      "INSERT INTO pal_settings (key, value) VALUES ('extensions:selection', ?)",
+      JSON.stringify({
+        selected: [
+          { id: "files", version: 1 },
+          { id: "example", version: 1 },
+        ],
+      }),
+    );
+    await page.goto(`${base}/#/settings/extensions`);
+    const files = page.getByRole("switch", { name: "Enable Files and changes for new chats", exact: true });
+    await files.waitFor();
+    const response = page.waitForResponse(
+      (res) => res.url().endsWith("/api/extensions") && res.request().method() === "PUT",
+    );
+    await files.uncheck();
+    const result = await response;
+    expect((await pal.extensions.view()).selected.find((item) => item.id === "example")).toEqual({
+      id: "example",
+      version: 1,
+    });
+    expect(result.status()).toBe(409);
+    const row = page.locator(".extension").filter({ has: page.getByText("Example echo", { exact: true }) });
+    expect(await row.innerText()).toContain("Default pins v1, unavailable");
+    await row.getByRole("switch").uncheck();
+    await expect
+      .poll(async () => (await pal.extensions.view()).selected.some((item) => item.id === "example"))
+      .toBe(false);
+    await row.getByRole("switch").check();
+    await expect
+      .poll(async () => (await pal.extensions.view()).selected.find((item) => item.id === "example")?.version)
+      .toBe(2);
+    expect(provider.requests).toEqual([]);
     expect(errors).toEqual([]);
   });
 });

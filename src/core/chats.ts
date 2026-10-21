@@ -104,6 +104,8 @@ export type ChatServiceOptions = {
   ) => Promise<AgentChange | undefined>;
   /** Frozen with the chat record, before Pi conversation creation, so recovery cannot adopt newer defaults. */
   readonly extensions?: () => Promise<string>;
+  /** Validate new inputs without changing already admitted receipts or reconciliation. */
+  readonly checkExtensions?: (selected: ExtensionScope["selected"]) => void;
   /** Device uploads a message may attach: checked before admission, turned into model content at submission. */
   readonly attachments?: {
     check(
@@ -258,6 +260,10 @@ export class ChatService {
       throw new ProjectUnavailable(`project ${projectId} does not exist or is not ready`);
     }
     const extensions = await this.#options.extensions?.();
+    if (extensions !== undefined && this.#options.checkExtensions !== undefined) {
+      const existing = await this.#guard((db) => db.get("SELECT id FROM pal_chats WHERE request_id = ?", key));
+      if (existing === undefined) this.#options.checkExtensions(selectedExtensions(extensions));
+    }
     const storedIntent =
       extensions === undefined ? intent : JSON.stringify({ ...chatIntent(body as ChatBody), extensions });
     const row = await this.#guard((db) =>
@@ -363,6 +369,7 @@ export class ChatService {
     if (previous !== undefined && previous.digest !== digest)
       throw new RequestConflict(`request ${key} was admitted with a different body`);
     if (previous?.submission_id != null) return { chatId, requestId: key, submissionId: previous.submission_id };
+    if (previous === undefined) this.#options.checkExtensions?.(chat.extensions);
     const expected = (body as InputBody).configuration;
     if (expected !== undefined) {
       const conversation = await this.#options.harness.conversation(chat.conversationId, context);

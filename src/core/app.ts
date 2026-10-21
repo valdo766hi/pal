@@ -30,7 +30,10 @@ import { ProjectSkills, SKILLS_NAMESPACE } from "./skills.ts";
 import { Changes } from "./changes.ts";
 import { FILES_NAMESPACE, fileTools, projectFiles } from "./files.ts";
 import { FolderGrants } from "./folders.ts";
-import { MEMORY_NAMESPACE, ProjectMemory } from "./memory.ts";
+import type { ProjectMemory } from "./memory.ts";
+import { COMPILED_CAPABILITIES } from "../capabilities/compiled.ts";
+import { CompiledCapabilities, type CompiledCapability } from "../capabilities/contract.ts";
+import { HttpError } from "./http.ts";
 import {
   COMPACT_EXTENSION,
   compactOutput,
@@ -74,6 +77,7 @@ export type Pal = {
   readonly folders: FolderGrants;
   readonly workspaces: Workspaces;
   readonly memory: ProjectMemory;
+  readonly capabilities: CompiledCapabilities;
   readonly context: ChatContext;
   readonly instructions: ProjectInstructions;
   readonly skills: ProjectSkills;
@@ -116,7 +120,11 @@ export type Settings = {
 // Subscription mode never reads the process environment, so an ambient OPENAI_API_KEY cannot be picked up.
 const NO_AMBIENT_AUTH = { env: async () => undefined, fileExists: async () => false };
 
-export async function openPal(options: PalOptions, context: Context): Promise<Pal> {
+export async function openPal(
+  options: PalOptions,
+  context: Context,
+  definitions: readonly CompiledCapability[] = COMPILED_CAPABILITIES,
+): Promise<Pal> {
   const store = await openStore(options.dataRoot);
   options = { ...options, dataRoot: dirname(store.path) };
   const commands = new HostCommands();
@@ -133,20 +141,37 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
   let browsers: ProjectBrowsers | undefined;
   let workspaces: Workspaces | undefined;
   let approvals: CommandApprovals | undefined;
+  let capabilities: CompiledCapabilities | undefined;
   // The Harness, once open, owns the storage and closes it; scripts stop before their sandbox and connections do.
   let closing: Promise<void> | undefined;
   const close = () => {
     if (status === "ready" || status === "starting") status = "closing";
     return (closing ??= (async () => {
-      try {
-        await workspaces?.close();
-        approvals?.close();
-        await (harness === undefined ? store.close() : harness.close(context));
-      } finally {
-        search.close();
-        await Promise.all([commands.close(), terminals?.close(), browsers?.close()]);
-        await Promise.all([sandbox?.close(), mcp?.close()]);
+      const failures: unknown[] = [];
+      for (const stop of [
+        () => workspaces?.close(),
+        () => approvals?.close(),
+        () => (harness === undefined ? store.close() : harness.close(context)),
+      ]) {
+        try {
+          await stop();
+        } catch (error) {
+          failures.push(error);
+        }
       }
+      const cleanup = await Promise.allSettled(
+        [
+          () => search.close(),
+          () => commands.close(),
+          () => terminals?.close(),
+          () => browsers?.close(),
+          () => sandbox?.close(),
+          () => mcp?.close(),
+          () => capabilities?.close(),
+        ].map((stop) => Promise.resolve().then(stop)),
+      );
+      for (const result of cleanup) if (result.status === "rejected") failures.push(result.reason);
+      if (failures.length > 0) throw new AggregateError(failures, "Pal resource cleanup failed");
     })());
   };
   try {
@@ -160,6 +185,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
         return harness;
       },
       await releaseIdentity(options.installRoot, options.dataRoot),
+      definitions,
     );
     const credentials = new SqliteCredentialStore(
       database,
@@ -192,7 +218,18 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
       openedWorkspaces,
     );
 
-    const memory = new ProjectMemory(database, folders, store.storage, [options.dataRoot]);
+    const openedCapabilities = await CompiledCapabilities.open(definitions, {
+      database,
+      storage: store.storage,
+      folders,
+      deny: [options.dataRoot],
+      project: async (conversation) => {
+        const workspace = await openedWorkspaces.forConversation(conversation);
+        return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
+      },
+      authorize: (api, ctx) => folders.forTool(api, ctx),
+    });
+    capabilities = openedCapabilities;
     const guidanceFiles = await GuidanceFiles.open({
       deny: [options.dataRoot, options.installRoot, "/nix/store"],
       privateFiles: [store.path, `${store.path}-wal`, `${store.path}-shm`, join(options.dataRoot, "credentials.key")],
@@ -240,7 +277,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
         return (
           name.startsWith(FILES_NAMESPACE.prefix) ||
           name === "shell_run" ||
-          name === "memory_search" ||
+          openedCapabilities.allows(name) ||
           name === "instructions_scope" ||
           name === "skills_search" ||
           name === "skills_read" ||
@@ -251,7 +288,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
       namespaces: [
         FILES_NAMESPACE,
         SHELL_NAMESPACE,
-        MEMORY_NAMESPACE,
+        ...openedCapabilities.namespaces,
         BROWSER_NAMESPACE,
         INSTRUCTIONS_NAMESPACE,
         SKILLS_NAMESPACE,
@@ -298,12 +335,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
     await commandApprovals.expire();
     // After the grant policy, so a refused call is never offered for approval.
     registry.install(commandApprovals.extension);
-    registry.install(
-      memory.tools(async (conversation) => {
-        const workspace = await openedWorkspaces.forConversation(conversation);
-        return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
-      }),
-    );
+    openedCapabilities.install(registry);
     const connections = await McpManager.open({
       database: store.database,
       credentials,
@@ -314,7 +346,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
         codemode.withNamespaces([
           FILES_NAMESPACE,
           SHELL_NAMESPACE,
-          MEMORY_NAMESPACE,
+          ...openedCapabilities.namespaces,
           BROWSER_NAMESPACE,
           INSTRUCTIONS_NAMESPACE,
           SKILLS_NAMESPACE,
@@ -410,6 +442,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
         feedback: changes,
         folderScope: (projectId, chatId) => folders.capture(projectId, chatId),
         extensions: () => extensions.capture(),
+        checkExtensions: (selected) => extensions.check(selected),
         agentFor: async (projectId, chatId, mode = "local", scope) => {
           const project = await openedProjects.get(projectId);
           if (project?.state !== "ready") return undefined;
@@ -431,7 +464,12 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
       owner,
       projects: openedProjects,
       folders,
-      memory,
+      get memory() {
+        if (openedCapabilities.memory === undefined)
+          throw new HttpError(503, "capability_unavailable", "Memory is not included in this Pal build.");
+        return openedCapabilities.memory;
+      },
+      capabilities: openedCapabilities,
       context: chatContext,
       instructions,
       skills,
