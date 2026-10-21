@@ -257,6 +257,31 @@ describe("Sign in with ChatGPT", () => {
     await expect(connection.signIn(owner().interaction)).rejects.toMatchObject({ code: "port_in_use" });
   });
 
+  it("never saves a sign-in cancelled, signed out or forgotten while its ID token is verified", async () => {
+    for (const interrupt of ["cancel", "sign-out", "forget"] as const) {
+      // A fresh fixture per case: verified keys are cached by their JWKS address.
+      const { fixture, connection } = await setup();
+      const gate = Promise.withResolvers<undefined>();
+      fixture.behavior.jwks = gate.promise;
+      const attempt = owner();
+      const result = connection.signIn(attempt.interaction);
+      result.catch(() => {});
+      await browse(await attempt.authUrl);
+      await expect.poll(() => fixture.jwksRequests()).toBe(1);
+      if (interrupt === "cancel") attempt.cancel();
+      else if (interrupt === "sign-out") await connection.signOut();
+      else await connection.forget();
+      gate.resolve(undefined);
+      await expect(result, interrupt).rejects.toMatchObject({ code: "cancelled" });
+      expect(await connection.account(), interrupt).toBeUndefined();
+
+      // A sign-in started afterwards is not fenced by the earlier one.
+      delete fixture.behavior.jwks;
+      await expect((await signIn(connection)).result, interrupt).resolves.toMatchObject({ accountId: "user-1" });
+      expect(await connection.account(), interrupt).toMatchObject({ accountId: "user-1" });
+    }
+  });
+
   it("refreshes once under the store lock, rotating the refresh token", async () => {
     const { fixture, credentials, connection, models } = await setup();
     await (

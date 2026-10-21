@@ -19,6 +19,8 @@ export type FixtureBehavior = {
   script: string;
   /** The assistant's text answer. */
   reply: string;
+  /** While set, JWKS responses wait for it, which holds ID-token verification mid-sign-in. */
+  jwks?: Promise<unknown>;
 };
 
 async function body(request: IncomingMessage): Promise<string> {
@@ -49,6 +51,7 @@ export async function startOpenAIFixture() {
   const authorizations: URLSearchParams[] = [];
   const tokenRequests: URLSearchParams[] = [];
   const apiRequests: { path: string; authorization: string | undefined; body: Record<string, unknown> }[] = [];
+  let jwksRequests = 0;
   const codes = new Map<string, { challenge: string; redirectUri: string; clientId: string; nonce: string }>();
   const liveRefreshTokens = new Set<string>();
   let counter = 0;
@@ -131,6 +134,8 @@ export async function startOpenAIFixture() {
       if (!liveRefreshTokens.delete(refresh)) return json(400, { error: "refresh_token_reused" });
       return json(200, await tokens(form.get("client_id") ?? "", undefined));
     } else if (url.pathname === "/jwks") {
+      jwksRequests++;
+      await behavior.jwks;
       json(200, { keys: [jwk] });
     } else if (url.pathname.startsWith("/v1/")) {
       const text = request.method === "POST" ? await body(request) : "";
@@ -238,6 +243,7 @@ export async function startOpenAIFixture() {
     authorizations,
     tokenRequests,
     apiRequests,
+    jwksRequests: () => jwksRequests,
     close: () => {
       server.closeAllConnections();
       return new Promise<void>((resolve) => server.close(() => resolve()));
