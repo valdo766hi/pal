@@ -18,6 +18,7 @@ import { startServer } from "../src/core/server.ts";
 import { browse, startOpenAIFixture } from "./fixtures/openai-server.ts";
 import { fakeReleaseControl } from "./fixtures/releases.ts";
 import type { ReleaseRpc } from "../src/core/release-rpc.ts";
+import { MIGRATIONS } from "../src/storage/migrations.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -1189,5 +1190,90 @@ describe("API", () => {
     cleanups.push(() => reopened.close());
     expect(await reopened.uploads.get(pending.id)).toBeUndefined();
     expect(await reopened.uploads.get(admitted.id)).toMatchObject({ state: "ready" });
+  });
+
+  it("exports owner-only diagnostics that link inputs and effect outcomes without secrets or contents", async () => {
+    const { api, pal, base, cookie } = await signedIn();
+    const key = "key-for-fixture-42";
+    await pal.providers.setKey("openrouter", key);
+    const project = await pal.projects.create("diagnostics-project", { name: "Diagnostics" });
+    const chat = await pal.chats.createChat("diagnostics-chat", { projectId: project.id }, context);
+    await fakeChatModel(pal, chat.id);
+    await pal.chats.submit(chat.id, "diagnostics-input", { text: "SECRET_CHAT_TEXT" }, context);
+    await pal.harness.waitForIdle(context);
+    const conversation = await pal.harness.conversation(chat.conversationId, context);
+    const shell = { command: "echo SECRET_COMMAND", cwd: project.root };
+    const failures = [
+      "Incorrect API key provided: sk-proj-abcdef1234567890; Bearer abc.def; request req_42",
+      `Incorrect API key provided: ${key}`,
+      `Rate limit exceeded for SECRET_CHAT_TEXT in ${project.root}`,
+      "Maximum context length exceeded: SECRET_FILE_CONTENT",
+      "Request failed: https://private.example/?token=small-secret; correct horse battery",
+    ];
+    for (const entry of [
+      { kind: "pal.shell", data: { shell: { ...shell, callId: "lost-call", status: "started" } } },
+      { kind: "pal.shell", data: { shell: { ...shell, callId: "done-call", status: "started" } } },
+      {
+        kind: "pal.shell",
+        data: { shell: { ...shell, callId: "done-call", status: "finished", output: "SECRET_OUTPUT", exitCode: 3 } },
+      },
+      ...failures.map((errorMessage) => ({
+        kind: "pi.assistant",
+        model: [fauxAssistantMessage("", { stopReason: "error", errorMessage })],
+      })),
+    ])
+      await conversation?.submit({ type: "write", entry }, context);
+    await pal.store.database.run(
+      "UPDATE pal_workspaces SET state = 'failed', error = ? WHERE chat_id = ?",
+      `Workspace failure in ${project.root}: SECRET_FILE_CONTENT`,
+      chat.id,
+    );
+
+    expect((await fetch(`${base}/api/chats/${chat.id}/diagnostics`)).status).toBe(401);
+    expect((await fetch(`${base}/api/diagnostics`)).status).toBe(401);
+    const { status, body } = await api("GET", `chats/${chat.id}/diagnostics`);
+    expect(status).toBe(200);
+    expect(body.installation).toMatchObject({
+      format: 1,
+      pal: { status: "ready", schema: MIGRATIONS.at(-1)?.version },
+      providers: expect.arrayContaining([{ id: "openrouter", enabled: false, hasKey: true }]),
+      chatgpt: { connected: false },
+      unfinished: { tasks: 0, approvals: 0 },
+    });
+    expect(body.chat).toMatchObject({
+      chat: chat.id,
+      workspace: { mode: "local", state: "failed" },
+      running: false,
+      inputs: [{ requestId: "diagnostics-input", state: "admitted", submissionId: expect.any(Number) }],
+      commands: [{ callId: "done-call", exitCode: 3 }],
+      unknownEffects: [{ callId: "lost-call" }],
+      modelFailures: [
+        { cause: "credentials-rejected" },
+        { cause: "credentials-rejected" },
+        { cause: "rate-limit" },
+        { cause: "context-limit" },
+        { cause: "model-request-failed" },
+      ],
+    });
+    const exported = JSON.stringify(body);
+    for (const secret of [
+      key,
+      "correct horse battery",
+      cookie().split("=")[1] ?? "missing",
+      "SECRET_CHAT_TEXT",
+      "SECRET_COMMAND",
+      "SECRET_OUTPUT",
+      "SECRET_FILE_CONTENT",
+      "private.example",
+      "small-secret",
+      "sk-proj-",
+      "abc.def",
+      project.root,
+    ])
+      expect(exported).not.toContain(secret);
+    expect((await api("GET", "diagnostics")).body).toMatchObject({
+      format: 1,
+      pal: { release: body.installation.pal.release },
+    });
   });
 });

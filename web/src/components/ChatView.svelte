@@ -32,7 +32,7 @@
   import WorkspaceMode from "./WorkspaceMode.svelte";
   import { drafts, MAX_DRAFT_CHARS, MAX_DRAFT_FILES, type PendingInput } from "../lib/drafts.svelte.ts";
   import type { ReviewFeedback } from "../../../src/core/feedback.ts";
-  import { codeCopy } from "../lib/copy.ts";
+  import { codeCopy, copyText } from "../lib/copy.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { rise } from "../lib/motion.ts";
   import { app, navigate, refreshChatGPT, refreshProjects, viewport } from "../lib/state.svelte.ts";
@@ -191,6 +191,20 @@
       current.close();
     };
   });
+
+  let diagnostics: "idle" | "copying" | "copied" = $state("idle");
+  /** Copies this chat's redacted run state, request IDs and effect outcomes for support. */
+  async function copyDiagnostics() {
+    diagnostics = "copying";
+    try {
+      const copied = await copyText(JSON.stringify(await api.chatDiagnostics(chat.id), null, 2));
+      diagnostics = copied ? "copied" : "idle";
+      if (!copied) error = "The browser refused to copy diagnostics.";
+    } catch (failure) {
+      diagnostics = "idle";
+      error = `Couldn't copy diagnostics: ${failure instanceof Error ? failure.message : String(failure)}`;
+    }
+  }
 
   let stopping = $state(false);
   let stopError: string | undefined = $state();
@@ -632,6 +646,12 @@
   />
 {/snippet}
 
+{#snippet diagnosticsButton()}
+  <button class="b sm" disabled={diagnostics === "copying"} onclick={copyDiagnostics}
+    >{diagnostics === "copied" ? "Copied" : "Copy diagnostics"}</button
+  >
+{/snippet}
+
 {#snippet busySwitch()}
   <div class="seg" role="radiogroup" aria-label="While the agent is running">
     <button
@@ -889,6 +909,7 @@
       {#if stream?.problem === "closed"}
         <div class="callout er" role="alert">
           <span class="grow">Pal stopped sending this chat's updates. The chat and your draft are kept.</span>
+          {@render diagnosticsButton()}
           <button class="b sm" onclick={() => reconnect()}>Reconnect</button>
         </div>
       {:else if stream?.problem === "retrying"}
@@ -916,7 +937,10 @@
         </div>
         {#if stopError !== undefined}
           <div class="callout er" role="alert">
-            Stop didn't reach Pal: {stopError} The run may still be going; press Stop to try again.
+            <span class="grow"
+              >Stop didn't reach Pal: {stopError} The run may still be going; press Stop to try again.</span
+            >
+            {@render diagnosticsButton()}
           </div>
         {/if}
       {/if}
@@ -935,8 +959,10 @@
       {#if writing.pending !== undefined && !writing.sending}
         <div class="callout wa" role="alert">
           <span class="grow"
-            >This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.</span
+            >This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.
+            <span class="mono dim">Request {writing.pending.requestId}</span></span
           >
+          {@render diagnosticsButton()}
           <button class="b sm" onclick={retrySaved}>Retry saved send</button>
         </div>
         <details class="activity">

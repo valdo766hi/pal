@@ -1438,6 +1438,31 @@ describe("chat connection and Stop failures", () => {
     expect(errors).toEqual([]);
   });
 
+  it("copies redacted installation and chat diagnostics for support", async () => {
+    const { page, base, saved, provider, errors } = await setup(1440);
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+    const clipboard = async () => JSON.parse(await page.evaluate(() => navigator.clipboard.readText())) as unknown;
+    await page.goto(`${base}/#/settings/general`);
+    await page.getByRole("button", { name: "Copy diagnostics", exact: true }).click();
+    await page.getByRole("button", { name: "Copied", exact: true }).waitFor();
+    const installation = await clipboard();
+    expect(installation).toMatchObject({
+      format: 1,
+      providers: expect.arrayContaining([{ id: "openrouter", enabled: true, hasKey: true }]),
+    });
+
+    await page.route(`**/api/chats/${saved.id}/events`, (route) => route.fulfill({ status: 503, body: "unavailable" }));
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const closed = page.getByRole("alert").filter({ hasText: "Pal stopped sending this chat's updates." });
+    await closed.getByRole("button", { name: "Copy diagnostics", exact: true }).click();
+    await closed.getByRole("button", { name: "Copied", exact: true }).waitFor();
+    expect(await clipboard()).toMatchObject({ chat: { chat: saved.id, running: false, inputs: [] } });
+    const exported = JSON.stringify([installation, await clipboard()]);
+    for (const secret of [GOOD_KEY, "correct horse battery", provider.origin]) expect(exported).not.toContain(secret);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
   it("shows a failed Stop and lets the owner try again without an unhandled rejection", async () => {
     const { page, base, saved, errors, mutations } = await setup(1440);
     const emit = await bridgeChatEvents(page);

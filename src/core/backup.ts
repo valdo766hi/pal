@@ -207,9 +207,7 @@ async function storeFacts(database: SqliteDatabase) {
   const schema = (await database.get<{ n: number }>("SELECT max(version) AS n FROM pal_migrations"))?.n;
   const installation = (await database.get<{ id: string }>("SELECT id FROM pal_installation"))?.id;
   if (schema === undefined || installation === undefined) throw new BackupError("the store has no Pal identity");
-  const unfinished: Record<string, number> = {};
-  for (const [name, table, sql] of UNFINISHED)
-    if (tables.has(table)) unfinished[name] = (await database.get<{ n: number }>(sql))?.n ?? 0;
+  const unfinished = await unfinishedWork(database, tables);
   const projects = await database.all<{ root: string }>(
     "SELECT root FROM pal_projects WHERE mode = 'existing' AND removed_at IS NULL ORDER BY root",
   );
@@ -236,6 +234,14 @@ async function storeFacts(database: SqliteDatabase) {
     }
   }
   return { schema, installation, unfinished, external, referenced };
+}
+
+/** Counts of durable work a store still holds, for the tables its schema has. */
+export async function unfinishedWork(database: SqliteDatabase, tables: ReadonlySet<string>) {
+  const unfinished: Record<string, number> = {};
+  for (const [name, table, sql] of UNFINISHED)
+    if (tables.has(table)) unfinished[name] = (await database.get<{ n: number }>(sql))?.n ?? 0;
+  return unfinished;
 }
 
 async function copyStore(

@@ -27,6 +27,10 @@ for sensitive work.
   different account than the one connected.
 - **No ambient keys.** Pal never reads model keys from its environment. Credentials are never passed to agent
   commands, terminals or local programs, except a local program's own consented key.
+- **Diagnostics.** The owner-only diagnostics export (Settings, and a chat's problem notices) holds versions,
+  states, counts, request IDs and command exit codes. It omits keys, tokens, server addresses, commands, outputs and
+  chat or file contents. Free-form provider and workspace errors are not exported: model failures use coarse
+  categories, not error bodies. Inspect detailed failures locally; review IDs and other metadata before sharing.
 
 ## What the agent can do
 

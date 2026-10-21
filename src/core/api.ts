@@ -16,6 +16,7 @@ import { API_PROVIDERS, CompatibleBody, isApiProvider, ProviderConfigError } fro
 import { StdioConfigError, StdioServerBody } from "../pi/mcp-stdio.ts";
 import type { Pal } from "./app.ts";
 import { ApprovalDecision, CommandModeBody } from "./approvals.ts";
+import { chatDiagnostics, installationDiagnostics } from "./diagnostics.ts";
 import { ExtensionSelection } from "./extensions.ts";
 import {
   AdmissionStopped,
@@ -352,6 +353,9 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       }
       throw new HttpError(404, "not_found", "no such release operation");
     }
+
+    if (resource === "diagnostics" && path.length === 1 && method === "GET")
+      return send(200, await installationDiagnostics(pal));
 
     if (resource === "extensions" && path.length === 1) {
       if (method === "GET") return send(200, await pal.extensions.view());
@@ -693,6 +697,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         await pal.approvals.setMode(chat.id, validate(CommandModeBody, await readJson(request)).mode);
         return send(200, { chat: await describeChat(chat) });
       }
+      if (action === "diagnostics" && path.length === 3 && method === "GET")
+        return send(200, {
+          installation: await installationDiagnostics(pal),
+          chat: await chatDiagnostics(pal, chat.id, chat.conversationId),
+        });
       if (action === "approvals" && path.length === 3 && method === "GET")
         return send(200, await pal.approvals.view(chat.id));
       if (action === "approvals" && path.length === 4 && path[3] !== undefined && method === "POST") {

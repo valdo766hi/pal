@@ -16,6 +16,8 @@
   import ProviderSettings from "./ProviderSettings.svelte";
   import WorkspaceCleanup from "./WorkspaceCleanup.svelte";
   import ExtensionSettings from "./ExtensionSettings.svelte";
+  import { api } from "../lib/api.ts";
+  import { copyText } from "../lib/copy.ts";
 
   let { tab, onSignOut }: { tab: SettingsTab; onSignOut: () => void } = $props();
 
@@ -37,6 +39,21 @@
     if (next === undefined) return;
     chooseTheme(next[0]);
     (event.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-theme-option="${next[0]}"]`)?.focus();
+  }
+
+  let diagnostics: "idle" | "copying" | "copied" = $state("idle");
+  let diagnosticsError: string | undefined = $state();
+  async function copyDiagnostics() {
+    diagnostics = "copying";
+    diagnosticsError = undefined;
+    try {
+      if (!(await copyText(JSON.stringify(await api.diagnostics(), null, 2))))
+        throw new Error("the browser refused to copy");
+      diagnostics = "copied";
+    } catch (failure) {
+      diagnostics = "idle";
+      diagnosticsError = failure instanceof Error ? failure.message : String(failure);
+    }
   }
 
   const tabs = [
@@ -108,6 +125,21 @@
             </div>
             <button class="b" onclick={onSignOut}>Sign out of Pal</button>
           </div>
+          <div class="setrow">
+            <div>
+              <div class="setl">Diagnostics</div>
+              <div class="setd">
+                Copies Pal's version, states and counts for support. No keys, tokens, addresses, commands or chat
+                contents.
+              </div>
+            </div>
+            <button class="b" disabled={diagnostics === "copying"} onclick={copyDiagnostics}
+              >{diagnostics === "copied" ? "Copied" : "Copy diagnostics"}</button
+            >
+          </div>
+          {#if diagnosticsError !== undefined}
+            <div class="callout er" role="alert">Couldn't copy diagnostics: {diagnosticsError}</div>
+          {/if}
         </div>
         <WorkspaceCleanup />
       {:else if tab === "extensions"}

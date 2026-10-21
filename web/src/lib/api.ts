@@ -375,6 +375,8 @@ export const api = {
     return data.upload;
   },
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
+  diagnostics: () => call<Record<string, unknown>>("GET", "diagnostics"),
+  chatDiagnostics: (id: string) => call<Record<string, unknown>>("GET", `chats/${id}/diagnostics`),
   renameChat: (id: string, title: string, expectedTitle: string | null) =>
     call<{ chat: ChatSummary }>("PUT", `chats/${id}/title`, { title, expectedTitle }),
   setCommandMode: (id: string, mode: import("../../../src/core/approvals.ts").CommandMode) =>
