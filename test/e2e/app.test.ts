@@ -357,7 +357,8 @@ describe("Pal in a browser", () => {
   it("shows a small optional pet that never takes input and keeps the owner's choice in this browser", async () => {
     const pet = page.locator(".pet");
     await pet.waitFor();
-    expect(await pet.getAttribute("data-coat")).toBe("silver");
+    expect(await pet.getAttribute("data-pet")).toBe("abuy");
+    expect(await pet.getAttribute("data-pose")).toBe("sit");
     expect(await pet.getAttribute("aria-hidden")).toBe("true");
     const box = await pet.boundingBox();
     if (box === null) throw new Error("the pet is not rendered");
@@ -375,9 +376,24 @@ describe("Pal in a browser", () => {
     } finally {
       await page.emulateMedia({ reducedMotion: null });
     }
-    await page.goto(`${base}/#/settings/extensions`);
+    await page.goto(`${base}/#/settings/pets`);
     const settings = page.getByRole("region", { name: "Composer pet" });
-    await settings.getByRole("radio", { name: "Tuxedo" }).check();
+    const choices = settings.getByRole("radiogroup", { name: "Pet" }).getByRole("radio");
+    await expect
+      .poll(() => choices.evaluateAll((radios) => radios.map((radio) => (radio as HTMLInputElement).value)))
+      .toEqual(["abuy", "oyen", "kuro", "kalong", "jelok"]);
+    const poses = settings.getByRole("list", { name: "Abuy's poses" });
+    expect(await poses.getByRole("listitem").allInnerTexts()).toEqual([
+      expect.stringContaining("Sitting"),
+      expect.stringContaining("On the laptop"),
+      expect.stringContaining("Coffee break"),
+      expect.stringContaining("Napping"),
+    ]);
+    await settings.getByRole("radio", { name: /^Kuro/ }).check();
+    await settings.getByRole("list", { name: "Kuro's poses" }).getByText("Casting a spell").waitFor();
+    // Arrow keys move through the pets like any radio group.
+    await page.keyboard.press("ArrowRight");
+    await expect.poll(() => settings.getByRole("radio", { name: /^Kalong/ }).isChecked()).toBe(true);
     for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: 900 });
       await settings.scrollIntoViewIfNeeded();
@@ -387,9 +403,31 @@ describe("Pal in a browser", () => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(chatUrl);
     await page.reload();
-    await expect.poll(() => pet.getAttribute("data-coat")).toBe("tuxedo");
+    await expect.poll(() => pet.getAttribute("data-pet")).toBe("kalong");
     await shoot("pet-1440");
-    await page.goto(`${base}/#/settings/extensions`);
+
+    // Its own clock: the pet takes a break, then naps, while nobody runs or types; typing wakes it.
+    const timed = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+      storageState: await page.context().storageState(),
+    });
+    try {
+      await timed.clock.install();
+      const view = await timed.newPage();
+      await view.goto(chatUrl);
+      const idle = view.locator(".pet");
+      await expect.poll(() => idle.getAttribute("data-pose")).toBe("sit");
+      await view.clock.fastForward(10_000);
+      await expect.poll(() => idle.getAttribute("data-pose")).toBe("rest");
+      await view.clock.fastForward(20_000);
+      await expect.poll(() => idle.getAttribute("data-pose")).toBe("nap");
+      await view.getByLabel("Message").fill("hello");
+      await expect.poll(() => idle.getAttribute("data-pose")).toBe("sit");
+    } finally {
+      await timed.close();
+    }
+
+    await page.goto(`${base}/#/settings/pets`);
     await settings.getByRole("switch", { name: "Show the pet on the composer" }).uncheck();
     await page.goto(chatUrl);
     await page.reload();
@@ -398,12 +436,15 @@ describe("Pal in a browser", () => {
     // Off means its code is never fetched, not merely hidden.
     expect(
       await page.evaluate(() =>
-        performance.getEntriesByType("resource").some((entry) => /\/assets\/Pet-[^/]+\.js$/.test(entry.name)),
+        performance
+          .getEntriesByType("resource")
+          .some((entry) => /\/assets\/(Pet|PetSprite|pets)-[^/]+\.js$/.test(entry.name)),
       ),
     ).toBe(false);
-    await page.evaluate(() => ["pal.pet", "pal.petCoat"].forEach((key) => localStorage.removeItem(key)));
+    await page.evaluate(() => ["pal.pet", "pal.petId"].forEach((key) => localStorage.removeItem(key)));
     await page.reload();
     await pet.waitFor();
+    expect(await pet.getAttribute("data-pet")).toBe("abuy");
   });
 
   it("switches dark, light and system themes and keeps the choice in this browser", async () => {
@@ -1172,6 +1213,9 @@ describe("Pal in a browser", () => {
     await request.getByText("timeout 2 s", { exact: false }).waitFor();
     await page.getByRole("status").filter({ hasText: "Waiting for your approval" }).waitFor();
     expect(await readFile(join(projectBefore.root, "host.txt"), "utf8")).toBe("before\n");
+    // The pet works alongside an active run and sits back down when it ends.
+    const pet = page.locator(".pet");
+    await expect.poll(() => pet.getAttribute("data-pose")).toBe("work");
     await shoot("approval-pending-1440");
     await request.getByRole("button", { name: "Approve once" }).click();
     await page.getByText("Exit 0", { exact: true }).waitFor();
@@ -1179,6 +1223,7 @@ describe("Pal in a browser", () => {
     await page.locator("summary").filter({ hasText: "Host command" }).click();
     await page.getByText("host-output", { exact: true }).waitFor();
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+    await expect.poll(() => pet.getAttribute("data-pose")).toBe("sit");
     const project = (await pal.projects.list())[0];
     if (project === undefined) throw new Error("missing project");
     expect(await readFile(join(project.root, "host.txt"), "utf8")).toBe("before\nafter");

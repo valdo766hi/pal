@@ -689,7 +689,7 @@
     <div class="dockin">
       {#if app.pet.enabled}
         {#await import("./Pet.svelte") then { default: Pet }}
-          <Pet coat={app.pet.coat} running={stream?.running ?? false} active={typing || draft !== ""} />
+          <Pet id={app.pet.id} running={stream?.running ?? false} active={typing || draft !== ""} />
         {/await}
       {/if}
       {#if !ready}
