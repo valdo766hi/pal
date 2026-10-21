@@ -176,7 +176,7 @@ export class Terminals {
         removing: undefined,
         exited: exit.promise,
         stop: () => {
-          pty.kill("SIGHUP");
+          // A second SIGHUP can interrupt Bash's cleanup of its background jobs.
           try {
             process.kill(-pty.pid, "SIGHUP");
           } catch {

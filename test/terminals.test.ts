@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { createApi } from "../src/core/api.ts";
 import { openPal } from "../src/core/app.ts";
@@ -268,6 +269,55 @@ describe("human host terminals", () => {
         }
       })
       .toBe(false);
+  });
+
+  it("lets the shell finish its hangup cleanup without a second signal", async () => {
+    const { pal, project, create, connect } = await setup();
+    const terminal = await create();
+    const client = await connect(terminal.id);
+    client.send({
+      type: "input",
+      epoch: client.last("state")?.epoch,
+      // Isolate host signal delivery from Readline's own signal handling.
+      data:
+        `set +o emacs; set +o vi; trap 'trap "exit" HUP; printf seen > hup-seen; sleep 0.2; kill "$child"; wait "$child"; printf complete > hup-complete; exit' HUP; ` +
+        `sleep 30 & child=$!; printf '%s %s\\n' $$ "$child" > shell.pids\r`,
+    });
+    const pids = join(project.root, "shell.pids");
+    await expect.poll(() => readFile(pids, "utf8")).toMatch(/^\d+ \d+\n$/);
+    const [shell, child] = (await readFile(pids, "utf8")).trim().split(" ").map(Number);
+    if (shell === undefined || child === undefined) throw new Error("missing shell PIDs");
+    const complete = join(project.root, "hup-complete");
+    const kill = process.kill.bind(process);
+    cleanups.push(async () => {
+      if (!existsSync(complete))
+        try {
+          kill(child, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+    });
+    let hangups = 0;
+    const signal = vi.spyOn(process, "kill").mockImplementation((pid, value) => {
+      const result = kill(pid, value);
+      if (Math.abs(pid) === shell && value === "SIGHUP" && ++hangups === 1) {
+        // Let Bash run before Pal resumes, as it can after the signaling thread is descheduled.
+        const deadline = performance.now() + 1000;
+        const pause = new Int32Array(new SharedArrayBuffer(4));
+        while (!existsSync(join(project.root, "hup-seen")) && performance.now() < deadline)
+          Atomics.wait(pause, 0, 0, 2);
+      }
+      return result;
+    });
+    try {
+      const closing = pal.terminals.close();
+      expect(pal.terminals.close()).toBe(closing);
+      await closing;
+      expect(await readFile(complete, "utf8")).toBe("complete");
+      expect(hangups).toBe(1);
+    } finally {
+      signal.mockRestore();
+    }
   });
 
   it("does not resurrect ended shells, saved PIDs or keystrokes on restart", async () => {
