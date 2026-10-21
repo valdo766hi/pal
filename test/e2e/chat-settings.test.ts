@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,25 +30,24 @@ async function setup(width: number, definitions?: readonly CompiledCapability[])
   cleanups.push(provider.close);
   const root = await mkdtemp(join(tmpdir(), "pal-chat-settings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
-  const pal = await openPal(
-    {
-      dataRoot: join(root, "data"),
-      installRoot: "/nonexistent",
-      providerOrigin: provider.origin,
-      guidanceHome: join(root, "host-home"),
-    },
-    context,
-    definitions,
-  );
+  const options = {
+    dataRoot: join(root, "data"),
+    installRoot: "/nonexistent",
+    providerOrigin: provider.origin,
+    guidanceHome: join(root, "host-home"),
+  };
+  let pal = await openPal(options, context, definitions);
   cleanups.push(() => pal.close());
   const token = await pal.owner.setup(pal.owner.setupToken, "correct horse battery");
-  const server = await startServer({
-    host: "127.0.0.1",
-    port: 0,
-    version: "test",
-    webRoot: join(import.meta.dirname, "../../dist/public"),
-    api: createApi(pal),
-  });
+  const serve = (port: number) =>
+    startServer({
+      host: "127.0.0.1",
+      port,
+      version: "test",
+      webRoot: join(import.meta.dirname, "../../dist/public"),
+      api: createApi(pal),
+    });
+  let server = await serve(0);
   cleanups.push(async () => {
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -91,7 +90,16 @@ async function setup(width: number, definitions?: readonly CompiledCapability[])
     if (request.method() !== "GET" && new URL(request.url()).pathname.startsWith("/api/chats/"))
       mutations.push(`${request.method()} ${new URL(request.url()).pathname}`);
   });
-  return { pal, page, base, project, saved, other, provider, errors, mutations };
+  const restart = async () => {
+    const port = (server.address() as AddressInfo).port;
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await pal.close();
+    pal = await openPal(options, context, definitions);
+    server = await serve(port);
+    return pal;
+  };
+  return { pal, page, base, project, saved, other, provider, errors, mutations, restart };
 }
 
 async function holdMetadata(page: Page, id: string) {
@@ -1380,7 +1388,10 @@ async function bridgeChatEvents(page: Page) {
         super(url, options);
         if (!String(url).includes("/events")) return;
         const marks = document.documentElement.dataset;
-        this.addEventListener("snapshot", (event) => (marks.chatSnapshot ??= (event as MessageEvent<string>).data));
+        this.addEventListener("snapshot", (event) => {
+          marks.chatSnapshot ??= (event as MessageEvent<string>).data;
+          marks.chatSnapshots = String(Number(marks.chatSnapshots ?? 0) + 1);
+        });
         this.addEventListener("approvals", () => (marks.chatApprovals = "seen"));
         addEventListener("chat-test-event", (event) => {
           const { name, data } = (event as CustomEvent<{ name: string; data?: string }>).detail;
@@ -1397,6 +1408,97 @@ async function bridgeChatEvents(page: Page) {
 }
 
 describe("chat connection and Stop failures", () => {
+  it.each([1440, 390])("shows loading the saved conversation without clearing the draft at %s px", async (width) => {
+    const { page, base, saved, pal, provider, errors, mutations } = await setup(width);
+    const conversation = await pal.harness.conversation(saved.conversationId, context);
+    if (conversation === undefined) throw new Error("missing fixture conversation");
+    await conversation.submit(
+      {
+        type: "write",
+        entry: { kind: "pi.assistant", model: [fauxAssistantMessage("Saved reply before connecting")] },
+      },
+      context,
+    );
+    const seen = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const done = Promise.withResolvers<undefined>();
+    let started = false;
+    await page.route(`**/api/chats/${saved.id}/events`, async (route) => {
+      started = true;
+      seen.resolve(undefined);
+      try {
+        await release.promise;
+        await route.continue();
+      } finally {
+        done.resolve(undefined);
+      }
+    });
+    cleanups.push(async () => {
+      release.resolve(undefined);
+      if (started) await done.promise;
+    });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await seen.promise;
+    const input = page.getByLabel("Message", { exact: true });
+    await input.fill("Keep this while history loads");
+    const loading = page.getByRole("status").filter({ hasText: "Loading saved conversation" });
+    await loading.waitFor({ timeout: 5000 });
+    await screenshot(page, `chat-loading-${width}`);
+    release.resolve(undefined);
+    await page.getByText("Saved reply before connecting", { exact: true }).waitFor();
+    expect(await loading.count()).toBe(0);
+    expect(await input.inputValue()).toBe("Keep this while history loads");
+    expect(mutations).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it.each([1440, 390])("keeps unconfirmed command outcomes distinct after a server restart at %s px", async (width) => {
+    const { pal, page, base, project, saved, provider, errors, mutations, restart } = await setup(width);
+    const conversation = await pal.harness.conversation(saved.conversationId, context);
+    if (conversation === undefined) throw new Error("missing fixture conversation");
+    const marker = join(project.root, "must-not-run");
+    const command = `touch ${JSON.stringify(marker)}`;
+    for (const shell of [
+      { callId: "unconfirmed-call", command, status: "started" },
+      { callId: "completed-call", command: "printf done", status: "started" },
+      { callId: "completed-call", command: "printf done", status: "finished", exitCode: 0, output: "done" },
+    ])
+      await conversation.submit(
+        { type: "write", entry: { kind: "pal.shell", data: { shell: { cwd: project.root, ...shell } } } },
+        context,
+      );
+    await bridgeChatEvents(page);
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const uncertain = page.locator("details.activity").filter({ hasText: command });
+    await uncertain.getByText("Outcome unconfirmed", { exact: true }).waitFor({ timeout: 5000 });
+    await uncertain.locator("summary").click();
+    await uncertain.getByText("Call unconfirmed-call", { exact: true }).waitFor();
+    await uncertain.getByText("No completion receipt yet.", { exact: false }).waitFor();
+    const input = page.getByLabel("Message", { exact: true });
+    await input.fill("Keep this across restart");
+    const snapshots = () => page.locator("html").getAttribute("data-chat-snapshots").then(Number);
+    const before = await snapshots();
+    const reopened = await restart();
+    await expect.poll(snapshots, { timeout: 15_000 }).toBeGreaterThan(before);
+    await uncertain.getByText("Outcome unconfirmed", { exact: true }).waitFor();
+    expect(await page.getByRole("status").filter({ hasText: "Running" }).count()).toBe(0);
+    expect(
+      await page
+        .locator("details.activity")
+        .filter({ hasText: "printf done" })
+        .getByText("Exit 0", { exact: true })
+        .count(),
+    ).toBe(1);
+    expect(await uncertain.getByRole("button", { name: /retry|repeat|run again/i }).count()).toBe(0);
+    expect(await input.inputValue()).toBe("Keep this across restart");
+    expect((await reopened.approvals.view(saved.id)).approvals).toEqual([]);
+    await expect(lstat(marker)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(mutations).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
   it("keeps the draft and retries while the chat stream is unreachable on first load", async () => {
     const { page, base, saved, provider, errors } = await setup(1440);
     let blocked = true;

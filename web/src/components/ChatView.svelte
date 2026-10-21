@@ -765,9 +765,10 @@
                     ? "Timed out"
                     : item.receipt.exitCode !== undefined
                       ? `Exit ${item.receipt.exitCode}`
-                      : "Pending receipt"}
+                      : "Outcome unconfirmed"}
                 </span><Icon name="chevR" size={13} />
               </summary>
+              <div class="small dim mono ellipsis" title={item.receipt.callId}>Call {item.receipt.callId}</div>
               <div class="small dim mono ellipsis" title={item.receipt.cwd}>{item.receipt.cwd}</div>
               <pre class="out">{item.receipt.command}</pre>
               {#if item.receipt.executed !== undefined}<p class="small dim">
@@ -906,7 +907,9 @@
           <button class="b sm" onclick={() => navigate({ view: "settings", tab: "models" })}>Settings</button>
         </div>
       {/if}
-      {#if stream?.problem === "closed"}
+      {#if stream?.loaded === false && stream.problem === undefined}
+        <div class="callout wa" role="status">Loading saved conversation… Your draft is kept.</div>
+      {:else if stream?.problem === "closed"}
         <div class="callout er" role="alert">
           <span class="grow">Pal stopped sending this chat's updates. The chat and your draft are kept.</span>
           {@render diagnosticsButton()}
