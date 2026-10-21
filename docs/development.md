@@ -134,6 +134,12 @@ the main process RSS at readiness, then stops its own process group and removes 
 fails the run. JSON retains every sample, nearest-rank p50/p95, package/release and host identity, package NAR bytes
 and closure NAR bytes. NAR size is not compressed download size or filesystem allocation.
 
+Format 2 measures RSS through a fixed Node IPC preload rather than host process inspection (which Darwin's Nix
+sandbox denies). The observer's cost is included for both packages; compare only like instrumentation, not old
+format-1 measurements. It overwrites inherited Node preload options, runs no provider calls and does not extend
+the measured process lifetime. These are explicitly trusted packages: self-reported memory is not tamper-proof
+grading of untrusted code. The same process controls remain inside both native Nix test sandboxes.
+
 CI measures the fixed pre-extraction `0ac668e` baseline and exact candidate package on the same native host after
 builds finish. These are sequential batches with fresh processes/stores, **not flushed filesystem caches**, peak or
 aggregate worker RSS, configured chat latency, model quality, or full platform acceptance. Compare like hosts and

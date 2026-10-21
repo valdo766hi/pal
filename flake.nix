@@ -26,6 +26,13 @@
         pkgs:
         let
           pal = pkgs.callPackage ./nix/package.nix { pkgsPath = pkgs.path; };
+          startupBenchmarkSource = pkgs.lib.fileset.toSource {
+            root = ./scripts;
+            fileset = pkgs.lib.fileset.unions [
+              ./scripts/benchmark-startup.ts
+              ./scripts/benchmark-startup-observer.mjs
+            ];
+          };
         in
         {
           default = pal;
@@ -37,9 +44,8 @@
             runtimeInputs = [
               pkgs.nodejs_24
               pkgs.nix
-            ]
-            ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.procps;
-            text = ''exec node ${./scripts/benchmark-startup.ts} "$@"'';
+            ];
+            text = ''exec node ${startupBenchmarkSource}/benchmark-startup.ts "$@"'';
           };
         }
       );

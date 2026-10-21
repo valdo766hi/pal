@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { distribution, sampleCount, sampleStartup } from "../scripts/benchmark-startup.ts";
 
 const roots: string[] = [];
+const stops: (() => Promise<void>)[] = [];
 afterEach(async () => {
   vi.unstubAllEnvs();
+  for (const stop of stops.splice(0).reverse()) await stop();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
@@ -72,6 +76,28 @@ ${server}`);
     }
   });
 
+  it("does not require host process inspection or inherit Node preload options", async () => {
+    const packagePath = await fixture(server);
+    await writeFile(join(packagePath, "bin/ps"), `#!${process.execPath}\nprocess.exit(77)`, { mode: 0o700 });
+    vi.stubEnv("PATH", join(packagePath, "bin"));
+    vi.stubEnv("NODE_OPTIONS", "--import=data:text/javascript,process.exit(71)");
+    expect((await sampleStartup(packagePath)).rssBytes).toBeGreaterThan(0);
+  });
+
+  it.each([0, 1.5])("rejects an invalid self-reported RSS of %s", async (rssBytes) => {
+    const packagePath = await fixture(`
+process.removeAllListeners('message');
+process.on('message',message=>process.send({...message,pid:process.pid,rssBytes:${rssBytes}}));
+process.channel?.unref();
+${server}`);
+    await expect(sampleStartup(packagePath)).rejects.toThrow("Package returned an invalid RSS report.");
+  });
+
+  it("bounds a missing RSS report instead of inventing a measurement", async () => {
+    const packagePath = await fixture(`process.removeAllListeners('message');process.channel?.unref();${server}`);
+    await expect(sampleStartup(packagePath)).rejects.toThrow("Package did not report its RSS.");
+  });
+
   it("waits for a complete readiness origin across output chunks", async () => {
     const packagePath = await fixture(
       server.replace(
@@ -128,6 +154,45 @@ setInterval(()=>{},1000);
     await vi.waitFor(() => {
       for (const pid of pids) expect(() => process.kill(pid, 0)).toThrow();
     });
+  });
+
+  it("stops the launched process if its measurement parent dies", async () => {
+    const packagePath = await fixture(`
+import {writeFileSync} from 'node:fs';
+writeFileSync(new URL('../launched',import.meta.url),JSON.stringify({pid:process.pid,cwd:process.cwd()}));
+setInterval(()=>{},1000);
+`);
+    const source = new URL("../scripts/benchmark-startup.ts", import.meta.url).href;
+    const parent = spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "-e",
+        `import {sampleStartup} from ${JSON.stringify(source)};await sampleStartup(${JSON.stringify(packagePath)});`,
+      ],
+      { stdio: "ignore" },
+    );
+    const exited = once(parent, "exit");
+    let launched: { pid: number; cwd: string } | undefined = undefined;
+    stops.push(async () => {
+      if (parent.exitCode === null && parent.signalCode === null) parent.kill("SIGKILL");
+      await exited;
+      if (launched !== undefined && launched.pid > 0) {
+        try {
+          process.kill(-launched.pid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      }
+    });
+    launched = await vi.waitFor(
+      async () => JSON.parse(await readFile(join(packagePath, "launched"), "utf8")) as { pid: number; cwd: string },
+    );
+    roots.push(launched.cwd);
+    const pid = launched.pid;
+    parent.kill("SIGKILL");
+    await exited;
+    await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
   });
 
   it("does not accept a successful measurement if orderly shutdown fails", async () => {

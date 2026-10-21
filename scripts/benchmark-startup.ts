@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn, execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { access, constants, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { arch, cpus, platform, release, tmpdir, totalmem } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
@@ -28,6 +29,43 @@ export function sampleCount(value = "7") {
   return Number(value);
 }
 
+async function reportedRss(child: ChildProcess) {
+  const report = Promise.withResolvers<number>(),
+    id = randomUUID();
+  const receive = (message: unknown) => {
+    if (
+      message === null ||
+      typeof message !== "object" ||
+      !("kind" in message) ||
+      message.kind !== "pal-startup-rss" ||
+      !("id" in message) ||
+      message.id !== id
+    )
+      return;
+    if (
+      "pid" in message &&
+      message.pid === child.pid &&
+      "rssBytes" in message &&
+      typeof message.rssBytes === "number" &&
+      Number.isSafeInteger(message.rssBytes) &&
+      message.rssBytes > 0
+    )
+      report.resolve(message.rssBytes);
+    else report.reject(new Error("Package returned an invalid RSS report."));
+  };
+  child.on("message", receive);
+  const timer = setTimeout(() => report.reject(new Error("Package did not report its RSS.")), 1000);
+  try {
+    child.send({ kind: "pal-startup-rss", id }, (error) => {
+      if (error) report.reject(new Error("Could not request the package RSS."));
+    });
+    return await report.promise;
+  } finally {
+    clearTimeout(timer);
+    child.off("message", receive);
+  }
+}
+
 export async function sampleStartup(packagePath: string) {
   const root = await mkdtemp(join(tmpdir(), "pal-startup-"));
   const home = join(root, "home");
@@ -38,9 +76,14 @@ export async function sampleStartup(packagePath: string) {
     ["serve", "--host", "127.0.0.1", "--port", "0", "--data-dir", join(root, "data")],
     {
       cwd: root,
-      env: { HOME: home, TMPDIR: root, PATH: process.env.PATH ?? "" },
+      env: {
+        HOME: home,
+        TMPDIR: root,
+        PATH: process.env.PATH ?? "",
+        NODE_OPTIONS: `--import=${pathToFileURL(join(import.meta.dirname, "benchmark-startup-observer.mjs")).href}`,
+      },
       detached: true,
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "ignore", "ipc"],
     },
   );
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
@@ -52,6 +95,7 @@ export async function sampleStartup(packagePath: string) {
   let output = "",
     announced = false,
     measured = false;
+  assert(child.stdout !== null);
   child.stdout.on("data", (bytes: Buffer) => {
     if (announced) return;
     output = (output + bytes.toString()).slice(-4096);
@@ -93,15 +137,7 @@ export async function sampleStartup(packagePath: string) {
     );
     const readyMs = performance.now() - started;
     assert(readyMs < deadline, "Package startup exceeded 5000 ms.");
-    assert(child.pid !== undefined);
-    const { stdout } = await exec(
-      process.platform === "darwin" ? "/bin/ps" : "ps",
-      ["-o", "rss=", "-p", String(child.pid)],
-      { timeout: 1000, maxBuffer: 1024 },
-    );
-    assert(/^\s*[1-9]\d*\s*$/.test(stdout), "Could not measure the package process RSS.");
-    const rssBytes = Number(stdout.trim()) * 1024;
-    assert(Number.isSafeInteger(rssBytes));
+    const rssBytes = await reportedRss(child);
     measured = true;
     return { readyMs, rssBytes };
   } finally {
@@ -163,10 +199,11 @@ async function main(args: readonly string[]) {
   const samples = [];
   for (let i = 0; i < count; i++) samples.push(await sampleStartup(packagePath));
   return {
-    format: 1,
+    format: 2,
     scenario: "provider-unconfigured-http-startup",
     cache: "fresh process, home and store per sample; filesystem caches are not flushed",
-    rss: "main process immediately after HTTP readiness; not peak or aggregate worker memory",
+    rss: "launched Node process after HTTP readiness, via IPC; not peak or aggregate worker memory",
+    observer: "trusted Node preload included in both startup and RSS; not an untrusted-code evaluator",
     identity: { package: packagePath, release: createHash("sha256").update(packagePath).digest("hex") },
     host: {
       os: platform(),
