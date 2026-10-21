@@ -1371,6 +1371,103 @@ describe("chat code rendering", () => {
   });
 });
 
+/** Marks the chat stream's first snapshot and approvals view, and returns a way to send it events as the server would. */
+async function bridgeChatEvents(page: Page) {
+  await page.addInitScript(() => {
+    const Native = window.EventSource;
+    window.EventSource = class extends Native {
+      constructor(url: string | URL, options?: EventSourceInit) {
+        super(url, options);
+        if (!String(url).includes("/events")) return;
+        const marks = document.documentElement.dataset;
+        this.addEventListener("snapshot", (event) => (marks.chatSnapshot ??= (event as MessageEvent<string>).data));
+        this.addEventListener("approvals", () => (marks.chatApprovals = "seen"));
+        addEventListener("chat-test-event", (event) => {
+          const { name, data } = (event as CustomEvent<{ name: string; data?: string }>).detail;
+          this.dispatchEvent(data === undefined ? new Event(name) : new MessageEvent(name, { data }));
+        });
+      }
+    };
+  });
+  return (name: string, data?: unknown) =>
+    page.evaluate(
+      (detail) => dispatchEvent(new CustomEvent("chat-test-event", { detail })),
+      data === undefined ? { name } : { name, data: JSON.stringify(data) },
+    );
+}
+
+describe("chat connection and Stop failures", () => {
+  it("keeps the draft and retries while the chat stream is unreachable on first load", async () => {
+    const { page, base, saved, provider, errors } = await setup(1440);
+    let blocked = true;
+    await page.route(`**/api/chats/${saved.id}/events`, (route) =>
+      blocked ? route.abort("connectionrefused") : route.continue(),
+    );
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const input = page.getByLabel("Message", { exact: true });
+    await input.fill("Keep this while offline");
+    const offline = page.getByRole("status").filter({ hasText: "Can't reach Pal yet; retrying." });
+    await offline.waitFor();
+    await screenshot(page, "chat-unreachable-1440");
+    blocked = false;
+    await page.getByRole("heading", { name: "Start the conversation" }).waitFor({ timeout: 15_000 });
+    expect(await offline.count()).toBe(0);
+    expect(await input.inputValue()).toBe("Keep this while offline");
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("offers an explicit reconnect when the server refuses the chat stream", async () => {
+    const { page, base, saved, provider, errors } = await setup(390);
+    let refuse = true;
+    await page.route(`**/api/chats/${saved.id}/events`, (route) =>
+      refuse ? route.fulfill({ status: 503, body: "unavailable" }) : route.continue(),
+    );
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const input = page.getByLabel("Message", { exact: true });
+    await input.fill("Keep this after a refusal");
+    const closed = page.getByRole("alert").filter({ hasText: "Pal stopped sending this chat's updates." });
+    await closed.waitFor();
+    await screenshot(page, "chat-stream-closed-390");
+    refuse = false;
+    await closed.getByRole("button", { name: "Reconnect", exact: true }).click();
+    await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
+    expect(await closed.count()).toBe(0);
+    expect(await input.inputValue()).toBe("Keep this after a refusal");
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("shows a failed Stop and lets the owner try again without an unhandled rejection", async () => {
+    const { page, base, saved, errors, mutations } = await setup(1440);
+    const emit = await bridgeChatEvents(page);
+    let fail = true;
+    await page.route(`**/api/chats/${saved.id}/stop`, (route) =>
+      fail
+        ? route.fulfill({ status: 503, json: { error: "fixture", message: "Stop is unavailable." } })
+        : route.continue(),
+    );
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await expect.poll(() => page.locator("html").getAttribute("data-chat-approvals")).toBe("seen");
+    await emit("event", { type: "run_start" });
+    const stop = page.getByRole("button", { name: "Stop", exact: true });
+    await stop.click();
+    const failed = page.getByRole("alert").filter({ hasText: "Stop didn't reach Pal: Stop is unavailable." });
+    await failed.waitFor();
+    expect(await page.getByRole("status").filter({ hasText: "Running" }).count()).toBe(1);
+    await screenshot(page, "chat-stop-failed-1440");
+    fail = false;
+    const stopped = page.waitForResponse(
+      (reply) => new URL(reply.url()).pathname === `/api/chats/${saved.id}/stop` && reply.status() === 200,
+    );
+    await stop.click();
+    await stopped;
+    await expect.poll(() => failed.count()).toBe(0);
+    expect(mutations).toEqual([`POST /api/chats/${saved.id}/stop`, `POST /api/chats/${saved.id}/stop`]);
+    expect(errors).toEqual([]);
+  });
+});
+
 describe("long transcript updates", () => {
   it("keeps history, draft, scroll and approval order while live text changes and reconnects reset it", async () => {
     const { pal, page, base, saved, provider, errors } = await setup(1440);
@@ -1382,32 +1479,11 @@ describe("long transcript updates", () => {
         context,
       );
     }
-    // Marks the chat stream's first snapshot and approvals view, and forwards test events into that stream.
-    await page.addInitScript(() => {
-      const Native = window.EventSource;
-      window.EventSource = class extends Native {
-        constructor(url: string | URL, options?: EventSourceInit) {
-          super(url, options);
-          if (!String(url).includes("/events")) return;
-          const marks = document.documentElement.dataset;
-          this.addEventListener("snapshot", (event) => (marks.chatSnapshot ??= (event as MessageEvent<string>).data));
-          this.addEventListener("approvals", () => (marks.chatApprovals = "seen"));
-          addEventListener("chat-test-event", (event) => {
-            const { name, data } = (event as CustomEvent<{ name: string; data?: string }>).detail;
-            this.dispatchEvent(data === undefined ? new Event(name) : new MessageEvent(name, { data }));
-          });
-        }
-      };
-    });
+    const emit = await bridgeChatEvents(page);
     await page.goto(`${base}/#/chat/${saved.id}`);
     await page.getByText("History 79", { exact: true }).waitFor();
     // Synthetic approvals must not race the server's initial view.
     await expect.poll(() => page.locator("html").getAttribute("data-chat-approvals")).toBe("seen");
-    const emit = (name: string, data?: unknown) =>
-      page.evaluate(
-        (detail) => dispatchEvent(new CustomEvent("chat-test-event", { detail })),
-        data === undefined ? { name } : { name, data: JSON.stringify(data) },
-      );
     const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as {
       entries: { id: number }[];
     };

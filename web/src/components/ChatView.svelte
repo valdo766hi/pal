@@ -174,15 +174,37 @@
     }
   }
 
+  /** Replaces a stream the server closed; the browser itself retries one that merely dropped. */
+  let reconnect = () => {};
   $effect(() => {
-    const current = new ChatStream(chat.id);
+    const id = chat.id;
+    let current = new ChatStream(id);
     stream = current;
-    void loadMetadata(chat.id);
+    reconnect = () => {
+      current.close();
+      current = new ChatStream(id);
+      stream = current;
+    };
+    void loadMetadata(id);
     return () => {
       loadEpoch++;
       current.close();
     };
   });
+
+  let stopping = $state(false);
+  let stopError: string | undefined = $state();
+  async function stop() {
+    stopping = true;
+    stopError = undefined;
+    try {
+      await api.stop(chat.id);
+    } catch (failure) {
+      stopError = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      stopping = false;
+    }
+  }
 
   // Live text changes often; keep committed history from being rebuilt for each partial update.
   const historyItems = $derived(build(stream?.entries ?? [], undefined, stream?.approvals ?? []));
@@ -864,8 +886,17 @@
           <button class="b sm" onclick={() => navigate({ view: "settings", tab: "models" })}>Settings</button>
         </div>
       {/if}
-      {#if stream !== undefined && stream.loaded && !stream.connected}
-        <div class="callout wa" role="status">Reconnecting to Pal… The chat keeps running on the server.</div>
+      {#if stream?.problem === "closed"}
+        <div class="callout er" role="alert">
+          <span class="grow">Pal stopped sending this chat's updates. The chat and your draft are kept.</span>
+          <button class="b sm" onclick={() => reconnect()}>Reconnect</button>
+        </div>
+      {:else if stream?.problem === "retrying"}
+        <div class="callout wa" role="status">
+          {stream.loaded
+            ? "Reconnecting to Pal… The chat keeps running on the server."
+            : "Can't reach Pal yet; retrying. Your draft is kept."}
+        </div>
       {/if}
       {#if stream?.retry !== undefined}
         <div class="callout wa" role="status">The model request failed; Pal retries shortly. {stream.retry.error}</div>
@@ -881,8 +912,13 @@
                 : ""}</span
             ></span
           >
-          <button class="b t sm" onclick={() => api.stop(chat.id)}>Stop</button>
+          <button class="b t sm" disabled={stopping} onclick={stop}>Stop</button>
         </div>
+        {#if stopError !== undefined}
+          <div class="callout er" role="alert">
+            Stop didn't reach Pal: {stopError} The run may still be going; press Stop to try again.
+          </div>
+        {/if}
       {/if}
       {#if (stream?.inbox.length ?? 0) > 0}
         <div class="queue">

@@ -83,6 +83,8 @@ export class ChatStream {
   retry: { at: number; error: string } | undefined = $state();
   connected = $state(false);
   loaded = $state(false);
+  /** The browser retries a dropped stream by itself; one the server refused stays closed until replaced. */
+  problem: "retrying" | "closed" | undefined = $state();
   mode: CommandMode | undefined = $state();
   approvals: readonly CommandApproval[] = $state([]);
   #source: EventSource | undefined;
@@ -104,8 +106,14 @@ export class ChatStream {
     listen<Snapshot>("snapshot", (snapshot) => this.#reset(snapshot));
     listen<AgentEvent>("event", (event) => this.#apply(event));
     listen<ApprovalView>("approvals", (view) => this.showApprovals(view));
-    source.addEventListener("open", () => (this.connected = true));
-    source.addEventListener("error", () => (this.connected = false));
+    source.addEventListener("open", () => {
+      this.connected = true;
+      this.problem = undefined;
+    });
+    source.addEventListener("error", () => {
+      this.connected = false;
+      this.problem = source.readyState === EventSource.CLOSED ? "closed" : "retrying";
+    });
   }
 
   close(): void {
@@ -125,6 +133,7 @@ export class ChatStream {
     this.inbox = snapshot.inbox;
     this.loaded = true;
     this.connected = true;
+    this.problem = undefined;
   }
 
   #append(entry: Entry): void {
