@@ -147,6 +147,7 @@ Details: [docs/security.md](docs/security.md).
 - [Configuration](docs/configuration.md): options, remote access, providers, internet tools, environment
 - [Security](docs/security.md): trust boundaries, what is and is not isolated
 - [Development](docs/development.md): scripts, tests, project layout, Nix checks
+- [Design](docs/design.md): the design canvas that is the source of truth for the UI, and the Quiet tokens
 
 ## Built with
 

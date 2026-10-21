@@ -1,49 +1,26 @@
 <script lang="ts">
-  import { type CoatId, PETS, type PetLayer, pixels } from "../lib/pets.ts";
+  import { PETS, type PetId, type Pose } from "../lib/pets.ts";
+  import PetSprite from "./PetSprite.svelte";
 
-  let { coat, running, active }: { coat: string; running: boolean; active: boolean } = $props();
-  const pet = PETS.cat;
-  const SCALE = 3;
-  /** A coat saved by another version of Pal falls back to the first bundled one. */
-  const colors = $derived((pet.coats[coat as CoatId] ?? pet.coats.ginger).colors);
-  /** Naps after half a minute with no run and no composer use; either wakes it. */
-  let napping = $state(false);
+  let { id, running, active }: { id: string; running: boolean; active: boolean } = $props();
+  /** A pet saved by another version of Pal falls back to the first bundled one. */
+  const shown: PetId = $derived(Object.hasOwn(PETS, id) ? (id as PetId) : "abuy");
+  /** Takes a break after ten seconds with no run and no composer use and naps after thirty; either wakes it. */
+  let idle: "awake" | "rest" | "nap" = $state("awake");
   $effect(() => {
     if (running || active) {
-      napping = false;
+      idle = "awake";
       return;
     }
-    const timer = setTimeout(() => (napping = true), 30_000);
-    return () => clearTimeout(timer);
+    const timers = [setTimeout(() => (idle = "rest"), 10_000), setTimeout(() => (idle = "nap"), 30_000)];
+    return () => timers.forEach(clearTimeout);
   });
+  const pose: Pose = $derived(running ? "work" : idle === "awake" ? "sit" : idle);
 </script>
 
-{#snippet layer(name: PetLayer, kind: string)}
-  <g class={kind}>
-    {#each pixels(pet.layers[name]) as run (`${run.x},${run.y}`)}
-      <rect x={run.x} y={run.y} width={run.width} height="1" fill={colors[run.ink]} />
-    {/each}
-  </g>
-{/snippet}
-
 <!-- Decorative only: invisible to assistive technology and to the pointer, so it never takes input. -->
-<div class="pet" class:running class:napping data-coat={coat} aria-hidden="true">
-  <svg
-    viewBox={`0 0 ${pet.size.width} ${pet.size.height}`}
-    width={pet.size.width * SCALE}
-    height={pet.size.height * SCALE}
-    shape-rendering="crispEdges"
-  >
-    {#if napping}
-      {@render layer("nap", "nap")}
-    {:else}
-      {@render layer("sit", "body")}
-      {@render layer("tailDown", "tail down")}
-      {@render layer("tailUp", "tail up")}
-      {@render layer("eyesOpen", "eyes open")}
-      {@render layer("eyesShut", "eyes shut")}
-    {/if}
-  </svg>
+<div class="pet" class:running data-pet={shown} data-pose={pose} aria-hidden="true">
+  {#key pose}<div class="pose"><PetSprite pet={PETS[shown]} {pose} /></div>{/key}
 </div>
 
 <style>
@@ -61,71 +38,11 @@
   .pet.running {
     right: 112px;
   }
-  svg {
-    display: block;
-  }
-  .up,
-  .shut {
-    opacity: 0;
-  }
-  /* Awake: an occasional blink. Running: the tail flicks in two-frame steps until the run ends. */
-  .open {
-    animation: blink 7s steps(1, end) infinite;
-  }
-  .shut {
-    animation: blink-shut 7s steps(1, end) infinite;
-  }
-  .running .down {
-    animation: flick 0.9s steps(1, end) infinite;
-  }
-  .running .up {
-    animation: flick-up 0.9s steps(1, end) infinite;
-  }
-  .running svg {
-    animation: hop 0.36s steps(3, end) 1;
-  }
-  .nap {
+  .pose {
     animation: fade 0.6s var(--ease);
   }
-  @keyframes blink {
-    0%,
-    96% {
-      opacity: 1;
-    }
-    97%,
-    100% {
-      opacity: 0;
-    }
-  }
-  @keyframes blink-shut {
-    0%,
-    96% {
-      opacity: 0;
-    }
-    97%,
-    100% {
-      opacity: 1;
-    }
-  }
-  @keyframes flick {
-    0%,
-    49% {
-      opacity: 1;
-    }
-    50%,
-    100% {
-      opacity: 0;
-    }
-  }
-  @keyframes flick-up {
-    0%,
-    49% {
-      opacity: 0;
-    }
-    50%,
-    100% {
-      opacity: 1;
-    }
+  .running .pose {
+    animation: hop 0.36s steps(3, end) 1;
   }
   @keyframes hop {
     50% {

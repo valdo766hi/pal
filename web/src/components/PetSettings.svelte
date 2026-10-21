@@ -1,132 +1,172 @@
 <script lang="ts">
-  import { type CoatId, PETS, pixels } from "../lib/pets.ts";
+  import { PETS, type PetId, type Pose } from "../lib/pets.ts";
   import { app, choosePet } from "../lib/state.svelte.ts";
+  import PetSprite from "./PetSprite.svelte";
 
-  const pet = PETS.cat;
-  const coats = Object.entries(pet.coats) as [CoatId, (typeof pet.coats)[CoatId]][];
-  const sprite = [pet.layers.sit, pet.layers.eyesOpen, pet.layers.tailDown].flatMap(pixels);
+  const pets = Object.entries(PETS) as [PetId, (typeof PETS)[PetId]][];
+  const chosen: PetId = $derived(Object.hasOwn(PETS, app.pet.id) ? (app.pet.id as PetId) : "abuy");
+  const moments: [Pose, string][] = [
+    ["sit", "While you're here"],
+    ["work", "While Pal works"],
+    ["rest", "After 10 s idle"],
+    ["nap", "After 30 s idle"],
+  ];
 </script>
 
-<section class="pet-settings" aria-labelledby="pet-title">
-  <div class="extension">
-    <div class="details">
-      <div class="heading">
-        <strong id="pet-title">Composer pet</strong><span class="mono dim">v1</span><span class="pill"
-          >Built-in · interface only</span
-        >
-      </div>
-      <p>
-        A small pixel cat on the composer. It naps when Pal is idle and flicks its tail while a run works. No tools,
-        permissions, network or model requests.
-      </p>
-      <div class="fine">Saved in this browser only. Off unloads it.</div>
-    </div>
-    <label class="choice">
-      <span>Show</span>
-      <input
-        class="swi"
-        type="checkbox"
-        role="switch"
-        aria-label="Show the pet on the composer"
-        checked={app.pet.enabled}
-        onchange={(event) => choosePet({ ...app.pet, enabled: event.currentTarget.checked })}
-      />
+<h2 class="h2">Pets</h2>
+<p class="sub">
+  A small pixel pet on the composer. It keeps you company, works along during a run and naps when Pal is idle. No tools,
+  permissions, network or model requests.
+</p>
+<section aria-labelledby="pet-title">
+  <div class="setrow">
+    <label for="pet-show">
+      <div class="setl" id="pet-title">Composer pet</div>
+      <div class="setd">Saved in this browser only. Off unloads it.</div>
     </label>
+    <input
+      id="pet-show"
+      class="swi"
+      type="checkbox"
+      role="switch"
+      aria-label="Show the pet on the composer"
+      checked={app.pet.enabled}
+      onchange={(event) => choosePet({ ...app.pet, enabled: event.currentTarget.checked })}
+    />
   </div>
-  <div class="coats" role="radiogroup" aria-label="Pet coat">
-    {#each coats as [id, coat] (id)}
-      <label class="coat" class:on={app.pet.coat === id}>
+  <div class="choices" role="radiogroup" aria-label="Pet">
+    {#each pets as [id, pet] (id)}
+      <label class="choice" class:on={chosen === id}>
         <input
           type="radio"
-          name="pet-coat"
+          name="pet"
           value={id}
-          checked={app.pet.coat === id}
+          checked={chosen === id}
           disabled={!app.pet.enabled}
-          onchange={() => choosePet({ ...app.pet, coat: id })}
+          onchange={() => choosePet({ ...app.pet, id })}
         />
-        <svg
-          viewBox={`0 0 ${pet.size.width} ${pet.size.height}`}
-          width={pet.size.width * 3}
-          height={pet.size.height * 3}
-          shape-rendering="crispEdges"
-          aria-hidden="true"
-        >
-          {#each sprite as run (`${run.x},${run.y},${run.ink}`)}
-            <rect x={run.x} y={run.y} width={run.width} height="1" fill={coat.colors[run.ink]} />
-          {/each}
-        </svg>
-        <span>{coat.name}</span>
+        <span class="stage"><PetSprite {pet} pose="sit" scale={4} /></span>
+        <span class="name">{pet.name}</span>
+        <span class="note">{pet.kind}</span>
       </label>
     {/each}
+  </div>
+  <div class="detail">
+    <p><strong>{PETS[chosen].name}</strong> · {PETS[chosen].about}</p>
+    <ul class="poses" aria-label={`${PETS[chosen].name}'s poses`}>
+      {#each moments as [pose, when] (pose)}
+        <li>
+          <span class="stage"><PetSprite pet={PETS[chosen]} {pose} scale={4} /></span>
+          <span class="name">{PETS[chosen].poses[pose].label}</span>
+          <span class="note">{when}</span>
+        </li>
+      {/each}
+    </ul>
   </div>
 </section>
 
 <style>
-  .extension {
-    display: flex;
-    gap: 16px;
-    padding: 14px 0 10px;
-    flex-wrap: wrap;
-  }
-  .details {
-    flex: 1 1 300px;
-    min-width: 0;
+  section {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 16px;
   }
-  .heading {
-    display: flex;
+  .choices {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
     gap: 8px;
-    align-items: center;
-    flex-wrap: wrap;
-  }
-  p {
-    margin: 0;
-    font-size: 13px;
-    color: var(--tx2);
-  }
-  .fine {
-    font-size: 12.5px;
-    color: var(--tx3);
-  }
-  .dim {
-    color: var(--tx3);
   }
   .choice {
+    position: relative;
     display: flex;
+    flex-direction: column;
     align-items: center;
-    gap: 8px;
-    font-size: 12.5px;
-    color: var(--tx2);
-  }
-  .coats {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding-bottom: 14px;
-    border-bottom: 1px solid var(--line);
-  }
-  .coat {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 14px 8px 10px;
+    gap: 2px;
+    padding: 12px 8px 10px;
     border: 1px solid var(--line2);
-    border-radius: 12px;
+    border-radius: var(--radius-md);
     background: var(--bg1);
-    font-size: 13px;
     cursor: pointer;
     transition:
       border-color var(--fast) var(--ease),
       background-color var(--fast) var(--ease);
   }
-  .coat.on {
+  /* The radio covers its whole card, so a click anywhere lands on it. */
+  .choice input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: inherit;
+  }
+  .choice:hover {
+    background: var(--bg2);
+  }
+  .choice.on {
     border-color: var(--acln);
     background: var(--acbg);
   }
-  .coat:has(input:disabled) {
+  .choice:has(input:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .choice:has(input:disabled) {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+  /* Sprites differ in size; each stands on the same floor. */
+  .stage {
+    height: 60px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    margin-bottom: 6px;
+  }
+  .name {
+    font-size: 13.5px;
+    font-weight: 550;
+  }
+  .note {
+    font-size: 12px;
+    color: var(--tx3);
+    text-align: center;
+  }
+  .detail {
+    padding: 14px 16px 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--bg1);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .detail p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--tx2);
+  }
+  .detail strong {
+    color: var(--tx);
+    font-weight: 600;
+  }
+  .poses {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 12px;
+  }
+  .poses li {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+  .poses .stage {
+    align-self: stretch;
+    border-bottom: 1px solid var(--line2);
   }
 </style>

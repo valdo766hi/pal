@@ -61,6 +61,7 @@
     { id: "models", label: "Models", icon: "model" },
     { id: "mcp", label: "MCP servers", icon: "plug" },
     { id: "extensions", label: "Extensions", icon: "model" },
+    { id: "pets", label: "Pets", icon: "paw" },
   ] as const;
 </script>
 
@@ -144,6 +145,10 @@
         <WorkspaceCleanup />
       {:else if tab === "extensions"}
         <ExtensionSettings />
+      {:else if tab === "pets"}
+        {#await import("./PetSettings.svelte")}<p role="status">Loading pets…</p>
+        {:then { default: PetSettings }}<PetSettings />
+        {:catch failure}<p role="alert">Couldn't load pets: {String(failure)}</p>{/await}
       {:else if tab === "mcp"}
         <McpSettings />
       {:else}
