@@ -7,6 +7,8 @@ pal [serve] [--host <address>] [--port <number>] [--data-dir <path>] [--public-o
 pal probe
 pal supervise [serve options]
 pal check-release --candidate <absolute worktree path> [--data-dir <path>]
+pal backup --output <absolute path> [--data-dir <path>] [--include-credential-key] [--include-browser-profiles]
+pal restore --from <absolute path> (--check | --data-dir <path>) [--credential-key <file>]
 ```
 
 With pnpm, run the server as `pnpm start [options]` (build, then serve) or `pnpm serve [options]` (existing build).
@@ -18,6 +20,7 @@ The Nix package installs the same program as `pal`.
 | `probe`         | Checks SQLite FTS5, fff, Code Mode and the terminal on this host, then exits.                   |
 | `supervise`     | Runs Pal under the release supervisor (Linux, Nix package). See [Releases](#releases).          |
 | `check-release` | Tests a candidate worktree with the running package's protected recipes. It never approves or activates anything. |
+| `backup`, `restore` | Copy a stopped data directory, verify a backup, or restore it. See [Backup and restore](#backup-and-restore). |
 
 | Option            | Meaning                                                                                       |
 | ----------------- | --------------------------------------------------------------------------------------------- |
@@ -40,8 +43,39 @@ Everything Pal keeps is in the data directory:
 | `release-checks/`, `release-control/` | Release candidates and the supervisor's selection (Nix only)        |
 
 Pal creates the directory with mode 0700. If you create it yourself, keep it private (`chmod 700`), because it holds
-credentials and site logins. Only one Pal process may own a data directory at a time. To back it up, stop Pal
-first, then copy the whole directory; copying the database while Pal runs can produce an inconsistent snapshot.
+credentials and site logins. Only one Pal process may own a data directory at a time.
+
+### Backup and restore
+
+Stop Pal (and its supervisor), then:
+
+```sh
+pal backup --output /backups/pal-2026-10-21 [--data-dir <path>] [--include-credential-key] [--include-browser-profiles]
+pal restore --from /backups/pal-2026-10-21 --check [--credential-key /safe/pal.key]
+pal restore --from /backups/pal-2026-10-21 --data-dir <path> [--credential-key /safe/pal.key]
+```
+
+`backup` refuses while Pal or a supervisor owns the directory and holds the database's exclusive lock for the
+whole copy, so Pal cannot start meanwhile. SQLite makes the consistent database copy; every other file, folder and
+symbolic link (never followed) is copied with its size and SHA-256 in `manifest.json`, together with the schema,
+Pal version, installation ID and counts of unfinished work. The new folder appears only when complete; folders are
+0700 and files 0600. Other file types refuse the backup.
+
+- **Credential key:** excluded by default, so the backup holds only sealed credentials. Keep `credentials.key`
+  somewhere safe and pass it to `restore --credential-key`; Pal checks it against the backup's fingerprint. With
+  `--include-credential-key` the backup itself can unseal every saved credential: protect it accordingly. The
+  backup folder is not encrypted.
+- **Browser profiles** (site cookies and logins) are excluded unless `--include-browser-profiles` is given.
+- **Existing-folder projects and reference folders** are never copied; the manifest lists them as external.
+- **Release-control state** is copied, but Nix packages it names must still exist on the restoring host.
+
+`restore --check` verifies the manifest, every checksum, the absence of unlisted paths, the database's integrity,
+schema and installation, and the key, without writing anything or contacting providers. A backup from a newer
+schema than this Pal supports is refused. `restore` performs the same checks, then recreates the backup only at its
+original data directory, which must not exist: move a damaged installation aside first; nothing is ever replaced.
+Restored folders are new filesystem objects, so the folder identities Pal pinned inside the data directory are
+remapped to them; pins on external folders are untouched. Moving an installation to a different path is not
+supported yet.
 
 ## First run
 

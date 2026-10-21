@@ -71,6 +71,44 @@ describe("parseCommand", () => {
       expect(() => parseCommand(argv, linux)).toThrow(UsageError);
   });
 
+  it("parses stopped-state backup and restore with explicit destinations and opt-in sensitive data", () => {
+    expect(parseCommand(["backup", "--output", "/backups/pal-1/", "--data-dir", "/data/pal"], linux)).toEqual({
+      kind: "backup",
+      dataRoot: "/data/pal",
+      output: "/backups/pal-1",
+      includeCredentialKey: false,
+      includeBrowserProfiles: false,
+    });
+    expect(
+      parseCommand(["backup", "--output", "/b", "--include-credential-key", "--include-browser-profiles"], linux),
+    ).toMatchObject({
+      dataRoot: "/home/owner/.local/share/pal",
+      includeCredentialKey: true,
+      includeBrowserProfiles: true,
+    });
+    expect(parseCommand(["restore", "--from", "/b", "--check"], linux)).toEqual({
+      kind: "restore",
+      check: true,
+      from: "/b",
+    });
+    expect(
+      parseCommand(["restore", "--from", "/b", "--data-dir", "/data/pal", "--credential-key", "/keys/pal.key"], linux),
+    ).toEqual({ kind: "restore", check: false, from: "/b", dataRoot: "/data/pal", credentialKey: "/keys/pal.key" });
+    for (const [argv, message] of [
+      [["backup"], /--output/],
+      [["backup", "--output", "relative"], /--output/],
+      [["backup", "--output", "/b", "--port", "1"], /does not accept --port/],
+      [["restore", "--from", "/b"], /--check or an explicit --data-dir/],
+      [["restore", "--from", "/b", "--check", "--data-dir", "/data/pal"], /does not accept --data-dir/],
+      [["restore", "--from", "relative", "--check"], /--from/],
+      [["restore", "--from", "/b", "--check", "--credential-key", "key"], /--credential-key/],
+      [["restore", "--from", "/b", "--check", "--include-credential-key"], /does not accept/],
+      [["serve", "--output", "/b"], /does not accept --output/],
+      [["check-release", "--candidate", "/c", "--from", "/b"], /does not accept --from/],
+    ] as const)
+      expect(() => parseCommand([...argv], linux)).toThrow(message);
+  });
+
   it("parses the Linux supervisor with the same binding rules, but no direct activation flags", () => {
     expect(parseCommand(["supervise", "--port", "0", "--data-dir", "/data/pal"], linux)).toEqual({
       kind: "supervise",

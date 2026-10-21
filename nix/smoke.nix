@@ -42,12 +42,34 @@ runCommand "pal-smoke-${pal.version}"
       exit 1
     fi
     grep -F 'is in use by another Pal process' second.log
+    if pal backup --data-dir "$TMPDIR/data" --output "$TMPDIR/running-backup" 2> running-backup.log; then
+      echo "backed up a running store" >&2
+      exit 1
+    fi
+    grep -F 'Pal is running' running-backup.log
     kill -TERM "$server"
     wait "$server"
     test "$(stat -c %a "$TMPDIR/data")" = 700
+
+    # Stopped-state backup, verification and in-place restore with the packaged CLI; the key is kept separately.
+    pal backup --data-dir "$TMPDIR/data" --output "$TMPDIR/backup" | tee backup.json
+    pal restore --from "$TMPDIR/backup" --check | tee restore-check.json
+    grep -F '"integrity":"ok"' restore-check.json
+    grep -F '"credentialKey":"missing"' restore-check.json
+    install -m 600 "$TMPDIR/data/credentials.key" "$TMPDIR/kept.key"
+    mv "$TMPDIR/data" "$TMPDIR/data-before"
+    pal restore --from "$TMPDIR/backup" --data-dir "$TMPDIR/data" --credential-key "$TMPDIR/kept.key" | tee restored.json
+    grep -F '"remappedIdentities":0' restored.json
+    test "$(stat -c %a "$TMPDIR/data")" = 700
+    test "$(stat -c %a "$TMPDIR/data/credentials.key")" = 600
+    if pal restore --from "$TMPDIR/backup" --data-dir "$TMPDIR/data" --credential-key "$TMPDIR/kept.key" 2> replace.log; then
+      echo "restore replaced an existing data directory" >&2
+      exit 1
+    fi
+    grep -F 'already exists' replace.log
     ${nodejs_24}/bin/node ${pal}/lib/pal/release-source/test/fixtures/supervised-serve.ts \
       ${pal}/lib/pal/dist/main.js "$TMPDIR/supervised"
 
     mkdir -p $out
-    cp probe.jsonl health.json $out/
+    cp probe.jsonl health.json backup.json restore-check.json restored.json $out/
   ''

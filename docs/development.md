@@ -180,7 +180,7 @@ platform-specific isolation, locks and lifecycle belong behind narrow adapters.
 | Browser and private-login handoff | Bubblewrap, systemd scope and broker-only egress; `test/e2e/browser.test.ts` | Missing equivalent filesystem/network/resource isolation and protected native tests; proxy-only or disabled sandbox is not parity |
 | Compiled capabilities | `extensions`; selection/pin tests | Same lifecycle, compatibility and replay checks as new package contracts arrive |
 | Checked releases and supervision | Linux flock and `/proc` source confinement; release tests/host fixtures | Missing inherited-lock/confinement adapters and protected exact-artifact runtime evaluation |
-| Installation and data operations | Nix package/probes; smoke and schema tests | Clean install, diagnostics, launchd, sleep/wake and stopped-state backup/restore rehearsal |
+| Installation and data operations | Nix package/probes; smoke and schema tests; stopped-state backup/restore in `test/backup.test.ts` and the packaged smoke check | Clean install, diagnostics, launchd and sleep/wake; native backup/restore evidence comes only from the portable macOS job |
 | Planned workflows | Roadmap #20/#22/#23/#28 | Both platforms need the same grants, budgets, durability and recovery tests |
 
 Browser and release activation currently fail closed without their Linux protections. Keep those gates until

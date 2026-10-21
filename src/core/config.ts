@@ -12,7 +12,16 @@ export type Command =
   | { kind: "version" }
   | { kind: "probe" }
   | { kind: "serve" | "supervise"; config: ServeConfig }
-  | { kind: "check-release"; dataRoot: string; candidate: string };
+  | { kind: "check-release"; dataRoot: string; candidate: string }
+  | {
+      kind: "backup";
+      dataRoot: string;
+      output: string;
+      includeCredentialKey: boolean;
+      includeBrowserProfiles: boolean;
+    }
+  | { kind: "restore"; from: string; check: true; credentialKey?: string }
+  | { kind: "restore"; from: string; check: false; dataRoot: string; credentialKey?: string };
 
 /** Process facts that decide defaults, passed in so tests do not depend on the machine. */
 export type HostFacts = {
@@ -30,12 +39,17 @@ export const USAGE = `Usage: pal [serve] [--host <address>] [--port <number>] [-
        pal supervise [serve options]
        pal probe
        pal check-release --candidate <worktree> [--data-dir <path>]
+       pal backup --output <path> [--data-dir <path>] [--include-credential-key]
+                  [--include-browser-profiles]
+       pal restore --from <backup> (--check | --data-dir <path>) [--credential-key <file>]
 
 Commands:
   serve              Run the Pal server (default)
   supervise          Run the owner-approved Nix release with guarded health/recovery (Linux)
   probe              Check SQLite FTS5, fff, Code Mode and PTY support on this host, then exit
   check-release      Run protected offline candidate tests/evals; never approve or activate
+  backup             Copy a stopped data directory to a new folder with a checksummed manifest
+  restore            Verify a backup (--check), or restore it to its original, absent data directory
 
 Options:
   --host <address>   Address to listen on (default ${DEFAULT_HOST})
@@ -48,21 +62,39 @@ Options:
   -h, --help         Show this help
   -v, --version      Show the version`;
 
+const ARGUMENTS = {
+  host: { type: "string" },
+  port: { type: "string" },
+  "data-dir": { type: "string" },
+  "public-origin": { type: "string" },
+  candidate: { type: "string" },
+  output: { type: "string" },
+  from: { type: "string" },
+  "credential-key": { type: "string" },
+  check: { type: "boolean" },
+  "include-credential-key": { type: "boolean" },
+  "include-browser-profiles": { type: "boolean" },
+  help: { type: "boolean", short: "h" },
+  version: { type: "boolean", short: "v" },
+} as const;
+
+const SERVE = ["host", "port", "data-dir", "public-origin"];
+const OPTIONS: Partial<Record<string, readonly string[]>> = {
+  serve: SERVE,
+  supervise: SERVE,
+  probe: [],
+  "check-release": ["candidate", "data-dir"],
+  backup: ["data-dir", "output", "include-credential-key", "include-browser-profiles"],
+  restore: ["from", "data-dir", "check", "credential-key"],
+};
+
 export function parseCommand(argv: readonly string[], host: HostFacts): Command {
   let parsed;
   try {
     parsed = parseArgs({
       args: [...argv],
       allowPositionals: true,
-      options: {
-        host: { type: "string" },
-        port: { type: "string" },
-        "data-dir": { type: "string" },
-        "public-origin": { type: "string" },
-        candidate: { type: "string" },
-        help: { type: "boolean", short: "h" },
-        version: { type: "boolean", short: "v" },
-      },
+      options: ARGUMENTS,
     });
   } catch (error) {
     throw new UsageError((error as Error).message);
@@ -73,15 +105,14 @@ export function parseCommand(argv: readonly string[], host: HostFacts): Command 
 
   const [name = "serve", extra] = positionals;
   if (extra !== undefined) throw new UsageError(`unexpected argument '${extra}'`);
-  if (name === "probe") {
-    const options = ["host", "port", "data-dir", "public-origin", "candidate"] as const;
-    const given = options.find((option) => values[option] !== undefined);
-    if (given !== undefined) throw new UsageError(`'probe' does not accept --${given}`);
-    return { kind: "probe" };
-  }
+  const accepted = OPTIONS[name];
+  if (accepted === undefined) throw new UsageError(`unknown command '${name}'`);
+  const given = Object.keys(values).find((option) => !accepted.includes(option));
+  if (given !== undefined) throw new UsageError(`'${name}' does not accept --${given}`);
+  if (name === "probe") return { kind: "probe" };
+  if (name === "backup") return parseBackup(values, host);
+  if (name === "restore") return parseRestore(values, host);
   if (name === "check-release") {
-    const given = (["host", "port", "public-origin"] as const).find((option) => values[option] !== undefined);
-    if (given !== undefined) throw new UsageError(`check-release does not accept --${given}`);
     if (values.candidate === undefined || !isAbsolute(values.candidate))
       throw new UsageError("--candidate must be an absolute worktree path");
     return {
@@ -92,7 +123,6 @@ export function parseCommand(argv: readonly string[], host: HostFacts): Command 
   }
   if (name !== "serve" && name !== "supervise") throw new UsageError(`unknown command '${name}'`);
   if (name === "supervise" && host.platform !== "linux") throw new UsageError("supervise currently requires Linux");
-  if (values.candidate !== undefined) throw new UsageError(`${name} does not accept --candidate`);
 
   const publicOrigin = parsePublicOrigin(values["public-origin"]);
   return {
@@ -104,6 +134,34 @@ export function parseCommand(argv: readonly string[], host: HostFacts): Command 
       ...(publicOrigin === undefined ? {} : { publicOrigin }),
     },
   };
+}
+
+type Values = ReturnType<typeof parseArgs<{ options: typeof ARGUMENTS; allowPositionals: true }>>["values"];
+
+function parseBackup(values: Values, host: HostFacts): Command {
+  if (values.output === undefined || !isAbsolute(values.output))
+    throw new UsageError("--output must be an absolute path for the new backup folder");
+  return {
+    kind: "backup",
+    dataRoot: resolveDataRoot(values["data-dir"], host),
+    output: resolve(values.output),
+    includeCredentialKey: values["include-credential-key"] === true,
+    includeBrowserProfiles: values["include-browser-profiles"] === true,
+  };
+}
+
+function parseRestore(values: Values, host: HostFacts): Command {
+  if (values.from === undefined || !isAbsolute(values.from)) throw new UsageError("--from must be an absolute path");
+  const key = values["credential-key"];
+  if (key !== undefined && !isAbsolute(key)) throw new UsageError("--credential-key must be an absolute path");
+  const common = { from: resolve(values.from), ...(key === undefined ? {} : { credentialKey: resolve(key) }) };
+  // A restore names its destination explicitly; only a check runs without one.
+  if (values.check === true) {
+    if (values["data-dir"] !== undefined) throw new UsageError("restore --check does not accept --data-dir");
+    return { kind: "restore", check: true, ...common };
+  }
+  if (values["data-dir"] === undefined) throw new UsageError("restore needs --check or an explicit --data-dir");
+  return { kind: "restore", check: false, dataRoot: resolveDataRoot(values["data-dir"], host), ...common };
 }
 
 function parseHost(value: string, publicOrigin: string | undefined): string {

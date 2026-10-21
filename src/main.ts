@@ -52,6 +52,19 @@ async function main(argv: readonly string[]): Promise<number> {
         return 1;
       }
     }
+    case "backup":
+    case "restore": {
+      const { backupCommand } = await import("./core/backup.ts");
+      try {
+        process.stdout.write(`${JSON.stringify(await backupCommand(command, pkg.version))}\n`);
+        return 0;
+      } catch (error) {
+        process.stderr.write(
+          `pal: ${error instanceof Error ? error.message.slice(0, 1000) : `${command.kind} failed`}\n`,
+        );
+        return 1;
+      }
+    }
     case "supervise": {
       const { supervise } = await import("./core/supervise.ts");
       try {
