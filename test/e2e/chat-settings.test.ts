@@ -1631,6 +1631,37 @@ describe("chat connection and Stop failures", () => {
     expect(errors).toEqual([]);
   });
 
+  it("links an unconfirmed send's request ID to its durable admission in chat diagnostics", async () => {
+    const { page, base, other, errors } = await setup(1440);
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+    await page.goto(`${base}/#/chat/${other.id}`);
+    await page.getByLabel("Message", { exact: true }).fill("Admit me, then lose the reply");
+    await expect.poll(() => page.getByRole("button", { name: "Send", exact: true }).isEnabled()).toBe(true);
+    const posted = Promise.withResolvers<string>();
+    await page.route(
+      `**/api/chats/${other.id}/inputs`,
+      async (route) => {
+        await route.fetch({ timeout: 5000 });
+        posted.resolve(route.request().postData() ?? "");
+        await route.abort("failed");
+      },
+      { times: 1 },
+    );
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    const { requestId } = JSON.parse(await posted.promise) as { requestId: string };
+    const unconfirmed = page.getByRole("alert").filter({ hasText: "This send isn't confirmed." });
+    await unconfirmed.getByText(`Request ${requestId}`, { exact: true }).waitFor();
+    await unconfirmed.getByRole("button", { name: "Copy diagnostics", exact: true }).click();
+    await unconfirmed.getByRole("button", { name: "Copied", exact: true }).waitFor();
+    const copied = JSON.parse(await page.evaluate(() => navigator.clipboard.readText())) as {
+      chat: { inputs: { requestId: string; state: string; submissionId: number | null }[] };
+    };
+    expect(copied.chat.inputs).toContainEqual(
+      expect.objectContaining({ requestId, state: "admitted", submissionId: expect.any(Number) }),
+    );
+    expect(errors).toEqual([]);
+  });
+
   it("copies redacted installation and chat diagnostics for support", async () => {
     const { page, base, saved, provider, errors } = await setup(1440);
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
