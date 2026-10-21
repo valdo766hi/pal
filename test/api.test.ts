@@ -100,6 +100,17 @@ async function signedIn(publicOrigin?: string) {
   return app;
 }
 
+/** Signs in to the ChatGPT fixture, then chooses its model as the default explicitly, as the owner must. */
+async function connectChatGPT(api: Awaited<ReturnType<typeof start>>["api"]) {
+  const started = await api("POST", "chatgpt/sign-in");
+  await browse(started.body.attempt.authUrl);
+  await eventually(
+    () => api("GET", "chatgpt"),
+    (state) => state.body.models.length > 0,
+  );
+  expect((await api("PUT", "default-model", { provider: "openai", model: "gpt-5.5" })).status).toBe(200);
+}
+
 async function fakeChatModel(pal: Awaited<ReturnType<typeof openPal>>, chatId: string) {
   const faux = fauxProvider();
   (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
@@ -768,12 +779,7 @@ describe("API", () => {
 
   it("keeps MCP discovery and execution scoped to actual durable conversations", async () => {
     const { pal, api, fixture: openai } = await signedIn();
-    const started = await api("POST", "chatgpt/sign-in");
-    await browse(started.body.attempt.authUrl);
-    await eventually(
-      () => api("GET", "chatgpt"),
-      (state) => state.body.model !== null,
-    );
+    await connectChatGPT(api);
     const fixture = await startMcpFixture();
     cleanups.push(fixture.close);
     const server = await pal.mcp.add({ name: "Scoped", url: fixture.url, auth: { kind: "none" }, private: true });
@@ -995,11 +1001,19 @@ describe("API", () => {
       () => api("GET", "chatgpt"),
       (state) => state.body.attempt.state === "connected" && state.body.models.length > 0,
     );
-    expect(connected.body).toMatchObject({ account: { accountId: "user-1" }, model: "gpt-5.5" });
+    // Connecting lists models but chooses none: the default exists only after the owner's explicit selection.
+    expect(connected.body).toMatchObject({ account: { accountId: "user-1" }, model: null, default: null });
     // No token ever reaches the browser.
     expect(JSON.stringify(connected.body)).not.toMatch(/access-|refresh-|eyJ/);
-
     const project = (await api("POST", "projects", { requestId: "project-request-1", name: "Notes" })).body.project;
+    const unset = (await api("POST", "chats", { requestId: "chat-request-0", projectId: project.id })).body.chat;
+    expect((await api("GET", `chats/${unset.id}`)).body.model).toBeNull();
+    expect((await api("PUT", "default-model", { provider: "openai", model: "gpt-5.5" })).status).toBe(200);
+    expect((await api("GET", "chatgpt")).body).toMatchObject({
+      model: "gpt-5.5",
+      default: { provider: "openai", modelId: "gpt-5.5" },
+    });
+
     const chat = (await api("POST", "chats", { requestId: "chat-request-1", projectId: project.id })).body.chat;
     expect((await api("GET", `chats/${chat.id}`)).body.model).toBe("gpt-5.5");
 
@@ -1023,7 +1037,7 @@ describe("API", () => {
     await reader.cancel();
 
     const projects = (await api("GET", "projects")).body.projects;
-    expect(projects[0].chats).toEqual([expect.objectContaining({ id: chat.id, title: "hi" })]);
+    expect(projects[0].chats).toContainEqual(expect.objectContaining({ id: chat.id, title: "hi" }));
   });
 
   it("persists per-chat reasoning effort, clamps model switches, and rejects invalid choices", async () => {
@@ -1065,12 +1079,7 @@ describe("API", () => {
 
   it("deletes chats and removes projects without deleting files or Pi history", async () => {
     const { api, pal, fixture, dataRoot } = await signedIn();
-    const started = await api("POST", "chatgpt/sign-in");
-    await browse(started.body.attempt.authUrl);
-    await eventually(
-      () => api("GET", "chatgpt"),
-      (state) => state.body.model !== null,
-    );
+    await connectChatGPT(api);
     const folder = await realpath(await mkdtemp(join(tmpdir(), "pal-keep-files-")));
     cleanups.push(() => rm(folder, { recursive: true, force: true }));
     await writeFile(join(folder, "keep.txt"), "owner work");
@@ -1123,12 +1132,7 @@ describe("API", () => {
 
   it("receives device uploads exactly, then attaches them to a message", async () => {
     const { base, api, cookie, fixture, pal } = await signedIn();
-    const started = await api("POST", "chatgpt/sign-in");
-    await browse(started.body.attempt.authUrl);
-    await eventually(
-      () => api("GET", "chatgpt"),
-      (state) => state.body.model !== null,
-    );
+    await connectChatGPT(api);
     const project = (await api("POST", "projects", { requestId: "project-request-1", name: "Notes" })).body.project;
     const other = (await api("POST", "projects", { requestId: "project-request-2", name: "Other" })).body.project;
     const text = new TextEncoder().encode("The launch is on Tuesday.");

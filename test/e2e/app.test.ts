@@ -108,7 +108,7 @@ async function shoot(name: string): Promise<void> {
   if (shots !== undefined) await page.screenshot({ path: join(shots, `${name}.png`), animations: "disabled" });
 }
 
-/** Onboarding's provider step with ChatGPT: sign in through the fixture, then keep the model it preselects. */
+/** Onboarding's provider step with ChatGPT: sign in through the fixture, then explicitly choose the default model. */
 async function onboardWithChatGPT(view: Page): Promise<void> {
   await view
     .getByRole("radiogroup", { name: "Model provider" })
@@ -124,7 +124,11 @@ async function onboardWithChatGPT(view: Page): Promise<void> {
   await view.getByText("Signed in as").waitFor();
   await view.getByRole("button", { name: "Continue" }).click();
   await view.getByRole("heading", { name: "Choose a model" }).waitFor();
-  expect(await view.getByRole("radio", { name: /gpt-5\.5/ }).isChecked()).toBe(true);
+  // Signing in lists models but saves no default until the owner picks one.
+  expect(await view.getByRole("radio", { name: /gpt-5\.5/ }).isChecked()).toBe(false);
+  expect(await view.getByRole("button", { name: "Continue" }).isDisabled()).toBe(true);
+  await view.getByRole("radio", { name: /gpt-5\.5/ }).check();
+  await expect.poll(() => view.getByRole("button", { name: "Continue" }).isEnabled()).toBe(true);
   await view.getByRole("button", { name: "Continue" }).click();
 }
 
@@ -2237,6 +2241,15 @@ describe("Pal in a browser", () => {
     await legacyPage.getByText("Signed in as").waitFor();
     await legacyPage.goto(`${url}/#/chat/${chat.id}`);
     await legacyPage.getByLabel("Message").fill("hi");
+    // Signing in chose no model, so this chat still waits for an explicit one.
+    expect(await legacyPage.getByRole("button", { name: "Send" }).isDisabled()).toBe(true);
+    await legacyPage.getByRole("button", { name: /^Model and reasoning/ }).click();
+    await legacyPage
+      .getByRole("dialog", { name: "Model and reasoning" })
+      .getByRole("button", { name: /^Choose model/ })
+      .click();
+    await legacyPage.getByRole("radio", { name: /gpt-5\.5/ }).click();
+    await legacyPage.keyboard.press("Escape");
     await legacyPage.getByRole("button", { name: "Send" }).click({ timeout: 3000 });
     await legacyPage.getByText("Hello").waitFor();
     expect(

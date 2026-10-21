@@ -229,9 +229,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
   async function refreshListing(): Promise<void> {
     try {
       const models = await listChatGPTModels(pal.models);
+      // Listing never chooses a default: new chats use a ChatGPT model only after the owner picks one.
       listing = { models };
-      const first = models.find((model) => model.supported);
-      if ((await pal.settings.model()) === undefined && first !== undefined) await pal.settings.setModel(first.slug);
     } catch (error) {
       listing = { error: (error as Error).message };
     }
