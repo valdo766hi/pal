@@ -1406,6 +1406,98 @@ async function bridgeChatEvents(page: Page) {
     );
 }
 
+describe("durable tool activity", () => {
+  it.each([1440, 390])("uses native tool state without reviving older calls at %s px", async (width) => {
+    const { pal, page, base, saved, provider, errors, mutations, restart } = await setup(width);
+    const conversation = await pal.harness.conversation(saved.conversationId, context);
+    if (conversation === undefined) throw new Error("missing fixture conversation");
+    const message = (code: string) =>
+      fauxAssistantMessage(
+        { type: "toolCall", id: "reused-call", name: "codemode", arguments: { code } },
+        { stopReason: "toolUse" },
+      );
+    for (const code of ["text('Older observation');", "text('Latest observation');"])
+      await conversation.submit({ type: "write", entry: { kind: "pi.assistant", model: [message(code)] } }, context);
+    const emit = await bridgeChatEvents(page);
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const activities = page.locator(".activity");
+    await expect.poll(() => activities.count()).toBe(2);
+    const older = activities.nth(0),
+      latest = activities.nth(1);
+    for (const activity of [older, latest]) {
+      await activity.locator(".acth").click();
+      await activity.getByText("Outcome unconfirmed", { exact: true }).waitFor({ timeout: 5000 });
+      await activity.getByText("Call reused-call", { exact: true }).waitFor();
+      expect(await activity.locator(".spin").count()).toBe(0);
+      expect(await activity.getByRole("button", { name: /retry|repeat|run again/i }).count()).toBe(0);
+    }
+    const draft = page.getByLabel("Message", { exact: true });
+    await draft.fill("Keep this while task state changes");
+    await screenshot(page, `tool-activity-${width}`);
+    const snapshots = () => page.locator("html").getAttribute("data-chat-snapshots").then(Number);
+    const before = await snapshots();
+    await restart();
+    await expect.poll(snapshots, { timeout: 15_000 }).toBeGreaterThan(before);
+    for (const activity of [older, latest]) await activity.getByText("Outcome unconfirmed", { exact: true }).waitFor();
+    const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as {
+      entries: { id: number }[];
+    };
+    const tools = [{ callId: "reused-call", name: "codemode", status: "pending" }];
+    await emit("snapshot", { ...snapshot, run: { inputs: [1] }, tools, inbox: [] });
+    await latest.getByText("Queued", { exact: true }).waitFor();
+    await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
+    await emit("event", {
+      type: "tool_execution_start",
+      toolCallId: "reused-call",
+      toolName: "codemode",
+      taskId: 42,
+    });
+    await latest.getByText("Running", { exact: true }).waitFor();
+    await latest.getByText("Task 42", { exact: true }).waitFor();
+    await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
+    await emit("error");
+    await latest.getByText("Last observed running", { exact: true }).waitFor();
+    expect(await latest.locator(".spin").count()).toBe(0);
+    await emit("open");
+    await latest.getByText("Running", { exact: true }).waitFor();
+    await emit("event", {
+      type: "tool_execution_start",
+      toolCallId: "reused-call/child",
+      parentToolCallId: "reused-call",
+      toolName: "files_write",
+      taskId: 43,
+      parentTaskId: 42,
+    });
+    await emit("event", { type: "tool_execution_end", toolCallId: "reused-call", toolName: "codemode", taskId: 42 });
+    await latest.getByText("Outcome unconfirmed", { exact: true }).waitFor();
+    expect(await latest.getByText("Done", { exact: true }).count()).toBe(0);
+    await emit("snapshot", {
+      ...snapshot,
+      run: { inputs: [1] },
+      inbox: [],
+      tools: [{ ...tools[0], status: "running", taskId: 42 }],
+    });
+    await latest.getByText("Running", { exact: true }).waitFor();
+    await emit("event", { type: "run_end" });
+    await latest.getByText("Outcome unconfirmed", { exact: true }).waitFor();
+    expect(await latest.locator(".spin").count()).toBe(0);
+    await emit("event", {
+      type: "message_end",
+      entry: {
+        id: Math.max(...snapshot.entries.map((entry) => entry.id)) + 1,
+        kind: "pi.tool-result",
+        model: [{ role: "toolResult", toolCallId: "reused-call", content: [{ type: "text", text: "Known result" }] }],
+      },
+    });
+    await latest.getByText("Done", { exact: true }).waitFor();
+    await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
+    expect(await draft.inputValue()).toBe("Keep this while task state changes");
+    expect(mutations).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});
+
 describe("chat connection and Stop failures", () => {
   it.each([1440, 390])("shows loading the saved conversation without clearing the draft at %s px", async (width) => {
     const { page, base, saved, pal, provider, errors, mutations } = await setup(width);

@@ -1,4 +1,5 @@
 // Reconnect replaces live state from a snapshot; event offsets are not replayable.
+import type { ToolEventCall, ToolSlot } from "@earendil-works/pi-durable";
 import type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
 import type { McpReceipt } from "../../../src/pi/mcp-source.ts";
 export type { CommandApproval, McpReceipt };
@@ -60,12 +61,14 @@ type Change =
 type Snapshot = {
   entries: Entry[];
   run?: unknown;
+  tools?: readonly ToolSlot[];
   generation?: { message?: Message; retry?: { at: number; error: string } };
   inbox: { id: number; mode: "steer" | "followUp" }[];
 };
 
 type AgentEvent =
   | { type: "run_start" | "run_end" }
+  | ({ type: "tool_execution_start" | "tool_execution_end" } & ToolEventCall)
   | { type: "entry_appended"; entry: Entry }
   | { type: "message_start"; message: Message }
   | { type: "message_update"; changes: Change[] }
@@ -79,6 +82,7 @@ export class ChatStream {
   entries: Entry[] = $state([]);
   partial: Message | undefined = $state();
   running = $state(false);
+  tools: readonly ToolSlot[] = $state.raw([]);
   inbox: { id: number; mode: "steer" | "followUp" }[] = $state([]);
   retry: { at: number; error: string } | undefined = $state();
   connected = $state(false);
@@ -128,6 +132,7 @@ export class ChatStream {
   #reset(snapshot: Snapshot): void {
     this.entries = snapshot.entries;
     this.running = snapshot.run !== undefined;
+    this.tools = snapshot.tools ?? [];
     this.partial = snapshot.generation?.message;
     this.retry = snapshot.generation?.retry;
     this.inbox = snapshot.inbox;
@@ -144,7 +149,19 @@ export class ChatStream {
     if (event.type === "run_start") this.running = true;
     else if (event.type === "run_end") {
       this.running = false;
+      this.tools = [];
       this.partial = undefined;
+    } else if (
+      (event.type === "tool_execution_start" || event.type === "tool_execution_end") &&
+      "toolCallId" in event &&
+      event.parentToolCallId === undefined
+    ) {
+      this.tools = this.tools.filter((tool) => tool.callId !== event.toolCallId);
+      if (event.type === "tool_execution_start") {
+        const tool: ToolSlot = { callId: event.toolCallId, name: event.toolName, status: "running" };
+        if (event.taskId !== undefined) tool.taskId = event.taskId;
+        this.tools = [...this.tools, tool];
+      }
     } else if ("entry" in event && (event.type === "entry_appended" || event.type === "message_end")) {
       this.#append(event.entry);
       if (event.type === "message_end") this.partial = undefined;

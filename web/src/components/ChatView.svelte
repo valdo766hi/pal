@@ -75,6 +75,7 @@
     id: string;
     name: string;
     code: string | undefined;
+    latest: boolean;
     result: { text: string; isError: boolean; calls: NestedCall[] } | undefined;
   };
   type Item =
@@ -311,12 +312,12 @@
         };
       }
     }
-    const assistant = (id: string, message: Message, live: boolean): Item => {
+    const assistant = (id: number | "live", message: Message, live: boolean): Item => {
       const blocks: Block[] =
         typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
       return {
         kind: "assistant",
-        id,
+        id: String(id),
         texts: blocks.flatMap((block) => (block.type === "text" && block.text !== "" ? [block.text] : [])),
         steps: blocks.flatMap((block) =>
           block.type === "toolCall"
@@ -325,6 +326,7 @@
                   id: block.id,
                   name: block.name,
                   code: typeof block.arguments.code === "string" ? block.arguments.code : undefined,
+                  latest: caller[block.id] === id,
                   result: results[`${id}/${block.id}`],
                 },
               ]
@@ -380,7 +382,7 @@
           attachments: entry.data?.attachments ?? [],
         });
       } else if (entry.kind === "pi.assistant" && message !== undefined) {
-        built.push(assistant(String(entry.id), message, false), ...asked(entry.id));
+        built.push(assistant(entry.id, message, false), ...asked(entry.id));
       } else if (entry.kind === "pi.compaction") {
         built.push({
           kind: "note",
@@ -607,8 +609,20 @@
     return server === undefined || tool === undefined ? name : `${server} · ${tool}`;
   }
 
+  function activeTool(step: Step) {
+    return step.latest ? stream?.tools.find((tool) => tool.callId === step.id) : undefined;
+  }
+  function phase(step: Step, live: boolean) {
+    if (step.result !== undefined) return step.result.isError ? "Failed" : "Done";
+    if (live) return "Preparing";
+    const tool = activeTool(step);
+    if (tool?.status === "running") return stream?.connected ? "Running" : "Last observed running";
+    if (tool?.status === "pending") return "Queued";
+    return "Outcome unconfirmed";
+  }
+
   /** One quiet line for an assistant turn's scripts, counted from the tool calls that came back. */
-  function summary(steps: Step[]): string {
+  function summary(steps: Step[], live: boolean): string {
     const calls = steps.flatMap((step) => step.result?.calls ?? []);
     const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
     const commands = calls.filter((call) => call.name === "shell_run").length;
@@ -620,7 +634,16 @@
       tools > 0 ? `used ${count(tools, "tool")}` : "",
     ].filter((part) => part !== "");
     if (steps.some((step) => step.result?.isError)) did.push("with errors");
-    const ran = steps.length === 1 ? "Ran a script" : `Ran ${steps.length} scripts`;
+    const unresolved = steps.map((step) => phase(step, live)).find((state) => state !== "Done" && state !== "Failed");
+    if (unresolved !== undefined) did.push(unresolved.toLowerCase());
+    const ran =
+      unresolved === undefined
+        ? steps.length === 1
+          ? "Ran a script"
+          : `Ran ${steps.length} scripts`
+        : steps.length === 1
+          ? "Script"
+          : `${steps.length} scripts`;
     return did.length > 0 ? `${ran} · ${did.join(", ")}` : ran;
   }
 
@@ -785,26 +808,39 @@
               {@const open = openSteps[item.id] === true}
               <div class="activity">
                 <button class="acth" aria-expanded={open} onclick={() => (openSteps[item.id] = !open)}>
-                  {#if item.live && item.steps.some((step) => step.result === undefined)}
+                  {#if item.steps.some((step) => ["Preparing", "Running"].includes(phase(step, item.live)))}
                     <span class="ring spin" aria-hidden="true"></span>
                   {/if}
-                  <span>{summary(item.steps)}</span>
+                  <span>{summary(item.steps, item.live)}</span>
                   <Icon name={open ? "chevD" : "chevR"} size={13} />
                 </button>
                 {#if open}
                   <ol>
                     {#each item.steps as step (step.id)}
+                      {@const state = phase(step, item.live)}
+                      {@const tool = activeTool(step)}
                       <li>
                         <div class="steprow">
-                          {#if step.result === undefined}<span class="ring spin" aria-hidden="true"></span><span
-                              class="sr">Running</span
-                            >
+                          {#if step.result === undefined}<span
+                              class="ring"
+                              class:spin={state === "Preparing" || state === "Running"}
+                              aria-hidden="true"
+                            ></span><span class="dim">{state}</span>
                           {:else if step.result.isError}<span class="tick er" aria-hidden="true">✕</span><span
                               class="sr">Failed</span
                             >
                           {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span>{/if}
                           <span>{step.name}</span>
                         </div>
+                        {#if step.result === undefined}
+                          <div class="dim small">
+                            <span>Call {step.id}</span>{#if tool?.taskId !== undefined}
+                              · <span>Task {tool.taskId}</span>{/if}
+                          </div>
+                          {#if state === "Outcome unconfirmed"}<p class="dim small">
+                              No result was recorded. Inspect the workspace before repeating an action.
+                            </p>{/if}
+                        {/if}
                         {#if step.code !== undefined}<pre class="out">{step.code}</pre>{/if}
                         {#each step.result?.calls ?? [] as call (call.id)}
                           <div class="steprow call">
