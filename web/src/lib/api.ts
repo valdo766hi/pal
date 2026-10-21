@@ -23,6 +23,8 @@ export type { MemoryItem, MemoryInput } from "../../../src/core/memory.ts";
 export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
 import type { InstructionInfo, InstructionSettings } from "../../../src/core/instructions.ts";
 export type { InstructionInfo, InstructionSettings };
+import type { SkillInfo, SkillSettings } from "../../../src/core/skills.ts";
+export type { SkillInfo, SkillSettings };
 export type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
 export type { CompatibleConfig, KeyCheck, ProviderModel, ProviderView } from "../../../src/pi/providers.ts";
 export type ModelRef = { provider: string; modelId: string };
@@ -127,6 +129,10 @@ export const requestId = (): string =>
   Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 export const api = {
+  skills: (id: string, signal?: AbortSignal) => call<SkillInfo>("GET", `chats/${id}/skills`, undefined, signal),
+  configureSkills: (id: string, settings: SkillSettings) => call<SkillInfo>("PUT", `chats/${id}/skills`, settings),
+  selectSkills: (id: string, revision: number, skills: { id: string; revision: string }[]) =>
+    call<SkillInfo>("PUT", `chats/${id}/skills/selection`, { revision, skills }),
   instructions: (id: string, signal?: AbortSignal) =>
     call<InstructionInfo>("GET", `chats/${id}/instructions`, undefined, signal),
   configureInstructions: (id: string, settings: InstructionSettings) =>

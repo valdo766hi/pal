@@ -25,6 +25,8 @@ import { ChatService } from "./chats.ts";
 import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { INSTRUCTIONS_NAMESPACE, ProjectInstructions } from "./instructions.ts";
+import { GuidanceFiles } from "./guidance-files.ts";
+import { ProjectSkills, SKILLS_NAMESPACE } from "./skills.ts";
 import { Changes } from "./changes.ts";
 import { FILES_NAMESPACE, fileTools, projectFiles } from "./files.ts";
 import { FolderGrants } from "./folders.ts";
@@ -74,6 +76,7 @@ export type Pal = {
   readonly memory: ProjectMemory;
   readonly context: ChatContext;
   readonly instructions: ProjectInstructions;
+  readonly skills: ProjectSkills;
   readonly chats: ChatService;
   readonly approvals: CommandApprovals;
   readonly extensions: BuiltinExtensions;
@@ -190,7 +193,11 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
     );
 
     const memory = new ProjectMemory(database, folders, store.storage, [options.dataRoot]);
-    const instructions = await ProjectInstructions.open({
+    const guidanceFiles = await GuidanceFiles.open({
+      deny: [options.dataRoot, options.installRoot, "/nix/store"],
+      privateFiles: [store.path, `${store.path}-wal`, `${store.path}-shm`, join(options.dataRoot, "credentials.key")],
+    });
+    const instructions = new ProjectInstructions({
       database,
       workspaces: openedWorkspaces,
       harness: () => {
@@ -198,7 +205,18 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
         return harness;
       },
       deny: [options.dataRoot, options.installRoot, "/nix/store"],
-      privateFiles: [store.path, `${store.path}-wal`, `${store.path}-shm`, join(options.dataRoot, "credentials.key")],
+      files: guidanceFiles,
+      ...(options.guidanceHome === undefined ? {} : { home: options.guidanceHome }),
+    });
+
+    const skills = new ProjectSkills({
+      database,
+      workspaces: openedWorkspaces,
+      files: guidanceFiles,
+      harness: () => {
+        if (harness === undefined) throw new Error("the harness is not open");
+        return harness;
+      },
       ...(options.guidanceHome === undefined ? {} : { home: options.guidanceHome }),
     });
 
@@ -224,11 +242,20 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
           name === "shell_run" ||
           name === "memory_search" ||
           name === "instructions_scope" ||
+          name === "skills_search" ||
+          name === "skills_read" ||
           (name.startsWith(BROWSER_NAMESPACE.prefix) && browsers?.allows(conversation) === true) ||
           (await mcp?.allowsInConversation(conversation, name)) === true
         );
       },
-      namespaces: [FILES_NAMESPACE, SHELL_NAMESPACE, MEMORY_NAMESPACE, BROWSER_NAMESPACE, INSTRUCTIONS_NAMESPACE],
+      namespaces: [
+        FILES_NAMESPACE,
+        SHELL_NAMESPACE,
+        MEMORY_NAMESPACE,
+        BROWSER_NAMESPACE,
+        INSTRUCTIONS_NAMESPACE,
+        SKILLS_NAMESPACE,
+      ],
     });
     sandbox = codemode.sandbox;
     for (const extension of codemode.extensions) registry.install(extension);
@@ -290,6 +317,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
           MEMORY_NAMESPACE,
           BROWSER_NAMESPACE,
           INSTRUCTIONS_NAMESPACE,
+          SKILLS_NAMESPACE,
           ...namespaces,
         ]),
     });
@@ -306,8 +334,16 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
     // Existing conversations already select this mandatory extension; a new name would leave their core hooks out.
     registry.install({
       ...chatContext.extension,
-      tools: [...(chatContext.extension.tools ?? []), ...(instructions.extension.tools ?? [])],
-      sections: [...(chatContext.extension.sections ?? []), ...(instructions.extension.sections ?? [])],
+      tools: [
+        ...(chatContext.extension.tools ?? []),
+        ...(instructions.extension.tools ?? []),
+        ...(skills.extension.tools ?? []),
+      ],
+      sections: [
+        ...(chatContext.extension.sections ?? []),
+        ...(instructions.extension.sections ?? []),
+        ...(skills.extension.sections ?? []),
+      ],
       hooks: [...(chatContext.extension.hooks ?? []), ...(instructions.extension.hooks ?? [])],
     });
     const running = await Harness.open(store.storage, { models, registry }, context);
@@ -398,6 +434,7 @@ export async function openPal(options: PalOptions, context: Context): Promise<Pa
       memory,
       context: chatContext,
       instructions,
+      skills,
       workspaces: openedWorkspaces,
       chats: openedChats,
       approvals: commandApprovals,

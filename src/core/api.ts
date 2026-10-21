@@ -727,6 +727,15 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         if (method === "GET" || method === "PUT")
           return send(200, await pal.instructions.inspect(chat.conversationId, context));
       }
+      if (action === "skills" && path.length === 3) {
+        if (method === "PUT") await pal.skills.configure(chat.conversationId, await readJson(request));
+        if (method === "GET" || method === "PUT")
+          return send(200, await pal.skills.inspect(chat.conversationId, context));
+      }
+      if (action === "skills" && path.length === 4 && path[3] === "selection" && method === "PUT") {
+        await pal.skills.select(chat.conversationId, await readJson(request), context);
+        return send(200, await pal.skills.inspect(chat.conversationId, context));
+      }
       if (action === "context" && path.length === 3 && method === "GET")
         return send(200, await pal.context.inspect(chat, context));
       if (action === "context" && path.length === 4) {

@@ -53,8 +53,9 @@ and package installer are not available yet. See [extension architecture](docs/a
   [fff](https://github.com/dmtrKovalenko/fff)-powered search.
 - **Human terminal.** A real shell in the browser (node-pty + xterm). Reconnect from your phone and take over
   control.
-- **Context.** Source-linked project memory, pinned chat instructions, bounded global/project/scoped AGENTS.md
-  guidance with provenance and disabling, and inspection of the latest retained prepared context.
+- **Context.** Source-linked memory, pinned chat instructions and scoped AGENTS.md guidance. Global/project
+  `SKILL.md` procedures load lazily through Code Mode or explicit selection, with source controls, provenance and
+  inspection of the latest retained prepared context.
 - **Browser** (Linux). A per-project Chromium with its own profile, running in a network-less sandbox whose only
   egress is a broker that admits public addresses. You drive it from the panel. The agent may use it only after
   you hand it control.

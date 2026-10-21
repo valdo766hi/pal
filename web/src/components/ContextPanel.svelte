@@ -16,6 +16,7 @@
   import Icon from "../lib/Icon.svelte";
   import ConfirmRemoval from "./ConfirmRemoval.svelte";
   import InstructionSources from "./InstructionSources.svelte";
+  import SkillSources from "./SkillSources.svelte";
 
   let { project, chat, workspace }: { project: Project; chat: ChatSummary; workspace?: Workspace | null } = $props();
   let info: ContextInfo | undefined = $state.raw();
@@ -334,7 +335,7 @@
           : `Context head entry #${info.head}. Original history remains retained.`}
       </p>
     </section>
-    {#key chat.id}<InstructionSources chatId={chat.id} />{/key}
+    {#key chat.id}<InstructionSources chatId={chat.id} /><SkillSources chatId={chat.id} />{/key}
     {#if extensions}
       <section aria-label="Extension pins">
         <h3 class="h3">Extension pins</h3>

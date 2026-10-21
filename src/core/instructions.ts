@@ -1,7 +1,4 @@
-import { isUtf8 } from "node:buffer";
-import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Context } from "@earendil-works/chord";
@@ -18,7 +15,8 @@ import {
 import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { type Static, Type } from "typebox";
-import { FileAccessError, isProtected, resolveProjectPath } from "./files.ts";
+import { FileAccessError, resolveProjectPath } from "./files.ts";
+import { guidanceHash as hash, guidanceMissing as missing, type GuidanceFiles } from "./guidance-files.ts";
 import { HttpError } from "./http.ts";
 import { validate } from "./requests.ts";
 import type { Workspaces } from "./workspaces.ts";
@@ -57,7 +55,7 @@ type InstructionOptions = {
   workspaces: Workspaces;
   harness: () => Harness;
   deny: readonly string[];
-  privateFiles: readonly string[];
+  files: GuidanceFiles;
   home?: string;
 };
 type Snapshot = {
@@ -113,12 +111,6 @@ const Directories = Type.Object(
   { additionalProperties: false },
 );
 const SECTION = "scoped_instructions";
-const inside = (root: string, path: string) => {
-  const rel = relative(root, path);
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-};
-const hash = (value: string) => createHash("sha256").update(value).digest("hex");
-const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
 
 /** Documents remain guidance; Pi owns prepared prompt bytes and replay, and host policy still owns every effect. */
 export class ProjectInstructions {
@@ -127,18 +119,16 @@ export class ProjectInstructions {
   readonly #workspaces: Workspaces;
   readonly #harness: () => Harness;
   readonly #deny: readonly string[];
-  readonly #privateFiles: readonly string[];
-  readonly #privateInodes: ReadonlySet<string>;
+  readonly #files: GuidanceFiles;
   readonly #home: string;
   #reading = 0;
 
-  private constructor(options: InstructionOptions, privateInodes: ReadonlySet<string>) {
+  constructor(options: InstructionOptions) {
     this.#database = options.database;
     this.#workspaces = options.workspaces;
     this.#harness = options.harness;
     this.#deny = options.deny;
-    this.#privateFiles = options.privateFiles;
-    this.#privateInodes = privateInodes;
+    this.#files = options.files;
     this.#home = options.home ?? homedir();
     this.extension = defineExtension({
       name: "pal.instructions",
@@ -214,19 +204,6 @@ export class ProjectInstructions {
         }),
       ],
     });
-  }
-
-  static async open(options: InstructionOptions) {
-    // Retain protected objects even when their original paths are moved.
-    const inodes = new Set<string>();
-    for (const path of options.privateFiles) {
-      const info = await stat(path).catch((error) => {
-        if (missing(error)) return undefined;
-        throw error;
-      });
-      if (info !== undefined) inodes.add(`${info.dev}:${info.ino}`);
-    }
-    return new ProjectInstructions(options, inodes);
   }
 
   async settings(project: string): Promise<InstructionSettings> {
@@ -423,76 +400,7 @@ export class ProjectInstructions {
     return snapshot;
   }
   async #read(root: string, name: string, global: boolean) {
-    const configured = join(root, name);
-    if (global && this.#deny.some((path) => inside(path, configured)))
-      throw new FileAccessError("protected instruction source");
-    const canonicalRoot = await realpath(root);
-    let current = canonicalRoot;
-    for (const part of dirname(name)
-      .split(sep)
-      .filter((part) => part !== "." && part !== "")) {
-      current = join(current, part);
-      const info = await lstat(current);
-      if (info.isSymbolicLink()) throw new FileAccessError("instruction sources cannot follow symbolic links");
-    }
-    const directory = await opendir(dirname(configured));
-    const wanted = name.split(sep).at(-1)?.normalize("NFC");
-    let matched = false;
-    let visited = 0;
-    for await (const entry of directory) {
-      if (++visited > 2048) throw new FileAccessError("instruction directory entry limit reached");
-      const spelling = entry.name.normalize("NFC");
-      if (spelling.toLowerCase() !== wanted?.toLowerCase()) continue;
-      if (matched || spelling !== wanted) throw new FileAccessError("ambiguous instruction filename or case mismatch");
-      matched = true;
-    }
-    if ((await lstat(configured)).isSymbolicLink())
-      throw new FileAccessError("instruction sources cannot follow symbolic links");
-    const target = await realpath(configured);
-    if (
-      !inside(canonicalRoot, target) ||
-      (global ? this.#deny.some((path) => inside(path, target)) : isProtected(this.#deny, canonicalRoot, target))
-    )
-      throw new FileAccessError("protected instruction source");
-    const before = await lstat(target);
-    if (!before.isFile() || before.nlink !== 1 || before.size > INSTRUCTION_LIMITS.fileBytes)
-      throw new FileAccessError("instructions must be a bounded regular file without hardlinks");
-    if (this.#privateInodes.has(`${before.dev}:${before.ino}`)) throw new FileAccessError("private instruction source");
-    for (const path of this.#privateFiles) {
-      const info = await stat(path).catch((error) => {
-        if (missing(error)) return undefined;
-        throw error;
-      });
-      if (info?.dev === before.dev && info.ino === before.ino) throw new FileAccessError("private instruction source");
-    }
-    const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    try {
-      const info = await handle.stat();
-      if (info.dev !== before.dev || info.ino !== before.ino || info.nlink !== 1 || !info.isFile())
-        throw new FileAccessError("instruction source changed");
-      const chunks: Buffer[] = [];
-      for await (const chunk of handle.createReadStream({
-        start: 0,
-        end: INSTRUCTION_LIMITS.fileBytes,
-        highWaterMark: 4096,
-        autoClose: false,
-      }))
-        chunks.push(chunk);
-      const bytes = Buffer.concat(chunks);
-      const after = await handle.stat();
-      if (
-        bytes.length > INSTRUCTION_LIMITS.fileBytes ||
-        after.size !== before.size ||
-        after.mtimeMs !== before.mtimeMs ||
-        after.ctimeMs !== before.ctimeMs ||
-        (await realpath(configured)) !== target
-      )
-        throw new FileAccessError("instruction source changed or exceeded its limit");
-      if (!isUtf8(bytes) || bytes.includes(0)) throw new FileAccessError("instructions must be UTF-8 text");
-      return bytes.toString("utf8");
-    } finally {
-      await handle.close();
-    }
+    return (await this.#files.read(root, name, { global, fileBytes: INSTRUCTION_LIMITS.fileBytes })).text;
   }
 }
 export type InstructionInfo = Awaited<ReturnType<ProjectInstructions["inspect"]>>;

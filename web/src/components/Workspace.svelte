@@ -147,13 +147,14 @@
   });
 
   const enabledPanels = $derived(
-    new Set(
-      (app.extensions?.catalog ?? [])
+    new Set([
+      "Context",
+      ...(app.extensions?.catalog ?? [])
         .filter((item) =>
           located?.chat.extensions.some((choice) => choice.id === item.id && choice.version === item.version),
         )
         .flatMap((item) => [...item.panels]),
-    ),
+    ]),
   );
 
   onMount(() => {

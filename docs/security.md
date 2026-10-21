@@ -61,9 +61,13 @@ refuses an unfinished replay rather than silently resetting its budget.
   Without rtk, or without an equivalent, the command runs unchanged.
 
 Treat workspace files, web pages and tool results as untrusted input. They can contain instructions meant for the
-model (prompt injection), and Pal never grants them tool permissions or policy authority. Loaded AGENTS.md guidance
-is subordinate to core policy and the current user. Its source settings grant bounded document reads, not execution
-or access to the rest of the home directory. Keep Ask mode on for chats that read content you do not control.
+model (prompt injection), and Pal never grants them tool permissions or policy authority. AGENTS.md and SKILL.md
+metadata, bodies and references are subordinate to core policy and the current user. Source settings grant bounded
+document reads, not execution or access to the rest of the home directory. References cannot traverse outside their
+skill package or follow source symlinks/hardlinks; Pal's protected paths and retained private inodes remain denied.
+Loading does not run bundled scripts, import code, install dependencies or honor permission claims. Later actions
+still use existing tool policy and approvals. These checks are not an atomic-filesystem guarantee. Keep Ask mode on
+for chats that read content you do not control.
 
 ## Internet tools
 

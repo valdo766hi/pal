@@ -87,6 +87,49 @@ Files are UTF-8 regular files without symlinks or hardlinks, at most 8 KiB each.
 are visible, not represented as applied instructions. Loading never executes code or changes grants. Pi journals the
 prepared section and tool results, preserving the bytes used by an earlier request after source edits or restart.
 
+## Skill sources
+
+`src/core/skills.ts` discovers `~/.agents/skills/<package>/SKILL.md` from the host account and
+`<actual-workspace>/.agents/skills/<package>/SKILL.md`. Context remains available without optional memory tools.
+Its source settings support four absolute global roots and four workspace-relative project roots, enabled/disabled
+per project. No ancestor/sibling discovery, package installation or bundled script execution occurs.
+
+A package starts with bounded YAML frontmatter, followed by its procedure:
+
+```markdown
+---
+name: verify-changes
+description: Use when checking changes in this project.
+---
+Inspect the project's declared checks before running its approved tools.
+```
+
+Names use Unicode NFKC, lowercase and trimmed edges, with a 1–80 character bound before and after normalization.
+A valid project definition overrides its global namesake;
+same-scope duplicates are unavailable, not enumeration-order winners. Disabling a name disables every source for
+that project, with no fallback. Disabling/removing a project root can expose an enabled global definition. Aliases
+of the same global root are deduplicated. Incomplete discovery withholds affected winners because a duplicate or
+project override may be hidden; narrow or repair the enabled roots.
+
+Discovery reads at most 8 KiB of frontmatter per file, validates string names/descriptions and rejects aliases,
+tags, duplicate YAML keys and excessive nesting. Catalogs stop at 128 packages; model metadata is bounded to 16 KiB.
+`skills_search` finds relevant metadata, and `skills_read` reads the chosen current revision or a package-relative
+UTF-8 reference/asset. Code Mode output caps still apply: scripts can store the returned JSON and print its text in
+pages without raising those caps. Binary assets are explicitly unsupported. Files are bounded to 32 KiB; four inspections run
+at once, and each directory is bounded to 2,048 entries. Loading grants no file, shell or MCP authority.
+
+The owner can select up to four skills for a chat, within 32 KiB of selected context. Choices retain source revision
+and full-body SHA-256; edits, deletion and disabling withhold them from the current effective prompt until explicitly
+reselected. Model tool reads remain on demand rather than becoming permanent selected prompt bodies. Context shows
+catalog, source hashes, selected bytes and recent historical tool identities. Settings/selection use independent
+revision checks and retain stale UI drafts. Source snapshots refresh before each request or on explicit reload.
+Pi's positional system patches and Code Mode journal retain exact historical bytes; refreshing does not erase them
+or reread a finished tool call during script recovery.
+
+Both document loaders share `src/core/guidance-files.ts`: confined regular UTF-8 reads, protected-path and retained
+private-inode checks, no source-file symlinks or hardlinks, and stable pre/post-open checks. These checks do not
+claim an atomic filesystem or a hostile-host sandbox.
+
 ## Agent tools
 
 | Namespace | Tools                                                                                 | Source                    |
@@ -94,12 +137,13 @@ prepared section and tool results, preserving the bytes used by an earlier reque
 | files     | `files_folders`, `files_list`, `files_read`, `files_find`, `files_search`, `files_write`, `files_edit` | `src/core/files.ts` |
 | shell     | `shell_run`                                                                           | `src/core/execution.ts`   |
 | instructions | `instructions_scope` | `src/core/instructions.ts` |
+| skills | `skills_search`, `skills_read` | `src/core/skills.ts` |
 | memory    | `memory_search`                                                                       | `src/core/memory.ts`      |
 | browser   | `browser_observe`, `browser_act` (only while the owner has handed control over)       | `src/pi/browser-tools.ts` |
 | MCP       | one tool per approved server tool, such as Exa search or Context7 docs                | `src/pi/mcp-tools.ts`     |
 
-The tools share one path policy (`resolveProjectPath`, `isProtected`), which keeps them inside the chat's folders
-and away from Pal's data. Writes check the file's current SHA-256 first. Overlapping workspaces are serialized by
+Workspace file tools share a path policy (`resolveProjectPath`, `isProtected`), which keeps them inside the chat's
+folders and away from Pal's data. Guidance readers separately authorize only their configured document roots. Writes check the file's current SHA-256 first. Overlapping workspaces are serialized by
 `WorkspaceLocks`, and each mutation records a Git baseline first so the Changes panel can show it.
 
 ## Review, search and terminal

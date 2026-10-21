@@ -30,7 +30,7 @@ async function setup(width: number) {
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const pal = await openPal(
     {
-      dataRoot: root,
+      dataRoot: join(root, "data"),
       installRoot: "/nonexistent",
       providerOrigin: provider.origin,
       guidanceHome: join(root, "host-home"),
@@ -813,6 +813,9 @@ describe("review comment drafts", () => {
 
   it("keeps newer comment text when an older comment acknowledgement arrives", async () => {
     const { pal, page, base, project, workspace, panel, errors } = await reviewFixture(1440);
+    const events: string[] = [];
+    page.on("response", (response) => events.push(`response ${response.status()} ${response.url()}`));
+    page.on("requestfailed", (request) => events.push(`failed ${request.url()} ${request.failure()?.errorText}`));
     await panel.getByRole("button", { name: "Comment on line 1", exact: true }).click();
     const draft = panel.getByRole("textbox", { name: "Comment on line 1", exact: true });
     await draft.fill("First comment");
@@ -843,16 +846,15 @@ describe("review comment drafts", () => {
     );
     release.resolve(undefined);
     await done.promise;
-    const response = await refreshed;
-    expect(response.status()).toBe(200);
-    expect(await response.json()).toMatchObject({ comments: [{ body: "First comment" }] });
-    await panel
-      .getByText("First comment", { exact: true })
-      .waitFor()
-      .catch(async (failure: unknown) => {
-        await screenshot(page, "review-late-ack-failed");
-        throw new Error(await panel.innerText(), { cause: failure });
-      });
+    try {
+      const response = await refreshed;
+      expect(response.status()).toBe(200);
+      expect(await response.json()).toMatchObject({ comments: [{ body: "First comment" }] });
+      await panel.getByText("First comment", { exact: true }).waitFor();
+    } catch (failure) {
+      await screenshot(page, "review-late-ack-failed");
+      throw new Error(JSON.stringify({ panel: await panel.innerText(), events, errors }), { cause: failure });
+    }
     expect(await draft.inputValue()).toBe("Newer unsent comment");
     expect((await pal.changes.list(project.id, "normal", workspace.id)).comments).toMatchObject([
       { body: "First comment" },
@@ -1008,6 +1010,196 @@ describe("scoped instruction sources", () => {
     expect(await field.inputValue()).toBe(expected);
     expect((await pal.instructions.settings(project.id)).globalFile).toBe("/fixture/original-project-AGENTS.md");
     expect((await pal.instructions.settings(otherProject.id)).revision).toBe(0);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("lazy skill sources", () => {
+  async function catalog(page: Page, base: string, id: string, width: number) {
+    await page.goto(`${base}/#/chat/${id}`);
+    if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    const panel = page.getByRole("region", { name: "Skill sources", exact: true });
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).waitFor();
+    return panel;
+  }
+  async function library(root: string, directory: string, name: string, body: string) {
+    await mkdir(join(root, directory), { recursive: true });
+    await writeFile(
+      join(root, directory, "SKILL.md"),
+      `---\nname: ${name}\ndescription: Use this procedure for fixture tasks\n---\n${body}\n`,
+    );
+  }
+
+  it.each([1440, 390])("inspects and explicitly selects escaped global/project skills at %s px", async (width) => {
+    const { pal, page, base, project, saved, provider, errors } = await setup(width);
+    const settings = await pal.skills.settings(project.id);
+    const global = settings.global[0];
+    if (global === undefined) throw new Error("missing global fixture root");
+    await library(global.path, "global 界", "global-skill", "GLOBAL-SKILL-NOT-SELECTED");
+    const text = 'SELECTED-SKILL <img src=x onerror="alert(1)">';
+    await library(join(project.root, ".agents", "skills"), "project 界", "project-skill", text);
+    const panel = await catalog(page, base, saved.id, width);
+    expect(await panel.innerText()).toContain("global-skill");
+    expect(await panel.innerText()).toContain("project-skill");
+    expect(await panel.innerText()).not.toContain("GLOBAL-SKILL-NOT-SELECTED");
+    expect(await panel.innerText()).not.toContain("SELECTED-SKILL <img");
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).click();
+    await panel.getByRole("checkbox", { name: "Select project-skill from project", exact: true }).check();
+    const [response] = await Promise.all([
+      page.waitForResponse(`${base}/api/chats/${saved.id}/skills/selection`),
+      panel.getByRole("button", { name: "Save skill selection", exact: true }).click(),
+    ]);
+    expect(response.status()).toBe(200);
+    const content = panel.getByRole("region", { name: "Selected skill content", exact: true });
+    await content.getByText("View current selected bytes", { exact: true }).click();
+    expect(await content.locator("pre").textContent()).toContain(text);
+    expect(await content.locator("img").count()).toBe(0);
+    expect(await panel.innerText()).not.toContain("GLOBAL-SKILL-NOT-SELECTED");
+    expect(await content.innerText()).toContain("sha256:");
+    await panel.evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await screenshot(page, `skill-sources-${width}`);
+    if (width < 700) await page.getByRole("button", { name: "Close panel", exact: true }).click();
+    await page.getByLabel("Message", { exact: true }).fill("Use project-skill for this fixture");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await expect.poll(() => provider.requests.length).toBe(1);
+    expect(JSON.stringify(provider.requests[0]?.body)).toContain("SELECTED-SKILL");
+    expect(JSON.stringify(provider.requests[0]?.body)).not.toContain("GLOBAL-SKILL-NOT-SELECTED");
+    expect(errors).toEqual([]);
+  });
+
+  it("retains stale source-settings drafts and disables a global skill only for its project", async () => {
+    const { pal, page, base, project, saved, other, errors } = await setup(1440);
+    const settings = await pal.skills.settings(project.id);
+    const global = settings.global[0];
+    if (global === undefined) throw new Error("missing global root");
+    await library(global.path, "shared", "shared-skill", "GLOBAL-REUSABLE-BODY");
+    const panel = await catalog(page, base, saved.id, 1440);
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).click();
+    await panel.getByRole("checkbox", { name: "Select shared-skill from global", exact: true }).check();
+    await panel.getByRole("button", { name: "Save skill selection", exact: true }).click();
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).waitFor();
+    await panel.getByRole("button", { name: "Configure skill sources", exact: true }).click();
+    const disabled = panel.getByRole("textbox", { name: "Disabled skill names for this project", exact: true });
+    await disabled.fill("shared-skill");
+    await pal.skills.configure(saved.conversationId, { ...settings, disabled: ["different-skill"] });
+    const [stale] = await Promise.all([
+      page.waitForResponse(
+        (res) => res.url().endsWith(`/api/chats/${saved.id}/skills`) && res.request().method() === "PUT",
+      ),
+      panel.getByRole("button", { name: "Save skill sources", exact: true }).click(),
+    ]);
+    expect(stale.status()).toBe(409);
+    await panel.getByRole("alert").filter({ hasText: "draft is retained" }).waitFor();
+    expect(await disabled.inputValue()).toBe("shared-skill");
+    const seen = Promise.withResolvers<undefined>(),
+      release = Promise.withResolvers<undefined>(),
+      done = Promise.withResolvers<undefined>();
+    let entered = false;
+    await page.route(
+      `**/api/chats/${saved.id}/skills`,
+      async (route) => {
+        entered = true;
+        try {
+          const response = await route.fetch();
+          seen.resolve(undefined);
+          await release.promise;
+          await route.fulfill({ response });
+        } finally {
+          done.resolve(undefined);
+        }
+      },
+      { times: 1 },
+    );
+    cleanups.push(async () => {
+      release.resolve(undefined);
+      if (entered) await done.promise;
+    });
+    await panel.getByRole("button", { name: "Refresh skills", exact: true }).click();
+    await seen.promise;
+    expect(await disabled.inputValue()).toBe("shared-skill");
+    expect(await panel.getByRole("button", { name: "Reload current skill settings", exact: true }).isDisabled()).toBe(
+      true,
+    );
+    release.resolve(undefined);
+    await done.promise;
+    await panel.getByRole("button", { name: "Reload current skill settings", exact: true }).click();
+    await expect.poll(() => disabled.inputValue()).toBe("different-skill");
+    await disabled.fill("shared-skill");
+    await panel.getByRole("button", { name: "Save skill sources", exact: true }).click();
+    await panel.getByRole("button", { name: "Configure skill sources", exact: true }).waitFor();
+    expect((await pal.skills.inspect(other.conversationId, context)).current.catalog[0]).toMatchObject({
+      state: "disabled",
+    });
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).click();
+    const selected = panel.getByRole("checkbox", { name: "Select shared-skill from global", exact: true });
+    expect(await selected.isEnabled()).toBe(true);
+    await selected.uncheck();
+    await panel.getByRole("button", { name: "Save skill selection", exact: true }).click();
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).waitFor();
+    expect((await pal.skills.inspect(saved.conversationId, context)).selection.items).toEqual([]);
+    const nextProject = await pal.projects.create("other-skill-project", { name: "Other skill scope" });
+    const next = await pal.chats.createChat("other-skill-chat", { projectId: nextProject.id }, context);
+    expect((await pal.skills.inspect(next.conversationId, context)).current.catalog[0]).toMatchObject({
+      state: "ready",
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it("does not apply a late selection acknowledgement to another chat", async () => {
+    const { pal, page, base, project, saved, other, errors } = await setup(1440);
+    await library(join(project.root, ".agents", "skills"), "selection", "late-skill", "LATE-SELECTION-BODY");
+    const panel = await catalog(page, base, saved.id, 1440);
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).click();
+    await panel.getByRole("checkbox", { name: "Select late-skill from project", exact: true }).check();
+    const seen = Promise.withResolvers<undefined>(),
+      release = Promise.withResolvers<undefined>(),
+      done = Promise.withResolvers<undefined>();
+    let entered = false;
+    await page.route(`**/api/chats/${saved.id}/skills/selection`, async (route) => {
+      entered = true;
+      try {
+        const response = await route.fetch();
+        seen.resolve(undefined);
+        await release.promise;
+        await route.fulfill({ response });
+      } finally {
+        done.resolve(undefined);
+      }
+    });
+    cleanups.push(async () => {
+      release.resolve(undefined);
+      if (entered) await done.promise;
+    });
+    await panel.getByRole("button", { name: "Save skill selection", exact: true }).click();
+    await seen.promise;
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    const next = await catalog(page, base, other.id, 1440);
+    await next.getByRole("button", { name: "Choose skills for this chat", exact: true }).click();
+    const choice = next.getByRole("checkbox", { name: "Select late-skill from project", exact: true });
+    expect(await choice.isChecked()).toBe(false);
+    release.resolve(undefined);
+    await done.promise;
+    expect(await choice.isChecked()).toBe(false);
+    expect(await next.innerText()).not.toContain("LATE-SELECTION-BODY");
+    expect((await pal.skills.inspect(other.conversationId, context)).selection.items).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("keeps core skill inspection available when optional memory tools are omitted", async () => {
+    const { pal, page, base, project, errors } = await setup(1440);
+    const view = await pal.extensions.view();
+    await pal.extensions.select({
+      digest: view.digest,
+      selected: view.selected.filter((item) => item.id !== "memory"),
+    });
+    const chat = await pal.chats.createChat("no-memory-skills", { projectId: project.id }, context);
+    await page.goto(`${base}/#/chat/${chat.id}`);
+    await page.getByLabel("Message", { exact: true }).waitFor();
+    expect(await page.getByRole("button", { name: "Context", exact: true }).count()).toBe(1);
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    const panel = page.getByRole("region", { name: "Skill sources", exact: true });
+    await panel.getByRole("button", { name: "Choose skills for this chat", exact: true }).waitFor();
     expect(errors).toEqual([]);
   });
 });
