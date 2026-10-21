@@ -1,7 +1,35 @@
+// Versioned evaluation tasks. Each names its frozen starting snapshot under test/fixtures/evaluation and the checks
+// its independent grader runs; held-out tasks are never used while developing Pal's prompts or tools.
+type Common = {
+  readonly id: string;
+  readonly version: number;
+  readonly split: "development" | "held-out";
+  readonly categories: readonly string[];
+  /** Directory under test/fixtures/evaluation holding the starting repository. */
+  readonly snapshot: string;
+  readonly prompt: string;
+};
+/** Graded by running the candidate's program on each case's JSON input. */
+export type ProgramTask = Common & {
+  readonly kind: "program";
+  readonly entrypoint: string;
+  readonly cases: readonly { readonly id: string; readonly input: unknown; readonly expected: unknown }[];
+};
+/** Graded by the candidate's answer file, with the listed paths required to stay byte-identical. */
+export type AnswerTask = Common & {
+  readonly kind: "answer";
+  readonly answer: { readonly file: string; readonly expected: unknown };
+  readonly unchanged: readonly string[];
+};
+export type Task = ProgramTask | AnswerTask;
+
 export const checkout = {
+  kind: "program",
   id: "checkout-rounding",
   version: 1,
   split: "development",
+  categories: ["bug-fix", "multi-file"],
+  snapshot: "buggy",
   entrypoint: "src/main.mjs",
   prompt:
     "Fix the checkout receipt's inconsistent rounding in src/prices.mjs and src/receipt.mjs. " +
@@ -34,4 +62,42 @@ export const checkout = {
       expected: { unitCents: [268, 0, 400], totalCents: 1204 },
     },
   ],
-} as const;
+} as const satisfies ProgramTask;
+
+export const inventory = {
+  kind: "answer",
+  id: "module-inventory",
+  version: 1,
+  split: "development",
+  categories: ["repository-understanding"],
+  snapshot: "inventory",
+  prompt:
+    "Do not change any existing file. Create inventory.json in the project folder containing " +
+    '{"importers": [...]}: the sorted relative paths of every module under src/ that imports src/config.mjs ' +
+    "directly or through other modules, excluding src/config.mjs itself.",
+  answer: { file: "inventory.json", expected: { importers: ["src/api.mjs", "src/cli.mjs", "src/db.mjs"] } },
+  unchanged: ["README.md", "src"],
+} as const satisfies AnswerTask;
+
+export const slug = {
+  kind: "program",
+  id: "slug-test-repair",
+  version: 1,
+  split: "held-out",
+  categories: ["test-repair"],
+  snapshot: "slug",
+  entrypoint: "src/main.mjs",
+  prompt:
+    "node test.mjs fails. Fix src/slug.mjs, not the test: a slug is lowercase ASCII letters and digits in words " +
+    "joined by single hyphens. Remove accents from letters, treat every other character as a separator, and " +
+    "drop leading and trailing hyphens.",
+  cases: [
+    { id: "public", input: { text: "Crème Brûlée!" }, expected: "creme-brulee" },
+    { id: "repeated-separators", input: { text: "  Multiple   spaces " }, expected: "multiple-spaces" },
+    { id: "accents-and-dash", input: { text: "Ünïcödé — dash" }, expected: "unicode-dash" },
+    { id: "already-slug", input: { text: "already-slugged-2" }, expected: "already-slugged-2" },
+    { id: "no-words", input: { text: "!!!" }, expected: "" },
+  ],
+} as const satisfies ProgramTask;
+
+export const TASKS: readonly Task[] = [checkout, inventory, slug];

@@ -13,6 +13,7 @@ import {
   OPENAI_CHATGPT,
 } from "../pi/chatgpt.ts";
 import { createPalCodemode } from "../pi/codemode.ts";
+import { evaluationBudget } from "../pi/evaluation-budget.ts";
 import { McpManager } from "../pi/mcp.ts";
 import { ModelProviders } from "../pi/providers.ts";
 import { StdioPrograms } from "../pi/mcp-stdio.ts";
@@ -363,6 +364,10 @@ export async function openPal(
       models,
       store.storage,
     );
+    const budget = evaluationBudget(() => {
+      if (harness === undefined) throw new Error("the harness is not open");
+      return harness;
+    });
     // Existing conversations already select this mandatory extension; a new name would leave their core hooks out.
     registry.install({
       ...chatContext.extension,
@@ -376,7 +381,7 @@ export async function openPal(
         ...(instructions.extension.sections ?? []),
         ...(skills.extension.sections ?? []),
       ],
-      hooks: [...(chatContext.extension.hooks ?? []), ...(instructions.extension.hooks ?? [])],
+      hooks: [...(chatContext.extension.hooks ?? []), ...(instructions.extension.hooks ?? []), ...(budget.hooks ?? [])],
     });
     const running = await Harness.open(store.storage, { models, registry }, context);
     harness = running;

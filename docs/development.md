@@ -198,30 +198,60 @@ Browser and release activation currently fail closed without their Linux protect
 replacements pass adversarial tests; do not count unavailable capabilities or skipped tests as completed
 macOS support. Service installation or host security changes require a separately approved host plan.
 
-### Evaluation foundations
+### Evaluations
 
-The first versioned development task is `checkout-rounding-v1` (`src/evaluation/tasks.ts`). Its repository fixtures
-and independent grader are original Pal test material. The editable public test passes even on the buggy snapshot;
-the protected grader checks unit rounding and multi-line totals independently.
+Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting repository under
+`test/fixtures/evaluation` and an independent grader: `checkout-rounding` (development; bug fix across two files),
+`module-inventory` (development; repository understanding, answered in a file while sources stay unchanged) and
+`slug-test-repair` (held out; graded on cases the repository's own test does not contain).
+
+```sh
+nix build --out-link evaluate .#evaluate
+./evaluate/bin/pal-evaluate --data-dir /absolute/evaluation-data --provider openrouter --model <id> \
+  --output /absolute/new-report-dir [--effort off] [--repeats 3] [--split development|held-out|all] \
+  [--harness pal,baseline] [--external name='command'] [--seconds 600] [--turns 40] [--approvals full|approve-all]
+```
+
+This is **owner-run and spends provider credit**. Use a separate evaluation data directory with the provider
+configured; a running Pal (such as your normal one) holds its store and refuses to share it. Each task, harness and
+repeat starts from a fresh copy of the task's repository. Pal runs as a chat over that copy; the baseline is a plain
+loop of the same model object and credentials with four workspace tools, so their rows are **model-matched**.
+`--external` runs another product's own command line in the copy with the prompt in `PAL_EVAL_PROMPT`; its model
+and settings are outside Pal's control, so it is reported separately as **unmatched**. External commands get a fresh
+private HOME/TMPDIR and no ambient credentials; configure the CLI with an explicitly approved evaluation profile,
+never credentials in the command or prompt. Reports/traces are private and may contain repository content.
+
+`--seconds` bounds the whole run; baseline shell calls use at most 30 seconds of the remaining time. Both use GNU
+timeout for an independent process-group deadline. Pal's turn/deadline reservation is a Pi document that survives
+reopen; exhausting it cancels the native generation task before another model request. `--turns` cannot control an
+external product. There is no token/cost cap: approve spending separately. Tool interfaces, prompts, context policy
+and approvals differ between harnesses and are recorded, not claimed identical merely because the model matches.
+
+After each run the harness is stopped, the workspace is copied read-only and graded; the grader never runs the
+candidate's tests or trusts its claims. A run during which the grader, tasks or starting repositories changed is
+recorded as `evaluator_changed`, not graded. From the Nix package those files are in the read-only store. The report
+(`report.json`, `report.md`) keeps every run, including failures, budget overruns and approvals granted under
+`--approvals approve-all` (counted as interventions). Each row links the task and starting-repository digests,
+harness version/configuration, exact Pal/baseline runtime identity, model and budget, trace file and SHA-256, and
+the graded candidate and grader digests. The candidate is read-only during grading; its digest pins the retained
+inspectable copy. Success requires both a passing independent grade and completion within budget, with 95% Wilson
+intervals per harness and split. Reports rank harness/grade/tool failures and interventions with example traces,
+and aggregate tool-failure rates, latency, tokens and SDK cost estimates (not billed costs; subscription cost and
+unreported external metrics are unknown). Results are only comparable between like model/settings/budget rows.
+The initial three-task corpus is not a long-horizon/restart benchmark; expanding it remains required for #26/#27. Ordinary checks use scripted fake models; those reports say
+so and are not model or harness quality results. Real-provider results are owner-run.
+
+The grading controls build the graders against fixed correct, buggy, forged, hanging and flooding candidates and both
+newer tasks' starts and reference solutions:
 
 ```sh
 nix build .#checks.x86_64-linux.evaluation
 nix build .#checks.aarch64-darwin.evaluation
 ```
 
-These are **grading controls, not model evaluations or quality scores**. They run fixed correct, buggy, forged,
-hanging and flooding programs inside the Nix build sandbox. Candidate Node processes have read-only access to their
-frozen snapshot, no child-process/worker/addon permission, a per-case deadline and bounded output. Controls check
-that candidates cannot read or rewrite grader/task files, forge success, or choose the tests. This is not a general
-sandbox for Pal's host shell. Writable artifacts and symlinked source are rejected; snapshots have file/byte/depth
-limits. Reports retain task/version, initial/candidate/grader hashes and immutable paths, native Node/OS identity,
-grading limits and every case outcome, including failures. CI retains bounded control counts on both native targets;
-the protected release evaluator uses its own immutable grading sources, never the candidate's recipes.
-
-The agent/baseline runner, full task corpus, held-out split, model/configuration/budget traces, matched/unmatched
-comparisons, interventions, repeated-run uncertainty and bottleneck report remain required by
-[#26](https://github.com/valdo766hi/pal/issues/26). No comparative model result is established by these controls.
-Live-provider evaluations are owner-run; ordinary checks must not use real accounts or spend provider credit.
+Candidate programs get read-only access to their own frozen copy, no child processes, workers or addons, a per-case
+deadline and bounded output. This is not a general sandbox for Pal's host shell or for the agents under test: the
+read-only grader files and their digests keep the score honest, not the host safe.
 
 ## Project layout
 

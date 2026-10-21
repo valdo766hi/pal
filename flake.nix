@@ -41,6 +41,7 @@
           default = pal;
           ui-check = pkgs.callPackage ./nix/ui-check.nix { inherit ui; };
           transcript-benchmark = pkgs.callPackage ./nix/transcript-benchmark.nix { inherit ui; };
+          evaluate = pkgs.callPackage ./nix/evaluate.nix { inherit ui; };
           startup-benchmark = pkgs.writeShellApplication {
             name = "pal-benchmark-startup";
             runtimeInputs = [

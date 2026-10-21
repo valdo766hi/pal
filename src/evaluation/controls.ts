@@ -4,7 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { grade } from "./grade.ts";
-import { checkout } from "./tasks.ts";
+import { checkout, inventory, slug } from "./tasks.ts";
 
 const output = process.argv[2];
 const malformed = process.argv[3];
@@ -44,6 +44,25 @@ for (const name of ["buggy", "fixed", "forged", "hang", "flood"]) {
   await writeFile(join(output, `${name}.json`), `${JSON.stringify(result, null, 2)}\n`);
   checks++;
 }
+// The other tasks: an untouched start fails, a reference solution passes, and answer tasks keep sources intact.
+for (const [task, name, passed] of [
+  [inventory, "inventory", false],
+  [inventory, "inventory-solved", true],
+  [slug, "slug", false],
+  [slug, "slug-fixed", true],
+] as const) {
+  const result = await grade(join(fixtures, name), task);
+  assert.equal(result.passed, passed, name);
+  if (name === "inventory") assert.deepEqual(result.cases.map((test) => test.failure)[0], "missing_answer");
+  if (task === inventory)
+    assert(
+      result.cases.some((test) => test.id === "unchanged:src" && test.passed),
+      name,
+    );
+  await writeFile(join(output, `${name}.json`), `${JSON.stringify(result, null, 2)}\n`);
+  checks++;
+}
+assert.equal(slug.split, "held-out");
 await assert.rejects(grade(output), /frozen Nix-store candidate|writable path/);
 checks++;
 for (const [name, pattern] of [
