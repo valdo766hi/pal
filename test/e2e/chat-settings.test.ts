@@ -836,7 +836,9 @@ describe("review comment drafts", () => {
   it("keeps newer comment text when an older comment acknowledgement arrives", async () => {
     const { pal, page, base, project, workspace, panel, errors } = await reviewFixture(1440);
     const events: string[] = [];
+    page.on("request", (request) => events.push(`request ${request.method()} ${request.url()}`));
     page.on("response", (response) => events.push(`response ${response.status()} ${response.url()}`));
+    page.on("requestfinished", (request) => events.push(`finished ${request.url()}`));
     page.on("requestfailed", (request) => events.push(`failed ${request.url()} ${request.failure()?.errorText}`));
     await panel.getByRole("button", { name: "Comment on line 1", exact: true }).click();
     const draft = panel.getByRole("textbox", { name: "Comment on line 1", exact: true });
@@ -844,17 +846,14 @@ describe("review comment drafts", () => {
     const seen = Promise.withResolvers<{ status: number; body: unknown }>(),
       release = Promise.withResolvers<undefined>(),
       done = Promise.withResolvers<undefined>();
-    await page.route(
-      "**/api/projects/*/comments",
-      async (route) => {
-        const response = await route.fetch();
-        seen.resolve({ status: response.status(), body: await response.json() });
-        await release.promise;
-        await route.fulfill({ response });
-        done.resolve(undefined);
-      },
-      { times: 1 },
-    );
+    // Auto-expiring interception can strand the refresh in Chromium.
+    await page.route("**/api/projects/*/comments", async (route) => {
+      const response = await route.fetch();
+      seen.resolve({ status: response.status(), body: await response.json() });
+      await release.promise;
+      await route.fulfill({ response });
+      done.resolve(undefined);
+    });
     cleanups.push(async () => {
       release.resolve(undefined);
     });
