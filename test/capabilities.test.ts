@@ -8,6 +8,8 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "
 import { createRegistry, defineExtension } from "@earendil-works/pi-durable";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Type } from "typebox";
+import { validate } from "../src/core/requests.ts";
 import { exampleCapability } from "../src/capabilities/example.ts";
 import { memoryCapability } from "../src/capabilities/memory.ts";
 import {
@@ -171,6 +173,65 @@ describe("compiled capability contract", () => {
       "execute:example",
       "dispose:example",
     ]);
+  });
+
+  it("keeps native request pin records readable by the previous release", async () => {
+    const f = await fixture([memoryCapability]);
+    const chat = await f.pal.chats.createChat("legacy-pin-wire", { projectId: f.project.id }, context);
+    const { conversation } = await f.run(chat, 'return "pin wire fixture";');
+    const legacy = Type.Object(
+      {
+        task: Type.Integer({ minimum: 1 }),
+        release: Type.String({ maxLength: 64 }),
+        selected: Type.Array(
+          Type.Object(
+            {
+              id: Type.Enum(["files", "shell", "memory", "browser", "compact"]),
+              version: Type.Literal(1),
+            },
+            { additionalProperties: false },
+          ),
+          { maxItems: 5, uniqueItems: true },
+        ),
+      },
+      { additionalProperties: false },
+    );
+    const page = await conversation.entries({}, 100, undefined, context);
+    const pins = page.items.filter((entry) => entry.kind === "pal.extensions");
+    expect(pins).toHaveLength(2);
+    for (const pin of pins) expect(() => validate(legacy, pin.data)).not.toThrow();
+    expect(page.items.filter((entry) => entry.kind === "pal.capabilities")).toHaveLength(2);
+    for (const pin of await f.pal.extensions.pins(chat.conversationId, f.pal.harness, context)) {
+      expect(pin.implementations?.map(({ id, version }) => ({ id, version }))).toEqual(pin.selected);
+      expect(pin.implementations?.every((item) => /^[a-f0-9]{64}$/.test(item.digest))).toBe(true);
+    }
+  });
+
+  it("refuses inconsistent identity receipts rather than inventing a joined request pin", async () => {
+    const f = await fixture([memoryCapability]);
+    const release = (await f.pal.extensions.view()).release;
+    for (const mismatch of ["release", "selection"] as const) {
+      const chat = await f.pal.chats.createChat(`mismatched-${mismatch}`, { projectId: f.project.id }, context);
+      await f.pal.harness.commit(async (tx) => {
+        await tx.appendEntry(chat.conversationId, {
+          kind: "pal.extensions",
+          data: { task: 999998, release, selected: [{ id: "memory", version: 1 }] },
+        });
+        await tx.appendEntry(chat.conversationId, {
+          kind: "pal.capabilities",
+          data: {
+            task: 999998,
+            release: mismatch === "release" ? "wrong-release" : release,
+            implementations: [
+              { id: mismatch === "selection" ? "example" : "memory", version: 1, digest: "a".repeat(64) },
+            ],
+          },
+        });
+      }, context);
+      await expect(f.pal.extensions.pins(chat.conversationId, f.pal.harness, context)).rejects.toThrow(
+        "does not match its request pin",
+      );
+    }
   });
 
   it("builds and starts actual artifacts by changing only the compiled selection", async () => {

@@ -1100,6 +1100,52 @@ describe("compiled capability composition", () => {
   });
 });
 
+describe("legacy capability responses", () => {
+  it("keeps compiled controls and core Context usable with the previous release's fields", async () => {
+    const { pal, page, base, saved, errors, provider } = await setup(390);
+    await page.route("**/api/extensions", async (route) => {
+      const response = await route.fetch();
+      const view: Awaited<ReturnType<typeof pal.extensions.view>> = await response.json();
+      await route.fulfill({
+        response,
+        json: {
+          ...view,
+          catalog: view.catalog.map((item) => ({
+            id: item.id,
+            version: item.version,
+            native: item.native,
+            name: item.name,
+            description: item.description,
+            panels: item.panels,
+            optIn: item.optIn,
+          })),
+        },
+      });
+    });
+    await page.goto(`${base}/#/settings/extensions`);
+    const memory = page.getByRole("switch", { name: "Enable Context and memory for new chats", exact: true });
+    await memory.waitFor();
+    expect(await page.getByText("Not in this build", { exact: true }).count()).toBe(0);
+    await memory.uncheck();
+    await expect
+      .poll(async () => (await pal.extensions.view()).selected.some((item) => item.id === "memory"))
+      .toBe(false);
+    await expect.poll(() => memory.isEnabled()).toBe(true);
+    await memory.check();
+    await expect
+      .poll(async () => (await pal.extensions.view()).selected.some((item) => item.id === "memory"))
+      .toBe(true);
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    await page.getByRole("button", { name: "Add memory", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Configure instruction sources", exact: true }).waitFor();
+    expect(await page.getByText("Memory is not included in this build", { exact: false }).count()).toBe(0);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});
+
 describe("lazy skill sources", () => {
   async function catalog(page: Page, base: string, id: string, width: number) {
     await page.goto(`${base}/#/chat/${id}`);

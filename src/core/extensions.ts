@@ -107,6 +107,10 @@ const RequestPin = Type.Object(
   },
   { additionalProperties: false },
 );
+const CapabilityPin = Type.Object(
+  { task: RequestPin.properties.task, release: RequestPin.properties.release, implementations: Implementations },
+  { additionalProperties: false },
+);
 export type ExtensionRequestPin = Static<typeof RequestPin>;
 export type ExtensionScope = Static<typeof Scope>;
 export type ExtensionView = {
@@ -238,7 +242,11 @@ export class BuiltinExtensions {
                 pin.implementations = implementations;
                 await tx.appendEntry(api.conversationId, {
                   kind: "pal.extensions",
-                  data: { task: api.taskId, release, selected, implementations },
+                  data: { task: api.taskId, release, selected },
+                });
+                await tx.appendEntry(api.conversationId, {
+                  kind: "pal.capabilities",
+                  data: { task: api.taskId, release, implementations },
                 });
               }
             }, context);
@@ -361,8 +369,29 @@ export class BuiltinExtensions {
   }
   async pins(conversation: ConversationId, harness: Harness, context: Context): Promise<ExtensionRequestPin[]> {
     const page = await (await harness.conversation(conversation, context))?.entries({}, 100, undefined, context);
-    return (
-      page?.items.flatMap((entry) => (entry.kind === "pal.extensions" ? [validate(RequestPin, entry.data)] : [])) ?? []
+    const entries = page?.items ?? [];
+    const identities = new Map(
+      entries.flatMap((entry) => {
+        if (entry.kind !== "pal.capabilities") return [];
+        const receipt = validate(CapabilityPin, entry.data);
+        return [[receipt.task, receipt] as const];
+      }),
     );
+    return entries.flatMap((entry) => {
+      if (entry.kind !== "pal.extensions") return [];
+      const pin = validate(RequestPin, entry.data);
+      const receipt = identities.get(pin.task);
+      if (receipt === undefined) return [pin];
+      if (
+        receipt.release !== pin.release ||
+        receipt.implementations.length !== pin.selected.length ||
+        !pin.selected.every((choice, index) => {
+          const identity = receipt.implementations[index];
+          return identity?.id === choice.id && identity.version === choice.version;
+        })
+      )
+        throw new Error("Capability implementation receipt does not match its request pin.");
+      return [{ ...pin, implementations: receipt.implementations }];
+    });
   }
 }

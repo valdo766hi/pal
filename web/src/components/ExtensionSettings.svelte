@@ -59,7 +59,7 @@
           >
         </div>
         <p>{item.description}</p>
-        {#if !item.available}<span class="pill wa">Not in this build</span>{/if}
+        {#if item.available === false}<span class="pill wa">Not in this build</span>{/if}
         {#if pinned !== undefined && pinned.version !== item.version}<p class="callout wa">
             Default pins v{pinned.version}, unavailable in this build. Turn it off before explicitly choosing v{item.version}.
           </p>{/if}
@@ -69,7 +69,7 @@
               {tool.name} · {tool.replay} · {tool.permissions.join(", ")}
             </p>{/each}
         {/if}
-        {#if item.implementation !== ""}<p class="fine hash">
+        {#if item.implementation}<p class="fine hash">
             Implementation: <span class="mono">{item.implementation}</span>
           </p>{/if}
         <div class="fine">
@@ -85,7 +85,7 @@
           role="switch"
           aria-label={`Enable ${item.name} for new chats`}
           checked={pinned !== undefined}
-          disabled={busy || (!item.available && pinned === undefined)}
+          disabled={busy || (item.available === false && pinned === undefined)}
           onchange={(event) => toggle(item.id, event.currentTarget.checked)}
         />
       </label>

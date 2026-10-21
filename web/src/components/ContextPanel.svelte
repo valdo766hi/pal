@@ -62,7 +62,7 @@
       api.chatExtensions(chat.id),
       api.extensions(),
     ]);
-    const hasMemory = catalog.catalog.some((item) => item.id === "memory" && item.available);
+    const hasMemory = catalog.catalog.some((item) => item.id === "memory" && item.available !== false);
     const [memory, grants] = hasMemory
       ? await Promise.all([api.memory(project.id, workspace?.id), api.projectFolders(project.id, workspace?.id)])
       : [{ items: [] }, { folders: [] }];
@@ -73,7 +73,9 @@
     missingCapabilities = pins.selected
       .filter(
         (choice) =>
-          !catalog.catalog.some((item) => item.available && item.id === choice.id && item.version === choice.version),
+          !catalog.catalog.some(
+            (item) => item.available !== false && item.id === choice.id && item.version === choice.version,
+          ),
       )
       .map((choice) => `${choice.id}@${choice.version}`);
     items = memory.items;

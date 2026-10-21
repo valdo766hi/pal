@@ -202,8 +202,9 @@ Unavailable saved defaults remain visible for explicit removal. Existing chats n
 version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid
 new-chat defaults are refused before recording provisioning. Existing creation/admission receipts still deduplicate;
 changing another default never silently upgrades a version pin. Unfinished work also blocks startup under a changed
-release or compiled catalog. Request inspection retains each used implementation identity;
-historical records without those identities stay historical, without invented digests.
+release or compiled catalog. Request inspection joins additive `pal.capabilities` identity receipts to the unchanged
+`pal.extensions` wire records, keeping older inspectors readable. Historical records without those identities stay
+historical, without invented digests.
 
 The implementation digest binds the manifest to the verified **whole Pal release**, not an independently upgradable
 package. `project.read` is this first adapter's only declared permission; the kernel checks live folder authority around
