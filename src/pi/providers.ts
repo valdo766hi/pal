@@ -347,9 +347,18 @@ export class ModelProviders {
     await this.#credentials.modify(id, async () => ({ type: "api_key", key: trimmed }));
   }
 
-  /** Describe the compatible endpoint; an enabled one is re-registered with the new models at once. */
+  /**
+   * Describe the compatible endpoint; an enabled one is re-registered with the new models at once. The saved key and
+   * the owner's enablement belong to one destination, the normalized base URL: a new destination is disabled and its
+   * old key forgotten before it is saved, so no key is sent to an address the owner never approved it for.
+   */
   async setCompatible(body: CompatibleConfig): Promise<void> {
     const config = compatibleConfig(body);
+    const previous = await this.#config();
+    if (previous !== undefined && previous.baseUrl !== config.baseUrl) {
+      await this.setEnabled(COMPATIBLE, false);
+      await this.#credentials.forget(COMPATIBLE);
+    }
     await this.#save(CONFIG, JSON.stringify(config));
     if (await this.#enabled(COMPATIBLE)) {
       if (await this.#ready(COMPATIBLE)) await this.#register(COMPATIBLE);

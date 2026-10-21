@@ -53,6 +53,9 @@
   <label class="flr"><input type="checkbox" bind:checked={draft.images} />Models accept images</label>
   <label class="flr"><input type="checkbox" bind:checked={draft.keyless} />This endpoint needs no key</label>
 </div>
+{#if config !== null && draft.baseUrl.trim().replace(/\/+$/, "") !== config.baseUrl}
+  <p class="setd">Saving a new address turns this endpoint off and removes its saved key; enable it again to use it.</p>
+{/if}
 <div>
   <button
     class="b"
