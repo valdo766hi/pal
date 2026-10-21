@@ -32,6 +32,15 @@
           ui-check = pkgs.callPackage ./nix/ui-check.nix {
             tests = pkgs.callPackage ./nix/tests.nix { inherit pal; };
           };
+          startup-benchmark = pkgs.writeShellApplication {
+            name = "pal-benchmark-startup";
+            runtimeInputs = [
+              pkgs.nodejs_24
+              pkgs.nix
+            ]
+            ++ pkgs.lib.optional pkgs.stdenv.hostPlatform.isLinux pkgs.procps;
+            text = ''exec node ${./scripts/benchmark-startup.ts} "$@"'';
+          };
         }
       );
 

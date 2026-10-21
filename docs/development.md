@@ -119,6 +119,28 @@ screenshots; it does not upload credentials, full transcripts or live runtime da
 sanitized rendered failure artifacts and host-scope security/release gates remain
 required work. The Nix e2e suite's user-systemd-scope skip is also unexecuted coverage.
 
+### Packaged startup measurements
+
+```sh
+nix build --out-link package .#default
+nix build --out-link startup-benchmark .#startup-benchmark
+./startup-benchmark/bin/pal-benchmark-startup "$PWD/package" 7 > startup.json
+```
+
+This optional runner starts only the explicitly selected trusted Nix package. Each sample has a fresh private
+home/store, loopback port, no inherited credentials and no provider configuration. It checks HTTP health, measures
+the main process RSS at readiness, then stops its own process group and removes only its fixtures. Startup output
+(including the fresh setup token) is discarded. A timeout, invalid health, missing measurement or unclean shutdown
+fails the run. JSON retains every sample, nearest-rank p50/p95, package/release and host identity, package NAR bytes
+and closure NAR bytes. NAR size is not compressed download size or filesystem allocation.
+
+CI measures the fixed pre-extraction `0ac668e` baseline and exact candidate package on the same native host after
+builds finish. These are sequential batches with fresh processes/stores, **not flushed filesystem caches**, peak or
+aggregate worker RSS, configured chat latency, model quality, or full platform acceptance. Compare like hosts and
+repeat before attributing a difference to code. No regression budget or optimization claim is established by the
+runner alone. Browser/PTY/search activation, long transcripts and cached/live MCP measurements remain required
+for #14; do not change isolation or transcript derivation without profiling and correctness regressions.
+
 ### Platform acceptance matrix
 
 [#30](https://github.com/valdo766hi/pal/issues/30) requires equivalent native behavior, not just a portable

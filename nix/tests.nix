@@ -8,6 +8,7 @@
   node-gyp,
   python3,
   git,
+  procps,
   bashInteractive,
   pal,
   sourceRoot ? ../.,
@@ -50,7 +51,10 @@ stdenv.mkDerivation {
     python3
     git
   ]
-  ++ lib.optional stdenv.hostPlatform.isLinux autoPatchelfHook;
+  ++ lib.optionals stdenv.hostPlatform.isLinux [
+    autoPatchelfHook
+    procps
+  ];
   buildInputs = lib.optional stdenv.hostPlatform.isLinux stdenv.cc.cc.lib;
   __darwinAllowLocalNetworking = true;
   env = pal.releaseEnv;

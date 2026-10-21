@@ -68,6 +68,25 @@ jobs:
             ".#packages.$SYSTEM.ui-check"
           readlink ui-runner | tee -a identity.txt
           ./ui-runner/bin/pal-ui-check "$PWD/native-ui"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 0ac668e4996e56a4bfc1725a37ab9a4a31c6b6f1
+          path: benchmark-baseline
+          persist-credentials: false
+      - name: Packaged startup measurements, not model evaluations
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link baseline-package \
+            "./benchmark-baseline#packages.$SYSTEM.default"
+          nix build --max-jobs 2 --cores 2 -L --out-link candidate-package \
+            ".#packages.$SYSTEM.default"
+          nix build --max-jobs 2 --cores 2 -L --out-link startup-benchmark \
+            ".#packages.$SYSTEM.startup-benchmark"
+          ./startup-benchmark/bin/pal-benchmark-startup \
+            "$PWD/baseline-package" 7 > startup-baseline.json
+          ./startup-benchmark/bin/pal-benchmark-startup \
+            "$PWD/candidate-package" 7 > startup-candidate.json
       - name: Publish bounded coverage summary
         run: |
           printf '### Portable subset only\n\n' >> "$GITHUB_STEP_SUMMARY"
@@ -78,6 +97,10 @@ jobs:
           printf '\n### Grading controls, not model evaluations\n\n' \
             >> "$GITHUB_STEP_SUMMARY"
           tee -a "$GITHUB_STEP_SUMMARY" < grading-summary.json
+          printf '\n### Packaged startup; warm filesystem caches\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < startup-baseline.json
+          tee -a "$GITHUB_STEP_SUMMARY" < startup-candidate.json
           if test -f native-ui/summary.json; then
             printf '\n### Native chat UI subset\n\n' \
               >> "$GITHUB_STEP_SUMMARY"
@@ -91,6 +114,8 @@ jobs:
             identity.txt
             summary.json
             grading-summary.json
+            startup-baseline.json
+            startup-candidate.json
             native-ui/summary.json
             native-ui/screenshots/
           retention-days: 7
