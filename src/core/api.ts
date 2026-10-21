@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type ProviderAuthInteraction } from "@earendil-works/pi-ai";
@@ -312,6 +313,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     if (resource === "sign-out" && path.length === 1 && method === "POST") {
       pal.terminals.revoke(cookie(request, SESSION_COOKIE));
       pal.browsers.revoke(cookie(request, SESSION_COOKIE));
+      revokeObservers(cookie(request, SESSION_COOKIE));
       await pal.owner.signOut(cookie(request, SESSION_COOKIE));
       response.setHeader("set-cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
       return send(200, { signedIn: false });
@@ -802,33 +804,78 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         );
         return send(200, { chat: await describeChat(chat), model, provider, effort, configuration });
       }
-      if (action === "events" && method === "GET") return observe(request, response, chat.id, chat.conversationId);
+      if (action === "events" && method === "GET")
+        return observe(response, chat.id, chat.conversationId, cookie(request, SESSION_COOKIE));
     }
     throw new HttpError(404, "not_found", "no such API route");
   }
 
+  /** Live event streams by their end function, each bound to the owner session that opened it. */
+  const observers = new Map<(revoked: boolean) => void, string | undefined>();
+  /** Sign-out revokes this session's event streams like its terminals and browser views. */
+  function revokeObservers(token: string | undefined) {
+    for (const [end, owner] of observers) if (owner === token) end(true);
+  }
+
   /**
-   * Server-sent events: the conversation's snapshot, then one event batch per commit until the client leaves. The
-   * chat's command approvals arrive as whole `approvals` views, first with the snapshot and again on every change.
+   * Server-sent events: the conversation's snapshot, then one event batch per commit until the client leaves, the
+   * owner session ends or expires, or the stream closes. The chat's command approvals arrive as whole `approvals`
+   * views, first with the snapshot and again on every change. Cleanup is registered before the first write, and a
+   * write blocked by backpressure also ends when the stream does, so a vanished client never holds the handler.
    */
   async function observe(
-    request: IncomingMessage,
     response: ServerResponse,
     chatId: string,
     conversationId: Parameters<typeof watchEvents>[1],
+    token: string | undefined,
   ): Promise<void> {
+    const expiry = await pal.owner.sessionExpiry(token);
+    if (expiry === undefined) throw new HttpError(401, "signed_out", "sign in to Pal first");
+    const scope = new AbortController();
+    // What `end` must release, filled in as the stream starts.
+    const live: {
+      stream?: Awaited<ReturnType<typeof watchEvents>>;
+      heartbeat?: ReturnType<typeof setInterval>;
+      unwatch?: () => void;
+    } = {};
+    // Idempotent: revocation and expiry drop anything still buffered; a finished stream flushes it.
+    const end = (revoked: boolean) => {
+      if (scope.signal.aborted) return;
+      scope.abort();
+      observers.delete(end);
+      clearTimeout(expiryTimer);
+      clearInterval(live.heartbeat);
+      live.unwatch?.();
+      void live.stream?.stop();
+      if (revoked) response.destroy();
+      else if (!response.writableEnded) response.end();
+    };
+    const expiryTimer = setTimeout(() => end(true), Math.min(Math.max(0, expiry - Date.now()), 2 ** 31 - 1));
+    expiryTimer.unref();
+    observers.set(end, token);
+    // The response closes when the connection does, whether or not the request body was ever read.
+    response.once("close", () => end(true));
+    response.once("error", () => end(true));
+
     const stream = await watchEvents(pal.harness, conversationId, context);
+    live.stream = stream;
+    if (scope.signal.aborted) {
+      void stream.stop();
+      return;
+    }
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store",
       "x-accel-buffering": "no",
     });
     const write = async (event: string, data: unknown) => {
+      if (scope.signal.aborted) return;
       if (!response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)) {
-        await new Promise((resolve) => response.once("drain", resolve));
+        await once(response, "drain", { signal: scope.signal }).catch(() => undefined);
       }
     };
     await write("snapshot", stream.snapshot);
+    if (scope.signal.aborted) return;
     // Views are written in order; a change during a write is folded into the next one.
     let approvals: Promise<void> = Promise.resolve();
     let dirty = false;
@@ -838,29 +885,23 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       approvals = approvals.then(async () => {
         dirty = false;
         try {
-          if (!response.writableEnded) await write("approvals", await pal.approvals.view(chatId));
+          if (!scope.signal.aborted) await write("approvals", await pal.approvals.view(chatId));
         } catch {
           // A removed chat or a closed response ends the view; the event stream closes on its own.
         }
       });
     };
-    const unwatch = pal.approvals.watch(chatId, sendApprovals);
+    live.unwatch = pal.approvals.watch(chatId, sendApprovals);
     sendApprovals();
-    const heartbeat = setInterval(() => response.write(": keep-alive\n\n"), HEARTBEAT_MS);
+    // A keep-alive is pointless while output is already waiting to drain.
+    live.heartbeat = setInterval(() => {
+      if (!scope.signal.aborted && !response.writableNeedDrain) response.write(": keep-alive\n\n");
+    }, HEARTBEAT_MS);
     stream.start(async (events: readonly AgentEvent[]) => {
       // An overflowed watch replaces its undelivered batches with a snapshot, which the client applies as a reset.
       for (const event of events) await write(event.type === "snapshot" ? "snapshot" : "event", event);
     });
-    const end = () => {
-      clearInterval(heartbeat);
-      unwatch();
-      void stream.stop();
-    };
-    request.once("close", end);
-    void stream.closed.then(() => {
-      end();
-      response.end();
-    });
+    void stream.closed.then(() => end(false));
   }
 
   const unavailable = new HttpError(
