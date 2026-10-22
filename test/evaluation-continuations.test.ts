@@ -32,18 +32,177 @@ async function fixture() {
 
 async function agent(kind: string) {
   const { root, input } = await fixture();
-  const pal = await openPal(
-    { dataRoot: join(root, "data"), installRoot: join(root, "install"), guidanceHome: join(root, "guidance") },
-    context,
-  );
+  const options = {
+    dataRoot: join(root, "data"),
+    installRoot: join(root, "install"),
+    guidanceHome: join(root, "guidance"),
+  };
+  let pal = await openPal(options, context);
+  const initial = pal;
   cleanups.push(() => pal.close());
   const faux = fauxProvider();
-  (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+  const useFaux = () => (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+  useFaux();
   const model = faux.getModel();
   const choice = { provider: model.provider, modelId: model.id, effort: "off" } as const;
-  const harness = kind === "pal" ? palHarness(pal, choice) : baselineHarness(pal.models, model, choice);
-  return { input, faux, harness, pal };
+  let restarted = 0;
+  const reopen = async () => {
+    await pal.close();
+    pal = await openPal(options, context);
+    useFaux();
+    restarted++;
+    return pal;
+  };
+  const harness =
+    kind === "pal" ? palHarness(pal, choice, "full", reopen) : baselineHarness(() => pal.models, model, choice);
+  return {
+    input,
+    faux,
+    harness,
+    choice,
+    initial,
+    reopen,
+    restarted: () => restarted,
+    get pal() {
+      return pal;
+    },
+  };
 }
+
+it.each(["pal", "baseline"])("%s retains context through an evidenced idle checkpoint recovery", async (kind) => {
+  const f = await agent(kind);
+  const requests: string[] = [];
+  f.faux.setResponses([
+    (request) => {
+      requests.push(JSON.stringify(request.messages));
+      return fauxAssistantMessage("First checkpoint");
+    },
+    (request) => {
+      requests.push(JSON.stringify(request.messages));
+      return fauxAssistantMessage("Recovered");
+    },
+  ]);
+  const outcome = await f.harness.run({
+    ...f.input,
+    continuations: f.input.continuations.map((next) => ({ ...next, restart: true })),
+  });
+  expect(outcome).toMatchObject({ status: "completed", turns: 2, interventions: 1 });
+  expect(f.faux.state.callCount).toBe(2);
+  expect(requests[1]).toContain(f.input.prompt);
+  expect(requests[1]).toContain(f.input.continuations[0]?.prompt);
+  if (kind === "pal") {
+    expect(f.restarted()).toBe(1);
+    expect(f.initial.status).toBe("closed");
+    expect(f.pal.store.installationId).toBe(f.initial.store.installationId);
+    expect(outcome.trace).toMatchObject({
+      conversations: [
+        {
+          entries: expect.arrayContaining([
+            expect.objectContaining({
+              kind: "pal.evaluation-checkpoint",
+              data: expect.objectContaining({ type: "restart" }),
+            }),
+          ]),
+        },
+      ],
+    });
+  } else {
+    expect(outcome.trace).toMatchObject({
+      checkpoints: [
+        expect.objectContaining({ type: "context-checkpoint-reload", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) }),
+      ],
+    });
+  }
+});
+
+it.each(["pal", "baseline"])("%s cannot replenish spent turns through checkpoint recovery", async (kind) => {
+  const f = await agent(kind);
+  f.faux.setResponses([fauxAssistantMessage("First checkpoint"), fauxAssistantMessage("Must not run")]);
+  const outcome = await f.harness.run({
+    ...f.input,
+    budget: { seconds: 10, turns: 1 },
+    continuations: f.input.continuations.map((next) => ({ ...next, restart: true })),
+  });
+  expect(outcome.status).toBe("budget_exceeded");
+  expect(f.faux.state.callCount).toBe(1);
+});
+
+it("retains the original deadline through an actual Pal reopen", async () => {
+  const f = await agent("pal");
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const close = f.initial.close.bind(f.initial);
+  vi.spyOn(f.initial, "close").mockImplementationOnce(async () => {
+    await close();
+    now += 20_000;
+  });
+  f.faux.setResponses([fauxAssistantMessage("First checkpoint"), fauxAssistantMessage("Must not run")]);
+  expect(
+    await f.harness.run({
+      ...f.input,
+      continuations: f.input.continuations.map((next) => ({ ...next, restart: true })),
+    }),
+  ).toMatchObject({ status: "budget_exceeded", turns: 1 });
+  expect(f.restarted()).toBe(1);
+  expect(f.faux.state.callCount).toBe(1);
+});
+
+it("retains the last trace and usage when the Pal restart controller fails after close", async () => {
+  const f = await agent("pal");
+  const close = f.initial.close.bind(f.initial);
+  vi.spyOn(f.initial, "close").mockImplementationOnce(async () => {
+    await close();
+    throw new Error("fixture reopen unavailable");
+  });
+  f.faux.setResponses([fauxAssistantMessage("First checkpoint"), fauxAssistantMessage("Must not run")]);
+  const outcome = await f.harness.run({
+    ...f.input,
+    continuations: f.input.continuations.map((next) => ({ ...next, restart: true })),
+  });
+  expect(outcome).toMatchObject({
+    status: "harness_error",
+    error: "fixture reopen unavailable",
+    turns: 1,
+    interventions: 0,
+    usage: expect.any(Object),
+  });
+  expect(f.initial.status).toBe("closed");
+  expect(f.faux.state.callCount).toBe(1);
+  expect(JSON.stringify(outcome.trace)).toContain("First checkpoint");
+  expect(JSON.stringify(outcome.trace)).not.toContain("pal.evaluation-checkpoint");
+});
+
+it("does not accept a no-op controller as a native restart", async () => {
+  const f = await agent("pal");
+  f.faux.setResponses([fauxAssistantMessage("First checkpoint"), fauxAssistantMessage("Must not run")]);
+  const harness = palHarness(f.pal, f.choice, "full", async () => f.pal);
+  const outcome = await harness.run({
+    ...f.input,
+    continuations: f.input.continuations.map((next) => ({ ...next, restart: true })),
+  });
+  expect(outcome).toMatchObject({ status: "harness_error", turns: 1 });
+  expect(outcome.error).toContain("must close and reopen the same Pal");
+  expect(f.faux.state.callCount).toBe(1);
+  expect(JSON.stringify(outcome.trace)).not.toContain("pal.evaluation-checkpoint");
+});
+
+it("rejects a controller that supplies a different store path", async () => {
+  const f = await agent("pal");
+  f.faux.setResponses([fauxAssistantMessage("First checkpoint"), fauxAssistantMessage("Must not run")]);
+  const harness = palHarness(f.pal, f.choice, "full", async () => {
+    const reopened = await f.reopen();
+    return { ...reopened, store: { ...reopened.store, path: `${reopened.store.path}.different` } };
+  });
+  const outcome = await harness.run({
+    ...f.input,
+    continuations: f.input.continuations.map((next) => ({ ...next, restart: true })),
+  });
+  expect(f.restarted()).toBe(1);
+  expect(outcome).toMatchObject({ status: "harness_error", turns: 1 });
+  expect(outcome.error).toContain("must close and reopen the same Pal");
+  expect(f.faux.state.callCount).toBe(1);
+  expect(JSON.stringify(outcome.trace)).not.toContain("pal.evaluation-checkpoint");
+});
 
 it("includes Pal project/chat preparation in the original run deadline", async () => {
   const { input, faux, harness, pal } = await agent("pal");

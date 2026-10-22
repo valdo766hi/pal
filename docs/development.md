@@ -306,18 +306,23 @@ zero failures. Pal's trace names each conversation and owner edge and includes r
 not just the current prompt. Export is limited to 256 conversations, 32,768 entries and 64 MiB; exceeding a limit
 fails the run rather than silently dropping evidence. Treat these complete retained histories as private artifacts.
 Results are only comparable between like model/settings/budget rows.
-Version 3 of both harness adapters supports task-requested compaction checkpoints within the original deadline
+Version 4 of both harness adapters supports task-requested compaction checkpoints within the original deadline
 and turn allowance. Summaries use the selected model/effort, Pi-default output-token cap and no cache retention.
 Pal uses native prefix compaction and waits for its summary write before the next input; a short native history can
 legitimately be a no-op. The baseline summarizes its whole active JSON transcript, omitting thinking, while keeping
 the original audit history. These context policies are recorded harness differences, not identical input sequences.
 Inspect the trace for an actual summary: a requested checkpoint alone does not prove one occurred.
 
-The six-task initial corpus includes an owner-correction variant with a requested checkpoint and the same frozen
-snapshot/independent cases, so earlier rounding constraints must still pass after the correction. This is a protocol
-and grading fixture, not a representative long-horizon/restart or compaction-quality benchmark; those remain
-required for #26/#27. Ordinary checks use scripted fake models; those reports say so and are not model or harness
-quality results. Real-provider results are owner-run.
+The six-task initial corpus includes `checkout-context-checkpoint` version 2: a controlled idle restart before
+compaction and the owner correction, with the same frozen snapshot/independent cases. Pal's controller closes and
+reopens the same installation/implementation, reacquires the conversation and records a host journal witness.
+Unfinished tasks/submissions prevent that restart; the original deadline and persisted turn allowance remain.
+The baseline instead reloads its active context from a private, digest-checked JSON file (64 MiB maximum), retaining
+its counters and audit history. This is explicitly **not** a baseline process restart. Failed Pal reopen retains the
+last readable trace/usage rather than inventing recovery or retrying effects.
+These are protocol/grading fixtures, not abrupt-process-crash, representative long-horizon or compaction-quality
+benchmarks; those remain required for #26/#27. Ordinary checks use scripted fake models; those reports say so and
+are not model or harness quality results. Real-provider results are owner-run.
 The verifier-fallback fixture exits 69 without contacting a service; both its adapter and public test must remain
 unchanged while the checkout fix passes independent cases. Inspect actual command/tool receipts before crediting
 failure recovery: artifact correctness alone does not prove that the agent encountered the unavailable verifier.

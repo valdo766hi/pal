@@ -5,6 +5,8 @@ export type Continuation = {
   readonly owner: boolean;
   /** Request compaction before this input; native history without an old prefix needs no summary request. */
   readonly compact?: boolean;
+  /** Restart Pal, or reload the baseline's explicit checkpoint, before this input. */
+  readonly restart?: boolean;
 };
 type Common = {
   readonly id: string;
@@ -143,8 +145,9 @@ export const continuedCheckout = {
 export const checkpointCheckout = {
   ...continuedCheckout,
   id: "checkout-context-checkpoint",
-  categories: [...continuedCheckout.categories, "compaction-checkpoint"],
-  continuations: continuedCheckout.continuations.map((next) => ({ ...next, compact: true })),
+  version: 2,
+  categories: [...continuedCheckout.categories, "restart-checkpoint", "compaction-checkpoint"],
+  continuations: continuedCheckout.continuations.map((next) => ({ ...next, restart: true, compact: true })),
 } as const satisfies ProgramTask;
 
 export const verifierCheckout = {

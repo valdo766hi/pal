@@ -53,14 +53,20 @@ async function main(args: readonly string[]) {
   assert(Number.isSafeInteger(turns) && turns > 0 && turns <= 200, "use 1–200 --turns");
   const choice = { provider: values.provider, modelId: values.model, effort: values.effort } as ModelChoice;
   // The evaluation data directory owns its own store: a running Pal (such as the live one) refuses this open.
-  const pal = await openPal({ dataRoot: resolve(dataRoot), installRoot: join(import.meta.dirname, "..") }, context);
+  const options = { dataRoot: resolve(dataRoot), installRoot: join(import.meta.dirname, "..") };
+  let pal = await openPal(options, context);
+  const reopen = async () => {
+    await pal.close();
+    pal = await openPal(options, context);
+    return pal;
+  };
   try {
     const model = pal.models.getModel(choice.provider, choice.modelId);
     assert(model !== undefined, `${choice.provider}/${choice.modelId} is not available in this data directory`);
     const harnesses: Harness[] = [];
     for (const name of values.harness.split(",")) {
-      if (name === "pal") harnesses.push(palHarness(pal, choice, values.approvals as "full" | "approve-all"));
-      else if (name === "baseline") harnesses.push(baselineHarness(pal.models, model, choice));
+      if (name === "pal") harnesses.push(palHarness(pal, choice, values.approvals as "full" | "approve-all", reopen));
+      else if (name === "baseline") harnesses.push(baselineHarness(() => pal.models, model, choice));
       else throw new Error(`unknown harness ${name}`);
     }
     for (const entry of values.external) {

@@ -1,8 +1,8 @@
 // The systems an evaluation runs. Pal and the baseline loop share one model and its credentials, so their results
 // are model-matched; an external command's model and settings are outside Pal's control, so it is unmatched.
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -132,15 +132,21 @@ export async function palTrace(pal: Pal, root: ConversationId) {
 }
 
 /** Pal itself: a project over the run's workspace and one chat, in Full access unless approvals are requested. */
-export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "approve-all" = "full"): Harness {
+export function palHarness(
+  pal: Pal,
+  model: ModelChoice,
+  approvals: "full" | "approve-all" = "full",
+  reopen?: () => Promise<Pal>,
+): Harness {
   return {
     id: "pal",
-    version: 3,
+    version: 4,
     configuration: {
       model,
       approvals,
       tools: "Pal's selected capabilities through codemode",
       compaction: { method: "pi-native", policy: { ...DEFAULT_COMPACTION_POLICY } },
+      recovery: "idle same-store close/reopen; no process-crash claim",
     },
     matched: true,
     async run({ workspace, prompt, continuations = [], runId, budget }) {
@@ -154,8 +160,16 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
         context,
       );
       await pal.approvals.setMode(chat.id, approvals === "full" ? "full" : "ask");
-      const conversation = await pal.harness.conversation(chat.conversationId, context);
-      if (conversation === undefined) throw new Error("the evaluation chat has no conversation");
+      const initialConversation = await pal.harness.conversation(chat.conversationId, context);
+      if (initialConversation === undefined) throw new Error("the evaluation chat has no conversation");
+      let conversation = initialConversation;
+      let connected = true;
+      const capture = async () => ({
+        recorded: await palTrace(pal, chat.conversationId),
+        turns: await evaluationBudgetTurns(pal.harness, chat.conversationId, context),
+        exceeded: await evaluationBudgetExceeded(pal.harness, chat.conversationId, context),
+      });
+      let checkpoint: Awaited<ReturnType<typeof capture>> | undefined;
       let interventions = 0;
       let status: RunOutcome["status"] = "completed";
       let error: string | null = null;
@@ -163,7 +177,8 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
       let approvalError: string | null = null;
       // Serialize automatic decisions; one pending approval is one intervention, not one polling tick.
       let approve: ReturnType<typeof setInterval> | undefined;
-      if (approvals === "approve-all") {
+      const startApprovals = () => {
+        if (approvals !== "approve-all") return;
         approve = setInterval(() => {
           if (approvalJob !== undefined) return;
           approvalJob = pal.approvals
@@ -181,7 +196,12 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
               approvalJob = undefined;
             });
         }, 200);
-      }
+      };
+      const stopApprovals = async () => {
+        clearInterval(approve);
+        await approvalJob;
+      };
+      startApprovals();
       // A completed summary task may still have a queued write; settle it before delivering the next prompt.
       const compact = async () => {
         const receipt = await pal.harness.waitForTask(await conversation.compact(undefined, context), context);
@@ -201,7 +221,48 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
           timer = setTimeout(() => done("timeout"), Math.max(0, expires - Date.now()));
         });
         let stage = 0;
-        for (const input of [{ prompt, owner: false, compact: false }, ...continuations]) {
+        for (const input of [{ prompt, owner: false, compact: false, restart: false }, ...continuations]) {
+          if (input.restart) {
+            if (reopen === undefined) throw new Error("this Pal adapter has no restart controller");
+            await stopApprovals();
+            const inspection = await pal.harness.inspect(context);
+            if (inspection.tasks.length !== 0 || inspection.submissions.length !== 0)
+              throw new Error("restart checkpoint requires no unfinished tasks or submissions");
+            checkpoint = await capture();
+            const previous = pal;
+            const installation = previous.store.installationId;
+            const release = (await previous.extensions.view()).release;
+            connected = false;
+            const reopened = await reopen();
+            if (
+              previous.status !== "closed" ||
+              reopened.status !== "ready" ||
+              reopened.store.path !== previous.store.path ||
+              reopened.store.installationId !== installation ||
+              (await reopened.extensions.view()).release !== release
+            )
+              throw new Error("restart controller must close and reopen the same Pal installation and implementation");
+            pal = reopened;
+            const restored = await pal.harness.conversation(chat.conversationId, context);
+            if (restored === undefined) throw new Error("the restarted evaluation conversation is missing");
+            conversation = restored;
+            connected = true;
+            await conversation.submit(
+              {
+                type: "write",
+                entry: {
+                  kind: "pal.evaluation-checkpoint",
+                  data: { type: "restart", installation, release, turns: checkpoint.turns, deadline: expires },
+                },
+              },
+              context,
+            );
+            startApprovals();
+            if (Date.now() >= expires) {
+              status = "budget_exceeded";
+              break;
+            }
+          }
           if (input.compact) {
             const placed = await Promise.race([compact(), deadline]);
             if (placed === "timeout" || Date.now() >= expires) {
@@ -241,20 +302,21 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
           await conversation.abort(context, { background: true });
         }
       } catch (failure) {
-        await conversation.abort(context, { background: true });
+        if (connected && pal.status === "ready") await conversation.abort(context, { background: true });
         status = "harness_error";
         error = failure instanceof Error ? failure.message : String(failure);
       } finally {
         clearTimeout(timer);
-        clearInterval(approve);
-        await approvalJob;
+        await stopApprovals();
       }
-      if (await evaluationBudgetExceeded(pal.harness, chat.conversationId, context)) status = "budget_exceeded";
+      const captured = connected && pal.status === "ready" ? await capture() : checkpoint;
+      if (captured === undefined) throw new Error("the evaluation has no readable checkpoint");
+      if (captured.exceeded) status = "budget_exceeded";
       if (approvalError !== null) {
         status = "harness_error";
         error = approvalError;
       }
-      const recorded = await palTrace(pal, chat.conversationId);
+      const { recorded } = captured;
       const messages = recorded.trace.conversations.flatMap((scope) =>
         scope.entries.flatMap((entry) => entry.model ?? []),
       ) as Message[];
@@ -271,7 +333,7 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
       return {
         status,
         error,
-        turns: await evaluationBudgetTurns(pal.harness, chat.conversationId, context),
+        turns: captured.turns,
         toolCalls: calls.length,
         failedToolCalls: results.length === calls.length ? results.filter((result) => result.isError).length : null,
         interventions,
@@ -311,10 +373,10 @@ const TOOLS: Tool[] = [
 
 /**
  * A deliberately plain reference agent: the same model in a loop with four workspace tools and no planning,
- * memory, approvals or recovery. It is a baseline for what Pal's harness adds, not a sandbox.
+ * memory or approvals. Explicit checkpoints reload context, not the process. This baseline is not a sandbox.
  */
 export function baselineHarness(
-  models: Pick<Pal["models"], "completeSimple">,
+  models: () => Pick<Pal["models"], "completeSimple">,
   model: Parameters<Pal["models"]["completeSimple"]>[0],
   choice: ModelChoice,
 ): Harness {
@@ -324,12 +386,13 @@ export function baselineHarness(
   );
   return {
     id: "baseline-loop",
-    version: 3,
+    version: 4,
     configuration: {
       model: choice,
       approvals: "full",
       tools: TOOLS.map((tool) => tool.name),
       compaction: { method: "whole-active-context", maxTokens: summaryMaxTokens, cacheRetention: "none" },
+      recovery: "private active-context JSON reload within controller; not process recovery",
     },
     matched: true,
     async run({ workspace, prompt, continuations = [], budget }) {
@@ -360,6 +423,25 @@ export function baselineHarness(
         "commands. When the task is done, reply with a short summary and no tool calls.";
       const messages: Message[] = [];
       const trace: Message[] = [];
+      const checkpoints: { type: string; sha256: string }[] = [];
+      const reload = async () => {
+        const serialized = JSON.stringify(messages);
+        if (Buffer.byteLength(serialized) > 64 * 1024 * 1024) throw new Error("context checkpoint exceeds 64 MiB");
+        const sha256 = createHash("sha256").update(serialized).digest("hex");
+        const directory = await mkdtemp(join(tmpdir(), "pal-baseline-checkpoint-"));
+        try {
+          const file = join(directory, "context.json");
+          await writeFile(file, serialized, { mode: 0o600 });
+          messages.length = 0;
+          const stored = await readFile(file, "utf8");
+          if (createHash("sha256").update(stored).digest("hex") !== sha256)
+            throw new Error("context checkpoint changed before reload");
+          for (const message of JSON.parse(stored) as Message[]) messages.push(message);
+          checkpoints.push({ type: "context-checkpoint-reload", sha256 });
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      };
       const record = (message: Message) => {
         messages.push(message);
         trace.push(message);
@@ -382,7 +464,7 @@ export function baselineHarness(
           content: `Summarize this coding conversation, preserving its goal, constraints, decisions, exact file paths, errors and unfinished work. Do not continue the task.\n\n${JSON.stringify(source)}`,
           timestamp: Date.now(),
         };
-        const reply = await models.completeSimple(
+        const reply = await models().completeSimple(
           model,
           { systemPrompt: "You summarize coding conversations for later continuation.", messages: [instruction] },
           {
@@ -406,7 +488,7 @@ export function baselineHarness(
       try {
         while (assistant.length < budget.turns) {
           if (Date.now() >= deadline) return outcome("budget_exceeded", null);
-          const reply = await models.completeSimple(
+          const reply = await models().completeSimple(
             model,
             { systemPrompt: system, messages, tools: TOOLS },
             { signal, ...(choice.effort === "off" ? {} : { reasoning: choice.effort }) },
@@ -420,6 +502,7 @@ export function baselineHarness(
           if (calls.length === 0) {
             const next = continuations[stage++];
             if (next === undefined) return outcome("completed", null);
+            if (next.restart) await reload();
             if (next.compact && !(await compact())) return outcome("budget_exceeded", null);
             if (next.owner) interventions++;
             record({ role: "user", content: next.prompt, timestamp: Date.now() });
@@ -448,7 +531,7 @@ export function baselineHarness(
           failedToolCalls,
           interventions,
           usage: sumUsage(assistant, choice.provider),
-          trace,
+          trace: { messages: trace, checkpoints },
         };
       }
     },

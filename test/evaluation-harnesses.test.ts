@@ -25,7 +25,7 @@ function baseline() {
   models.setProvider(faux.provider);
   const model = faux.getModel();
   const choice = { provider: model.provider, modelId: model.id, effort: "off" } as const;
-  return { faux, harness: baselineHarness(models, model, choice) };
+  return { faux, harness: baselineHarness(() => models, model, choice) };
 }
 
 const done = fauxAssistantMessage("done");
@@ -47,11 +47,11 @@ describe("evaluation harness controls", () => {
     });
     expect(outcome.status).toBe("completed");
     expect(outcome.failedToolCalls).toBe(0);
-    expect(outcome.trace).toEqual(
-      expect.arrayContaining([
+    expect(outcome.trace).toMatchObject({
+      messages: expect.arrayContaining([
         expect.objectContaining({ role: "toolResult", isError: false, content: [{ type: "text", text: "known.txt" }] }),
       ]),
-    );
+    });
   });
 
   it("counts a nonzero baseline command as a tool failure", async () => {

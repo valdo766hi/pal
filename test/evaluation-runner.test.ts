@@ -110,10 +110,18 @@ describe("evaluation runner", () => {
   it("grades every run independently and reports matched, unmatched, failed and intervened runs", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "pal-evaluation-test-")));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
-    const pal = await openPal({ dataRoot: join(root, "data"), installRoot: join(root, "install") }, context);
+    const options = { dataRoot: join(root, "data"), installRoot: join(root, "install") };
+    let pal = await openPal(options, context);
     cleanups.push(() => pal.close());
     const faux = fauxProvider();
-    (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+    const useFaux = () => (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+    useFaux();
+    const reopen = async () => {
+      await pal.close();
+      pal = await openPal(options, context);
+      useFaux();
+      return pal;
+    };
     const model = faux.getModel();
     const choice = { provider: model.provider, modelId: model.id, effort: "off" } as const;
     const script = await solutions();
@@ -134,8 +142,11 @@ describe("evaluation runner", () => {
     const report = await evaluate({
       tasks: TASKS,
       harnesses: [
-        scripted(palHarness(pal, choice, "approve-all"), script.pal),
-        scripted(baselineHarness(pal.models, model, choice), script.baseline),
+        scripted(palHarness(pal, choice, "approve-all", reopen), script.pal),
+        scripted(
+          baselineHarness(() => pal.models, model, choice),
+          script.baseline,
+        ),
         { ...external, run: (input) => external.run({ ...input, budget: { ...input.budget, seconds: 2 } }) },
       ],
       model: choice,
@@ -197,6 +208,32 @@ describe("evaluation runner", () => {
       expect(run.task.digest).toMatch(/^[a-f0-9]{64}$/);
       expect(run.task.repository).toMatch(/^[a-f0-9]{64}$/);
       if ("candidate" in run.grade) expect(run.grade.grader).toMatch(/^[a-f0-9]{64}$/);
+      if (run.task.id === "checkout-context-checkpoint") {
+        expect(run.task.version).toBe(2);
+        if (run.harness.id === "pal") {
+          const journal = JSON.parse(trace) as { conversations: { entries: { kind: string; data: unknown }[] }[] };
+          expect(
+            journal.conversations.flatMap(({ entries }) =>
+              entries.filter((entry) => entry.kind === "pal.evaluation-checkpoint").map((entry) => entry.data),
+            ),
+          ).toEqual([expect.objectContaining({ type: "restart", release: report.implementation, turns: 2 })]);
+        } else if (run.harness.id === "baseline-loop") {
+          const journal = JSON.parse(trace) as {
+            messages: { role: string; content: unknown }[];
+            checkpoints: unknown[];
+          };
+          const summary = journal.messages.findIndex(
+            (message) =>
+              message.role === "user" &&
+              typeof message.content === "string" &&
+              message.content.startsWith("Summarize this coding conversation"),
+          );
+          expect(summary).toBeGreaterThan(0);
+          expect(journal.checkpoints).toEqual([
+            { type: "context-checkpoint-reload", sha256: sha256(JSON.stringify(journal.messages.slice(0, summary))) },
+          ]);
+        }
+      }
       if (run.task.id === "checkout-verifier-fallback" && run.harness.id === "pal") {
         const journal = JSON.parse(trace) as {
           conversations: {
