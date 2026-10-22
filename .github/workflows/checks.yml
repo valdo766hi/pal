@@ -52,6 +52,23 @@ jobs:
           nix build --max-jobs 2 --cores 2 -L --out-link result \
             ".#checks.$SYSTEM.portable"
           cp result/summary.json summary.json
+      - name: Packaged core and backup CLI smoke
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link smoke-result \
+            ".#checks.$SYSTEM.smoke"
+          readlink smoke-result | tee -a identity.txt
+          mkdir smoke
+          cp smoke-result/*.json smoke-result/*.jsonl smoke/
+      - name: Native process acceptance outside the build sandbox
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link native-runner \
+            ".#packages.$SYSTEM.native-check"
+          readlink native-runner | tee -a identity.txt
+          ./native-runner/bin/pal-native-check "$PWD/native-process"
       - name: Independent development-task grading controls
         env:
           SYSTEM: ${{ matrix.system }}
@@ -103,11 +120,16 @@ jobs:
           done
       - name: Publish bounded coverage summary
         run: |
-          printf '### Portable subset only\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '### Native core checks\n\n' >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n\n' 'Not a full browser/security/release parity gate.' \
             >> "$GITHUB_STEP_SUMMARY"
           tee -a "$GITHUB_STEP_SUMMARY" < identity.txt
           tee -a "$GITHUB_STEP_SUMMARY" < summary.json
+          printf '\n### Host process acceptance\n\n' >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < native-process/summary.json
+          printf '\n### Packaged core and backup smoke\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < smoke/restore-check.json
           printf '\n### Grading controls, not model evaluations\n\n' \
             >> "$GITHUB_STEP_SUMMARY"
           tee -a "$GITHUB_STEP_SUMMARY" < grading-summary.json
@@ -134,6 +156,8 @@ jobs:
             identity.txt
             summary.json
             grading-summary.json
+            native-process/summary.json
+            smoke/
             startup-baseline.json
             startup-candidate.json
             transcript-baseline.json

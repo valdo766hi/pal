@@ -64,45 +64,41 @@ describe("host release selection", () => {
     }
   });
 
-  it.skipIf(process.platform !== "linux")(
-    "retains the parent's lifetime lock only in its own child, never tool grandchildren",
-    async () => {
-      const root = await realpath(await mkdtemp(join(tmpdir(), "pal-release-inherit-")));
-      const path = join(root, "lock"),
-        held = await releaseLock(path);
-      const child = spawn(process.execPath, [join(import.meta.dirname, "fixtures/release-lock-child.ts")], {
-        stdio: ["ignore", "pipe", "pipe", "ipc", held.fd],
-      });
-      const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-      let diagnostic = "";
-      child.stderr?.on("data", (bytes: Buffer) => {
-        diagnostic = (diagnostic + bytes.toString()).slice(-16 * 1024);
-      });
-      try {
-        await Promise.race([
-          once(child, "message", { signal: AbortSignal.timeout(5000) }),
-          exited.then(() => {
-            throw new Error(`lock child exited early: ${diagnostic}`);
-          }),
-        ]);
-        await held.close();
-        await expect(releaseLock(path)).rejects.toThrow(/another release/);
-        child.send("done");
+  it("retains the parent's lifetime lock only in its own child, never tool grandchildren", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "pal-release-inherit-")));
+    const path = join(root, "lock"),
+      held = await releaseLock(path);
+    const child = spawn(process.execPath, [join(import.meta.dirname, "fixtures/release-lock-child.ts")], {
+      stdio: ["ignore", "pipe", "pipe", "ipc", held.fd],
+    });
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    let diagnostic = "";
+    child.stderr?.on("data", (bytes: Buffer) => {
+      diagnostic = (diagnostic + bytes.toString()).slice(-16 * 1024);
+    });
+    try {
+      await Promise.race([
+        once(child, "message", { signal: AbortSignal.timeout(5000) }),
+        exited.then(() => {
+          throw new Error(`lock child exited early: ${diagnostic}`);
+        }),
+      ]);
+      await held.close();
+      await expect(releaseLock(path)).rejects.toThrow(/another release/);
+      child.send("done");
+      await exited;
+      expect(child.exitCode, diagnostic).toBe(0);
+      const next = await releaseLock(path);
+      await next.close();
+    } finally {
+      await held.close();
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
         await exited;
-        expect(child.exitCode, diagnostic).toBe(0);
-        const next = await releaseLock(path);
-        await next.close();
-      } finally {
-        await held.close();
-        if (child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGKILL");
-          await exited;
-        }
-        await rm(root, { recursive: true, force: true });
       }
-    },
-    10_000,
-  );
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 10_000);
 
   it("starts with only the explicitly launched artifact and retains exact identities", () => {
     const state = initialSelection(base);

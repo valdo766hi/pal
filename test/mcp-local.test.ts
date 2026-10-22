@@ -12,6 +12,7 @@ import { StdioPrograms, type StdioAuth } from "../src/pi/mcp-stdio.ts";
 import { mcpToolName } from "../src/pi/mcp-tools.ts";
 import { STDIO_FIXTURE } from "./fixtures/stdio-server.ts";
 import { startOpenAIFixture } from "./fixtures/openai-server.ts";
+import { processCwd, running } from "./fixtures/process.ts";
 
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
@@ -213,19 +214,7 @@ describe("local MCP owner consent and durable tool policy", () => {
     await fixture.pal.mcp.setEnabled(fixture.server.id, false);
     const outcome = await agent.result();
     expect(outcome.text).toMatch(/changed|aborted|not granted/);
-    await expect
-      .poll(
-        async () => {
-          try {
-            return !/^\d+ \(.*\) [ZX]/.test(await readFile(`/proc/${pid}/stat`, "utf8"));
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-            throw error;
-          }
-        },
-        { timeout: 3000 },
-      )
-      .toBe(false);
+    await expect.poll(() => running(pid), { timeout: 3000 }).toBe(false);
     const before = await readFile(fixture.marker, "utf8");
     const denied = await fixture.agent();
     await denied.start(`return await tools.${tool}({});`);
@@ -271,7 +260,7 @@ describe("local MCP owner consent and durable tool policy", () => {
     await expect.poll(() => readFile(orphanFile, "utf8"), { timeout: 5000 }).toMatch(/"pid":\d+/);
     const orphan = JSON.parse(await readFile(orphanFile, "utf8")) as { pid: number; group: number };
     cleanups.push(async () => {
-      if ((await realpath(`/proc/${orphan.pid}/cwd`).catch(() => "")) === ready.cwd) {
+      if ((await processCwd(orphan.pid)) === ready.cwd) {
         try {
           process.kill(-orphan.group, "SIGKILL");
         } catch (error) {
@@ -281,7 +270,7 @@ describe("local MCP owner consent and durable tool policy", () => {
     });
     child.kill("SIGKILL");
     await once(child, "exit");
-    expect(await realpath(`/proc/${orphan.pid}/cwd`)).toBe(ready.cwd);
+    expect(await processCwd(orphan.pid)).toBe(ready.cwd);
     fixture.behavior.responses = "ok";
     const reopened = await openPal(
       { dataRoot: join(root, "data"), installRoot: "/nonexistent-install", endpoints: fixture.endpoints },
@@ -295,15 +284,7 @@ describe("local MCP owner consent and durable tool policy", () => {
     const history = await (await reopened.harness.conversation(chat.conversationId, context))?.context(context);
     expect(JSON.stringify(history?.messages)).toMatch(/unknown:.*interrupted/i);
     const pid = orphan.pid;
-    await expect
-      .poll(
-        async () => {
-          const state = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => "");
-          return state !== "" && !/^\d+ \(.*\) [ZX]/.test(state);
-        },
-        { timeout: 95_000, interval: 500 },
-      )
-      .toBe(false);
+    await expect.poll(() => running(pid), { timeout: 95_000, interval: 500 }).toBe(false);
     expect(await readFile(join(ready.cwd, "starts"), "utf8")).toBe("start\nstart\n");
   }, 120_000);
 

@@ -14,6 +14,8 @@
   # whose 1.1.0 darwin spawn-helper is published without the executable bit.
   env.npm_config_nodedir = "${pkgs.nodejs_24}";
   env.npm_config_build_from_source = "true";
+  env.PAL_RELEASE_LOCK = pkgs.lib.getExe (pkgs.callPackage ./nix/release-lock.nix { });
+  env.PAL_TEST_PROCESS = pkgs.lib.getExe (pkgs.callPackage ./nix/process-probe.nix { });
   packages = [
     pkgs.git
     pkgs.python3

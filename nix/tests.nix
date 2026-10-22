@@ -15,6 +15,7 @@
 }:
 let
   root = sourceRoot;
+  processProbe = import (root + "/nix/process-probe.nix") { inherit stdenv sourceRoot; };
 in
 stdenv.mkDerivation {
   pname = if portable then "pal-portable-tests" else "pal-tests";
@@ -53,7 +54,10 @@ stdenv.mkDerivation {
   ++ lib.optional stdenv.hostPlatform.isLinux autoPatchelfHook;
   buildInputs = lib.optional stdenv.hostPlatform.isLinux stdenv.cc.cc.lib;
   __darwinAllowLocalNetworking = true;
-  env = pal.releaseEnv;
+  env = pal.releaseEnv // {
+    PAL_TEST_PROCESS = lib.getExe processProbe;
+  };
+  passthru = { inherit processProbe; };
 
   # Build node-pty and patch the prebuilt native libraries the tests load, as the package does; scripts need real shebangs.
   preBuild = ''

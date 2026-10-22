@@ -1,10 +1,11 @@
-import { access, mkdir, mkdtemp, readFile, realpath, rename, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { McpClient } from "@earendil-works/pi-mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkStdioAuth, decodeStdio, StdioPrograms, stdioDigest, type StdioAuth } from "../src/pi/mcp-stdio.ts";
 import { STDIO_FIXTURE } from "./fixtures/stdio-server.ts";
+import { running } from "./fixtures/process.ts";
 
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
@@ -44,16 +45,6 @@ async function inspect(client: McpClient, mode = "echo") {
     env: Record<string, string>;
   };
 }
-async function running(pid: number) {
-  try {
-    process.kill(pid, 0);
-    return !/^\d+ \(.*\) [ZX]/.test(await readFile(`/proc/${pid}/stat`, "utf8"));
-  } catch (error) {
-    if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
-    throw error;
-  }
-}
-
 describe("approved local MCP programs", () => {
   it("requires the exact command/arguments/cwd/environment approval, with no anonymous key fallback", async () => {
     const fixture = await setup({ kind: "env", variable: "LOCAL_TOKEN" });

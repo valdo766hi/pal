@@ -89,11 +89,23 @@ nix build .#checks.aarch64-darwin.portable
 pnpm exec vitest run --config vitest.portable.config.ts
 ```
 
-The subset explicitly excludes `mcp-local`, `mcp-stdio` and `release-state`: those suites need immutable
-Nix programs or the protected release lifecycle. Release-policy, native descriptor-confinement and
-inherited-lock controls run on both targets; they do not enable the full macOS release lifecycle.
-The subset fails on zero tests, skips or todos, and exports only test counts in `summary.json`.
-The full `tests` check still runs all suites on Linux. A separate Ubuntu 22.04 job runs all five packaged checks above: its
+The Linux portable job runs the full unit suite. Darwin's Nix build sandbox denies cross-process
+inspection, so its portable job excludes exactly `mcp-local`, `mcp-stdio` and `process-probe`; both native
+jobs must also run those suites from the immutable `native-check` artifact outside the build sandbox.
+The host runner verifies every named suite executed and fails on zero tests, skips or todos. Its test-only
+probe uses Linux `/proc` or macOS `libproc`; unavailable/failed inspection is an error, never evidence that
+a process died. Positive controls check a live process and its exact cwd before cleanup assertions.
+Neither portable counts alone nor Linux host results establish native macOS process coverage.
+
+```sh
+nix build --out-link native-runner .#native-check
+./native-runner/bin/pal-native-check "$(mktemp -d)"
+```
+
+Both native jobs run packaged core/backup CLI smoke with isolated temporary data and retain its integrity reports.
+Release policy/selection, descriptor confinement and inherited-lock controls run in both portable jobs;
+they do not enable the full macOS release lifecycle. Descriptor inspection includes an inherited positive control.
+The full `tests` check runs all suites on Linux. A separate Ubuntu 22.04 job runs all five packaged checks above: its
 user-namespace support lets Chromium keep its sandbox, unlike the restricted Ubuntu 24.04 hosted image.
 No host policy is disabled. Nix may reuse an identical derivation; a successful build request is not
 necessarily a fresh runtime execution. Both full and portable checks repeat the PTY suite with readline-enabled
@@ -191,8 +203,8 @@ platform-specific isolation, locks and lifecycle belong behind narrow adapters.
 | Remote and local MCP | `mcp`, `mcp-stdio`; consent, stdio and local recovery tests | Immutable programs, native liveness and parent-death cleanup; no `/proc` substitutes that falsely report death |
 | Browser and private-login handoff | Bubblewrap, systemd scope and broker-only egress; `test/e2e/browser.test.ts` | Missing equivalent filesystem/network/resource isolation and protected native tests; proxy-only or disabled sandbox is not parity |
 | Compiled capabilities | `extensions`; selection/pin tests | Same lifecycle, compatibility and replay checks as new package contracts arrive |
-| Checked releases and supervision | Linux flock and `/proc` source confinement; release tests/host fixtures | Missing inherited-lock/confinement adapters and protected exact-artifact runtime evaluation |
-| Installation and data operations | Nix package/probes; smoke and schema tests; stopped-state backup/restore in `test/backup.test.ts` and the packaged smoke check | Clean install, diagnostics, launchd and sleep/wake; native backup/restore evidence comes only from the portable macOS job |
+| Checked releases and supervision | Kernel flock and `/proc` source confinement; release tests/host fixtures | Native lock/descriptor-policy controls; complete protected exact-artifact evaluator and activation/recovery acceptance still required |
+| Installation and data operations | Nix package/probes; smoke and schema tests; stopped-state backup/restore in `test/backup.test.ts` and the packaged smoke check | Packaged core/backup smoke plus portable tests; clean installs beyond Nix, launchd and sleep/wake still required |
 | Planned workflows | Roadmap #20/#22/#23/#28 | Both platforms need the same grants, budgets, durability and recovery tests |
 
 Browser and release activation currently fail closed without their Linux protections. Keep those gates until
