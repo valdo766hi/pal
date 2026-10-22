@@ -4,7 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { grade } from "./grade.ts";
-import { checkout, checkpointCheckout, continuedCheckout, inventory, slug } from "./tasks.ts";
+import { checkout, checkpointCheckout, continuedCheckout, inventory, slug, verifierCheckout } from "./tasks.ts";
 
 const output = process.argv[2];
 const malformed = process.argv[3];
@@ -54,6 +54,8 @@ for (const [task, name, passed] of [
   [continuedCheckout, "continued-fixed", true],
   [checkpointCheckout, "fixed", false],
   [checkpointCheckout, "continued-fixed", true],
+  [verifierCheckout, "unavailable-verifier", false],
+  [verifierCheckout, "verifier-fixed", true],
 ] as const) {
   const result = await grade(join(fixtures, name), task);
   assert.equal(result.passed, passed, name);

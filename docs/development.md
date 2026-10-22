@@ -236,8 +236,9 @@ macOS support. Service installation or host security changes require a separatel
 Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting repository under
 `test/fixtures/evaluation` and an independent grader: `checkout-rounding` (development; bug fix across two files),
 `module-inventory` (development; repository understanding, answered in a file while sources stay unchanged),
-`slug-test-repair` (held out, version 2; independent cases plus a byte-identical public test), and
-`checkout-owner-correction` (development; a later owner correction must preserve the earlier rounding rules).
+`slug-test-repair` (held out, version 2; independent cases plus a byte-identical public test),
+`checkout-owner-correction` (development; a later owner correction must preserve the earlier rounding rules), and
+`checkout-verifier-fallback` (development; a deliberately unavailable local verifier and a working test fallback).
 Continuations are delivered after an idle checkpoint in the same conversation/history, not concatenated into the
 initial prompt. Scripted owner corrections count as interventions and remain visible in the trace.
 
@@ -295,11 +296,14 @@ legitimately be a no-op. The baseline summarizes its whole active JSON transcrip
 the original audit history. These context policies are recorded harness differences, not identical input sequences.
 Inspect the trace for an actual summary: a requested checkpoint alone does not prove one occurred.
 
-The five-task initial corpus includes an owner-correction variant with a requested checkpoint and the same frozen
+The six-task initial corpus includes an owner-correction variant with a requested checkpoint and the same frozen
 snapshot/independent cases, so earlier rounding constraints must still pass after the correction. This is a protocol
 and grading fixture, not a representative long-horizon/restart or compaction-quality benchmark; those remain
 required for #26/#27. Ordinary checks use scripted fake models; those reports say so and are not model or harness
 quality results. Real-provider results are owner-run.
+The verifier-fallback fixture exits 69 without contacting a service; both its adapter and public test must remain
+unchanged while the checkout fix passes independent cases. Inspect actual command/tool receipts before crediting
+failure recovery: artifact correctness alone does not prove that the agent encountered the unavailable verifier.
 
 The grading controls check correct, buggy, forged, hanging and flooding candidates, task starts and reference
 solutions. The owner-correction control requires both the new cancellation rule and every original rounding case:

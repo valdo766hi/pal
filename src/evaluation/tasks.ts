@@ -147,4 +147,23 @@ export const checkpointCheckout = {
   continuations: continuedCheckout.continuations.map((next) => ({ ...next, compact: true })),
 } as const satisfies ProgramTask;
 
-export const TASKS: readonly Task[] = [checkout, inventory, slug, continuedCheckout, checkpointCheckout];
+export const verifierCheckout = {
+  ...checkout,
+  id: "checkout-verifier-fallback",
+  snapshot: "unavailable-verifier",
+  categories: [...checkout.categories, "tool-failure", "recovery"],
+  unchanged: ["test.mjs", "verify.mjs"],
+  prompt:
+    "Before editing, run node verify.mjs. If this verification adapter is unavailable, inspect its error and " +
+    "use node test.mjs instead of retrying it blindly. Do not modify verify.mjs or test.mjs. " +
+    checkout.prompt,
+} as const satisfies ProgramTask;
+
+export const TASKS: readonly Task[] = [
+  checkout,
+  inventory,
+  slug,
+  continuedCheckout,
+  checkpointCheckout,
+  verifierCheckout,
+];

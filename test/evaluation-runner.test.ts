@@ -42,47 +42,67 @@ async function solutions() {
       Object.entries(files).map(([path, content]) => fauxToolCall("write_file", { path, content })),
       { stopReason: "toolUse" },
     );
+  const patch = code(
+    `await tools.files_write({path:"src/prices.mjs",content:${JSON.stringify(prices)},expectedHash:${JSON.stringify(sha256(buggyPrices))}});` +
+      `await tools.files_write({path:"src/receipt.mjs",content:${JSON.stringify(receipt)},expectedHash:${JSON.stringify(sha256(buggyReceipt))}});`,
+  );
+  const baselinePatch = write({ "src/prices.mjs": prices, "src/receipt.mjs": receipt });
   const checkoutTasks = new Set(["checkout-rounding", "checkout-owner-correction", "checkout-context-checkpoint"]);
   return {
     pal: (task: string): AssistantMessage[] =>
-      checkoutTasks.has(task)
+      task === "checkout-verifier-fallback"
         ? [
-            code(
-              `await tools.files_write({path:"src/prices.mjs",content:${JSON.stringify(prices)},expectedHash:${JSON.stringify(sha256(buggyPrices))}});` +
-                `await tools.files_write({path:"src/receipt.mjs",content:${JSON.stringify(receipt)},expectedHash:${JSON.stringify(sha256(buggyReceipt))}});`,
-            ),
+            code('return await tools.shell_run({command:"node verify.mjs", timeout:5});'),
+            patch,
+            code('return await tools.shell_run({command:"node test.mjs", timeout:5});'),
             done,
-            ...(task !== "checkout-rounding"
-              ? [
-                  code(
-                    `await tools.files_write({path:"src/receipt.mjs",content:${JSON.stringify(continuedReceipt)},expectedHash:${JSON.stringify(sha256(receipt))}});`,
-                  ),
-                  done,
-                ]
-              : []),
           ]
-        : task === "module-inventory"
+        : checkoutTasks.has(task)
           ? [
-              code('await tools.shell_run({command:"ls src", timeout: 5});'),
-              code(
-                `await tools.files_write({path:"inventory.json",content:${JSON.stringify(ANSWER)},expectedHash:null});`,
-              ),
+              patch,
               done,
+              ...(task !== "checkout-rounding"
+                ? [
+                    code(
+                      `await tools.files_write({path:"src/receipt.mjs",content:${JSON.stringify(continuedReceipt)},expectedHash:${JSON.stringify(sha256(receipt))}});`,
+                    ),
+                    done,
+                  ]
+                : []),
             ]
-          : [done],
+          : task === "module-inventory"
+            ? [
+                code('await tools.shell_run({command:"ls src", timeout: 5});'),
+                code(
+                  `await tools.files_write({path:"inventory.json",content:${JSON.stringify(ANSWER)},expectedHash:null});`,
+                ),
+                done,
+              ]
+            : [done],
     baseline: (task: string): AssistantMessage[] =>
-      checkoutTasks.has(task)
+      task === "checkout-verifier-fallback"
         ? [
-            write({ "src/prices.mjs": prices, "src/receipt.mjs": receipt }),
+            fauxAssistantMessage(fauxToolCall("run", { command: "node verify.mjs" }), { stopReason: "toolUse" }),
+            baselinePatch,
+            fauxAssistantMessage(fauxToolCall("run", { command: "node test.mjs" }), { stopReason: "toolUse" }),
             done,
-            ...(task === "checkout-context-checkpoint"
-              ? [fauxAssistantMessage("Retain unit rounding and the completed patch while awaiting the next request.")]
-              : []),
-            ...(task !== "checkout-rounding" ? [write({ "src/receipt.mjs": continuedReceipt }), done] : []),
           ]
-        : task === "module-inventory"
-          ? [write({ "inventory.json": JSON.stringify({ importers: ["src/db.mjs"] }) }), done]
-          : [done],
+        : checkoutTasks.has(task)
+          ? [
+              baselinePatch,
+              done,
+              ...(task === "checkout-context-checkpoint"
+                ? [
+                    fauxAssistantMessage(
+                      "Retain unit rounding and the completed patch while awaiting the next request.",
+                    ),
+                  ]
+                : []),
+              ...(task !== "checkout-rounding" ? [write({ "src/receipt.mjs": continuedReceipt }), done] : []),
+            ]
+          : task === "module-inventory"
+            ? [write({ "inventory.json": JSON.stringify({ importers: ["src/db.mjs"] }) }), done]
+            : [done],
   };
 }
 
@@ -108,7 +128,7 @@ describe("evaluation runner", () => {
     // Only PAL_EVAL_PROMPT reaches the external command, so its answer is part of the command itself.
     const external = externalHarness(
       "external-cli",
-      `if [ -f src/config.mjs ]; then printf %s '${ANSWER}' > inventory.json; else sleep 5; fi`,
+      `if [ -f src/config.mjs ]; then printf %s '${ANSWER}' > inventory.json; elif [ -f verify.mjs ]; then exit 69; else sleep 5; fi`,
     );
     const output = join(root, "report");
     const report = await evaluate({
@@ -142,6 +162,18 @@ describe("evaluation runner", () => {
             interventions: 1,
           });
         }
+    for (const harness of ["pal", "baseline-loop"])
+      for (const run of runs("checkout-verifier-fallback", harness)) {
+        expect(run.grade.passed).toBe(true);
+        expect(run.outcome).toMatchObject({
+          status: "completed",
+          turns: 4,
+          interventions: harness === "pal" ? 2 : 0,
+        });
+        if (harness === "baseline-loop") expect(run.outcome.failedToolCalls).toBe(1);
+      }
+    for (const run of runs("checkout-verifier-fallback", "external-cli"))
+      expect(run.outcome.status).toBe("harness_error");
     for (const run of runs("module-inventory", "pal")) {
       expect(run.grade.passed).toBe(true);
       // Pal asked to run a command; the runner's approval is an owner decision and is counted.
@@ -165,6 +197,23 @@ describe("evaluation runner", () => {
       expect(run.task.digest).toMatch(/^[a-f0-9]{64}$/);
       expect(run.task.repository).toMatch(/^[a-f0-9]{64}$/);
       if ("candidate" in run.grade) expect(run.grade.grader).toMatch(/^[a-f0-9]{64}$/);
+      if (run.task.id === "checkout-verifier-fallback" && run.harness.id === "pal") {
+        const journal = JSON.parse(trace) as {
+          conversations: {
+            entries: { kind: string; data?: { shell?: { status: string; command: string; exitCode: number } } }[];
+          }[];
+        };
+        const commands = journal.conversations.flatMap(({ entries }) =>
+          entries.flatMap((entry) => {
+            const shell = entry.kind === "pal.shell" ? entry.data?.shell : undefined;
+            return shell?.status === "finished" ? [{ command: shell.command, exitCode: shell.exitCode }] : [];
+          }),
+        );
+        expect(commands).toEqual([
+          { command: "node verify.mjs", exitCode: 69 },
+          { command: "node test.mjs", exitCode: 0 },
+        ]);
+      }
     }
     expect(report.evaluator).toMatch(/^[a-f0-9]{64}$/);
     expect(report.implementation).toBe((await pal.extensions.view()).release);
@@ -181,10 +230,10 @@ describe("evaluation runner", () => {
     ]);
     expect(report.summary.unmatched.map((row) => row.harness)).toEqual(["external-cli", "external-cli"]);
     expect(report.summary.matched.find((row) => row.harness === "pal" && row.split === "development")).toMatchObject({
-      runs: 8,
-      passed: 8,
-      interventions: 6,
-      interval95: wilson(8, 8),
+      runs: 10,
+      passed: 10,
+      interventions: 10,
+      interval95: wilson(10, 10),
     });
     expect(report.summary.bottlenecks[0]?.runs).toBeGreaterThan(0);
     const correct = runs("module-inventory", "pal")[0];
