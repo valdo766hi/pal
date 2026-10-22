@@ -1,9 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { isUtf8 } from "node:buffer";
 import { constants } from "node:fs";
-import { access as fsAccess, link, open, readdir, realpath, rename, stat, unlink } from "node:fs/promises";
+import { access as fsAccess, open, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { WorkspaceLocks } from "./execution.ts";
+import { directoryIdentity } from "./workspace-root.ts";
+import { writeTextFile } from "./file-write.ts";
 import type { ProjectSearch, SearchMode } from "./search.ts";
 import type { FolderLease, GrantedFolder } from "./folders.ts";
 import type { Context } from "@earendil-works/chord";
@@ -90,6 +92,8 @@ export function fileTools(options: {
       if (root !== initial.root || relative(root, target).split(sep).includes(".git"))
         throw new FileAccessError("workspace changed or protected Git metadata");
       signal?.throwIfAborted();
+      const directory = dirname(target);
+      const identity = await directoryIdentity(directory);
       const before = await readFileSnapshot(target).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return undefined;
         throw error;
@@ -101,38 +105,19 @@ export function fileTools(options: {
       if (before !== undefined) await fsAccess(target, constants.W_OK);
       const content = change(before?.bytes.toString("utf8") ?? "");
       if (Buffer.byteLength(content) > MAX_READ_BYTES) throw new FileAccessError("text writes are limited to 256 KiB");
-      const temporary = join(dirname(target), `.pal-${randomUUID()}.tmp`);
-      const handle = await open(temporary, "wx", before?.mode ?? 0o600);
-      try {
-        await handle.writeFile(content);
-        await handle.sync();
-        await handle.close();
-        signal?.throwIfAborted();
-        const latest = await readFileSnapshot(target).catch((error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return undefined;
-          throw error;
-        });
-        if (latest?.truncated || (latest === undefined ? null : hash(latest.bytes)) !== expected)
-          throw new FileAccessError("file changed while preparing the write");
-        await lease.check();
-        if (expected === null) await link(temporary, target);
-        else await rename(temporary, target);
-        const directory = await open(dirname(target), constants.O_RDONLY | constants.O_DIRECTORY);
-        try {
-          await directory.sync();
-        } finally {
-          await directory.close();
-        }
-        return {
-          ...text(`Wrote ${path}; sha256: ${hash(Buffer.from(content))}`),
-          structuredOutput: { sha256: hash(Buffer.from(content)) },
-        };
-      } finally {
-        await handle.close().catch(() => {});
-        await unlink(temporary).catch((error: NodeJS.ErrnoException) => {
-          if (error.code !== "ENOENT") throw error;
-        });
-      }
+      await writeTextFile({
+        directory,
+        identity,
+        name: basename(target),
+        content,
+        expected,
+        check: lease.check,
+        ...(signal === undefined ? {} : { signal }),
+      });
+      return {
+        ...text(`Wrote ${path}; sha256: ${hash(Buffer.from(content))}`),
+        structuredOutput: { sha256: hash(Buffer.from(content)) },
+      };
     });
   };
 

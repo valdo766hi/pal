@@ -44,7 +44,13 @@ Pi journals budget rejections in the same order as other results. Changing the c
 refuses an unfinished replay rather than silently resetting its budget.
 
 - **File tools** resolve real paths, refuse symlink escapes and never touch Pal's data directory or credentials.
-  Writes are refused when the file changed since the agent read it.
+  Writes are refused when the file changed since the agent read it. Each write runs in a short-lived helper process
+  whose working directory is the file's checked parent folder, and the file is created and published relative to
+  it. If another process renames or replaces that folder, or any folder above it, during the write (for example
+  swapping it for a link to somewhere else), the write fails instead of landing elsewhere, and its temporary file is
+  removed, including when Pal is killed mid-write. This protects the write path itself. Reads, listings and
+  searches still resolve paths when they run, and nothing stops other host processes or the agent's own shell
+  commands, which run as the same user, from changing files directly.
 - **Shell commands are not sandboxed.** They run on the host as the user running Pal, starting in the chat's
   working folder. The environment is clean (no Pal secrets or shell profiles). Commands have at most 120 seconds
   and a bounded output, and Stop kills their process group. GNU `timeout` keeps the deadline even if Pal itself
