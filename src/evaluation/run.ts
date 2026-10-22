@@ -121,8 +121,6 @@ async function runOnce(
     try {
       await freeze(workspace, candidate);
       const result = await grade(candidate, task);
-      // Its digest now pins what was graded; the owner can inspect or delete the copy normally.
-      await unseal(candidate);
       graded = {
         passed: result.passed,
         failures: result.cases.flatMap((test) => (test.failure === null ? [] : [`${test.id}:${test.failure}`])),
@@ -133,6 +131,8 @@ async function runOnce(
     } catch (failure) {
       const error = failure instanceof Error ? failure.message : String(failure);
       graded = { passed: false, failures: ["invalid_candidate"], error };
+    } finally {
+      await unseal(candidate);
     }
   }
   return {

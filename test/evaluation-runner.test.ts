@@ -128,7 +128,7 @@ describe("evaluation runner", () => {
     // Only PAL_EVAL_PROMPT reaches the external command, so its answer is part of the command itself.
     const external = externalHarness(
       "external-cli",
-      `if [ -f src/config.mjs ]; then printf %s '${ANSWER}' > inventory.json; elif [ -f verify.mjs ]; then exit 69; else sleep 5; fi`,
+      `if [ -f src/config.mjs ]; then printf %s '${ANSWER}' > inventory.json; elif [ -f verify.mjs ] || [ -f src/slug.mjs ]; then exit 69; else sleep 5; fi`,
     );
     const output = join(root, "report");
     const report = await evaluate({
@@ -172,8 +172,8 @@ describe("evaluation runner", () => {
         });
         if (harness === "baseline-loop") expect(run.outcome.failedToolCalls).toBe(1);
       }
-    for (const run of runs("checkout-verifier-fallback", "external-cli"))
-      expect(run.outcome.status).toBe("harness_error");
+    for (const task of ["checkout-verifier-fallback", "slug-test-repair"])
+      for (const run of runs(task, "external-cli")) expect(run.outcome.status).toBe("harness_error");
     for (const run of runs("module-inventory", "pal")) {
       expect(run.grade.passed).toBe(true);
       // Pal asked to run a command; the runner's approval is an owner decision and is counted.
