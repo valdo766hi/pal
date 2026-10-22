@@ -12,11 +12,17 @@ import { fileTools } from "../src/core/files.ts";
 import { gnuTimeout } from "../src/core/timeout.ts";
 
 let barrier: ((phase: string) => Promise<void>) | undefined;
+let workerPrefix: string | undefined;
 vi.mock("node:child_process", async (original) => {
   const actual = await original<typeof import("node:child_process")>();
   return {
     ...actual,
     spawn: (...args: Parameters<typeof actual.spawn>) => {
+      if (workerPrefix !== undefined) {
+        const argv = args[1];
+        if (argv?.at(-2) !== "--eval") throw new Error("missing fixed writer program");
+        args[1] = [...argv.slice(0, -1), `${workerPrefix}\n${argv.at(-1)}`];
+      }
       const child = actual.spawn(...args);
       const events: EventEmitter = child;
       const on = events.on.bind(events);
@@ -47,6 +53,7 @@ vi.mock("node:child_process", async (original) => {
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   barrier = undefined;
+  workerPrefix = undefined;
   vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
@@ -74,7 +81,7 @@ async function setup() {
       api,
       signal === undefined ? context : withAbortSignal(signal, context),
     );
-  return { parent, outside, moved, write };
+  return { home, parent, outside, moved, write };
 }
 
 describe("file mutation parent replacement", () => {
@@ -102,6 +109,25 @@ describe("file mutation parent replacement", () => {
       }).toEqual({ swapped: true, failed: true, outside: original, original, temporaryFiles: [] });
     },
   );
+
+  it("keeps publication on the original inode when its parent moves after the final check", async () => {
+    const { home, parent, outside, write } = await setup();
+    const moved = join(home, "late-moved-outside-project");
+    workerPrefix = `
+      const probe = process.getBuiltinModule("node:fs").promises;
+      const rename = probe.rename;
+      probe.rename = async (...args) => {
+        probe.rename = rename;
+        await rename(${JSON.stringify(parent)}, ${JSON.stringify(moved)});
+        await probe.symlink(${JSON.stringify(outside)}, ${JSON.stringify(parent)}, "dir");
+        return rename(...args);
+      };
+    `;
+    await write();
+    expect(await fs.readFile(join(outside, "main.txt"), "utf8")).toBe(original);
+    expect(await fs.readFile(join(moved, "main.txt"), "utf8")).toBe("replacement\n");
+    expect((await fs.readdir(moved)).filter((name) => name.startsWith(".pal-"))).toEqual([]);
+  });
 
   it("cleans the prepared temporary on cancellation without publishing it", async () => {
     const { parent, write } = await setup();
