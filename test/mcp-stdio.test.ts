@@ -69,13 +69,29 @@ describe("approved local MCP programs", () => {
   it("uses the explicit cwd and a private temporary home with only the dedicated encrypted-key slot", async () => {
     const fixture = await setup({ kind: "env", variable: "LOCAL_TOKEN" });
     fixture.approve();
-    const prior = process.env.OPENAI_API_KEY;
+    const prior = {
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      __CF_USER_TEXT_ENCODING: process.env.__CF_USER_TEXT_ENCODING,
+    };
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("native MCP controls require a POSIX user ID");
+    const encodingCanary = `0x${uid.toString(16)}:0xA11CE:0xBADC0DE`;
     process.env.OPENAI_API_KEY = "fixture-ambient-must-not-leak";
+    process.env.__CF_USER_TEXT_ENCODING = encodingCanary;
     try {
       const client = await fixture.connect("fixture-stdio-key");
       const info = await inspect(client);
       expect(info.cwd).toBe(fixture.cwd);
-      expect(info.env).toEqual({
+      const env = { ...info.env };
+      // CoreFoundation adds numeric locale metadata itself, not the caller's environment.
+      if (process.platform === "darwin" && env.__CF_USER_TEXT_ENCODING !== undefined) {
+        expect(env.__CF_USER_TEXT_ENCODING.split(":").slice(1).map(Number)).not.toEqual([0xa11ce, 0xbadc0de]);
+        expect(env.__CF_USER_TEXT_ENCODING).toMatch(
+          new RegExp(`^0x${uid.toString(16)}:(?:0x[\\da-f]+|\\d+):(?:0x[\\da-f]+|\\d+)$`, "i"),
+        );
+        delete env.__CF_USER_TEXT_ENCODING;
+      }
+      expect(env).toEqual({
         HOME: info.home,
         TMPDIR: info.home,
         PATH: dirname(fixture.program.command),
@@ -94,8 +110,10 @@ describe("approved local MCP programs", () => {
         )
         .toBe(false);
     } finally {
-      if (prior === undefined) delete process.env.OPENAI_API_KEY;
-      else process.env.OPENAI_API_KEY = prior;
+      for (const [name, value] of Object.entries(prior)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
     }
   });
 
