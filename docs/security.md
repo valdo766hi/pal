@@ -123,6 +123,26 @@ ordinary page text may not be recognized. Closed/inaccessible widget interiors a
 input targets. Keep sensitive pages under owner control; do not hand them to the agent based only on a detection
 result. Privacy heuristics are separate from the enforced network/process isolation above.
 
+### macOS adapter gate
+
+No macOS browser adapter is qualified yet. Keep the feature unavailable rather than substitute a proxy-only
+browser or remove Chromium's sandbox. The candidates have different proof obligations:
+
+- **Native helper:** prove restricted filesystem visibility, broker-only egress, whole-process-tree resource bounds
+  and cleanup after controller death. Chromium's own sandbox alone does not establish these outer guarantees.
+- **Optional hardware VM:** requires a virtualization-capable native test host. Prove per-project storage, no host
+  data/key mounts, broker-only guest I/O, bounded host resources and orphan cleanup; a guest RAM setting is not an
+  aggregate host-memory limit. Native framework eligibility is only a prerequisite, not security evidence.
+- **QEMU software emulation:** [TCG runs on macOS](https://www.qemu.org/docs/master/system/introduction.html), but
+  QEMU's [security policy](https://www.qemu.org/docs/master/system/security.html) explicitly excludes TCG guest
+  isolation guarantees. Do not use it alone as the security boundary. QEMU also documents effectively unbounded
+  worst-case host memory and privileged monitor interfaces; neither fixed guest RAM nor an exposed monitor is an
+  acceptable replacement for host policy.
+
+Choose an adapter only after native tests demonstrate the same confinement, approvals, resource limits and crash
+recovery as Linux, and measure its startup/memory/install cost. Chat, DOM-policy or VM boot fixtures alone cannot
+qualify it. Any VM experiment needs a reviewed plan before it starts; no mechanism is selected by this comparison.
+
 ## Not covered
 
 - Other processes running as the same user can read Pal's data directory.
