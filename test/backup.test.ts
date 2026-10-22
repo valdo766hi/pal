@@ -78,7 +78,11 @@ async function installation() {
     const workspace = await pal.workspaces.info(local.id);
     expect(worktree.state).toBe("ready");
     if (workspace?.state !== "ready") throw new Error("fixture workspace is not ready");
-    return { root, dataRoot, installRoot, external, project, local, workspace, worktree };
+    const build = (
+      await pal.store.database.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = 'extensions:release'")
+    )?.value;
+    if (build === undefined) throw new Error("missing fixture build identity");
+    return { root, dataRoot, installRoot, external, project, local, workspace, worktree, build };
   } finally {
     await pal.close();
   }
@@ -96,6 +100,8 @@ describe("stopped-state backup and restore", () => {
       includeBrowserProfiles: false,
     });
     expect(made).toMatchObject({
+      format: 2,
+      build: fixture.build,
       dataRoot: fixture.dataRoot,
       schema: MIGRATIONS.at(-1)?.version,
       credentialKeyIncluded: true,
@@ -142,6 +148,65 @@ describe("stopped-state backup and restore", () => {
     expect(await readFile(join(fixture.worktree.root, "notes.md"), "utf8")).toBe("managed bytes\n");
     expect((await lstat(join(fixture.project.root, "run.sh"))).mode & 0o777).toBe(0o700);
     expect(await readlink(join(fixture.project.root, "latest"))).toBe("notes.md");
+  });
+
+  it("rejects missing or mismatched build metadata without replacing a live installation", async () => {
+    const fixture = await installation();
+    const backup = join(fixture.root, "backup");
+    await backupDataRoot({
+      dataRoot: fixture.dataRoot,
+      output: backup,
+      version: "test",
+      includeCredentialKey: true,
+      includeBrowserProfiles: false,
+    });
+    const path = join(backup, "manifest.json");
+    const manifest = JSON.parse(await readFile(path, "utf8"));
+    expect(manifest).toMatchObject({ format: 2, build: fixture.build });
+    const marker = join(fixture.dataRoot, "live-marker");
+    await writeFile(marker, "keep the live installation");
+    for (const build of ["0".repeat(64), undefined]) {
+      await writeFile(path, JSON.stringify({ ...manifest, build }));
+      await expect(restoreBackup(backup, fixture.dataRoot)).rejects.toThrow(/build identity|manifest/);
+      expect(await readFile(marker, "utf8")).toBe("keep the live installation");
+    }
+    await writeFile(path, JSON.stringify(manifest));
+    expect((await inspectBackup(backup)).report.build).toBe(fixture.build);
+  });
+
+  it("reports legacy build identity as unknown and refuses malformed stored identity", async () => {
+    const fixture = await installation();
+    const backup = join(fixture.root, "backup");
+    const options = {
+      dataRoot: fixture.dataRoot,
+      output: backup,
+      version: "test",
+      includeCredentialKey: true,
+      includeBrowserProfiles: false,
+    };
+    await backupDataRoot(options);
+    const path = join(backup, "manifest.json");
+    const { build, ...legacy } = JSON.parse(await readFile(path, "utf8"));
+    expect(build).toBe(fixture.build);
+    await writeFile(path, JSON.stringify({ ...legacy, format: 1 }));
+    expect((await inspectBackup(backup)).report).toMatchObject({ integrity: "ok", build: null });
+    const store = await openStore(fixture.dataRoot);
+    try {
+      await store.database.run("DELETE FROM pal_settings WHERE key = 'extensions:release'");
+    } finally {
+      await store.close();
+    }
+    const output = join(fixture.root, "legacy-store");
+    expect(await backupDataRoot({ ...options, output })).toMatchObject({ format: 1, build: null });
+    const changed = await openStore(fixture.dataRoot);
+    try {
+      await changed.database.run("INSERT INTO pal_settings (key, value) VALUES ('extensions:release', 'invalid')");
+    } finally {
+      await changed.close();
+    }
+    const invalid = join(fixture.root, "invalid-store");
+    await expect(backupDataRoot({ ...options, output: invalid })).rejects.toThrow(/invalid build identity/);
+    await expect(lstat(invalid)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("restores automatic messages paused and never retries a claimed firing", async () => {

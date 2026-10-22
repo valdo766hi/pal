@@ -66,10 +66,10 @@ pal restore --from /backups/pal-2026-10-21 --data-dir <path> [--credential-key /
 ```
 
 `backup` refuses while Pal or a supervisor owns the directory and holds the database's exclusive lock for the
-whole copy, so Pal cannot start meanwhile. SQLite makes the consistent database copy; every other file, folder and
-symbolic link (never followed) is copied with its size and SHA-256 in `manifest.json`, together with the schema,
-Pal version, installation ID and counts of unfinished work. The new folder appears only when complete; folders are
-0700 and files 0600. Other file types refuse the backup.
+whole copy, so Pal cannot start meanwhile. SQLite makes the consistent database copy. `manifest.json` records
+regular-file sizes and SHA-256 checksums, folders, symbolic-link targets (never followed), schema, Pal version,
+installation ID and counts of unfinished work. The new folder appears only when complete; folders are 0700 and
+files 0600. Other file types refuse the backup.
 
 - **Credential key:** excluded by default, so the backup holds only sealed credentials. Keep `credentials.key`
   somewhere safe and pass it to `restore --credential-key`; Pal checks it against the backup's fingerprint. With
@@ -78,9 +78,13 @@ Pal version, installation ID and counts of unfinished work. The new folder appea
 - **Browser profiles** (site cookies and logins) are excluded unless `--include-browser-profiles` is given.
 - **Existing-folder projects and reference folders** are never copied; the manifest lists them as external.
 - **Release-control state** is copied, but Nix packages it names must still exist on the restoring host.
+- **Build identity:** format 2 archives bind the last-opened Pal implementation's digest to the copied database;
+  a version such as `0.0.0` alone does not identify a build. Older archives or stores without this metadata use
+  format 1 and report `build: null`: their build identity is unknown, not verified. Keep the exact retained
+  implementation for unfinished work; a checksum pass does not make a different build compatible with it.
 
 `restore --check` verifies the manifest, every checksum, the absence of unlisted paths, the database's integrity,
-schema and installation, and the key, without writing anything or contacting providers. A backup from a newer
+schema, installation and recorded build identity, and the key, without writing anything or contacting providers. A backup from a newer
 schema than this Pal supports is refused. `restore` performs the same checks, then recreates the backup only at its
 original data directory, which must not exist: move a damaged installation aside first; nothing is ever replaced.
 Restored folders are new filesystem objects, so the folder identities Pal pinned inside the data directory are

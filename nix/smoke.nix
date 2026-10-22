@@ -73,6 +73,16 @@ runCommand "pal-smoke-${pal.version}"
     pal restore --from "$TMPDIR/backup" --check | tee restore-check.json
     grep -F '"integrity":"ok"' restore-check.json
     grep -F '"credentialKey":"missing"' restore-check.json
+    ${nodejs_24}/bin/node --input-type=module <<'JS'
+    import assert from 'node:assert/strict';
+    import { createHash } from 'node:crypto';
+    import { readFile } from 'node:fs/promises';
+    const backup = JSON.parse(await readFile('backup.json', 'utf8'));
+    const checked = JSON.parse(await readFile('restore-check.json', 'utf8'));
+    assert.equal(backup.format, 2);
+    assert.equal(backup.build, createHash('sha256').update('${pal}').digest('hex'));
+    assert.equal(checked.build, backup.build);
+    JS
     install -m 600 "$TMPDIR/data/credentials.key" "$TMPDIR/kept.key"
     mv "$TMPDIR/data" "$TMPDIR/data-before"
     pal restore --from "$TMPDIR/backup" --data-dir "$TMPDIR/data" --credential-key "$TMPDIR/kept.key" | tee restored.json

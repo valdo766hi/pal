@@ -73,29 +73,29 @@ const Entry = Type.Union([
   ),
 ]);
 type Entry = Static<typeof Entry>;
-const Manifest = Type.Object(
-  {
-    format: Type.Literal(1),
-    kind: Type.Literal("pal-stopped-backup"),
-    createdAt: Type.Integer({ minimum: 0 }),
-    dataRoot: Path,
-    version: Type.String({ maxLength: 64 }),
-    schema: Type.Integer({ minimum: 1 }),
-    installation: Type.String({ minLength: 1, maxLength: 128 }),
-    database: Type.Object({ size: Type.Integer({ minimum: 1 }), sha256: Sha256 }, { additionalProperties: false }),
-    credentialKey: Type.Object({ included: Type.Boolean(), sha256: Sha256 }, { additionalProperties: false }),
-    browserProfiles: Type.Union([Type.Literal("included"), Type.Literal("excluded"), Type.Literal("absent")]),
-    external: Type.Array(
-      Type.Object(
-        { kind: Type.Union([Type.Literal("project"), Type.Literal("folder")]), root: Path },
-        { additionalProperties: false },
-      ),
+const ManifestFields = {
+  kind: Type.Literal("pal-stopped-backup"),
+  createdAt: Type.Integer({ minimum: 0 }),
+  dataRoot: Path,
+  version: Type.String({ maxLength: 64 }),
+  schema: Type.Integer({ minimum: 1 }),
+  installation: Type.String({ minLength: 1, maxLength: 128 }),
+  database: Type.Object({ size: Type.Integer({ minimum: 1 }), sha256: Sha256 }, { additionalProperties: false }),
+  credentialKey: Type.Object({ included: Type.Boolean(), sha256: Sha256 }, { additionalProperties: false }),
+  browserProfiles: Type.Union([Type.Literal("included"), Type.Literal("excluded"), Type.Literal("absent")]),
+  external: Type.Array(
+    Type.Object(
+      { kind: Type.Union([Type.Literal("project"), Type.Literal("folder")]), root: Path },
+      { additionalProperties: false },
     ),
-    unfinished: Type.Record(Type.String(), Type.Integer({ minimum: 0 })),
-    entries: Type.Array(Entry, { maxItems: MAX_ENTRIES }),
-  },
-  { additionalProperties: false },
-);
+  ),
+  unfinished: Type.Record(Type.String(), Type.Integer({ minimum: 0 })),
+  entries: Type.Array(Entry, { maxItems: MAX_ENTRIES }),
+};
+const Manifest = Type.Union([
+  Type.Object({ ...ManifestFields, format: Type.Literal(1) }, { additionalProperties: false }),
+  Type.Object({ ...ManifestFields, format: Type.Literal(2), build: Sha256 }, { additionalProperties: false }),
+]);
 export type BackupManifest = Static<typeof Manifest>;
 
 // Fixed statements for every stored folder identity Pal compares against a live folder; restore remaps the ones
@@ -213,6 +213,11 @@ async function storeFacts(database: SqliteDatabase) {
   const schema = (await database.get<{ n: number }>("SELECT max(version) AS n FROM pal_migrations"))?.n;
   const installation = (await database.get<{ id: string }>("SELECT id FROM pal_installation"))?.id;
   if (schema === undefined || installation === undefined) throw new BackupError("the store has no Pal identity");
+  const build = (
+    await database.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = 'extensions:release'")
+  )?.value;
+  if (build !== undefined && !/^[a-f0-9]{64}$/.test(build))
+    throw new BackupError("the store has an invalid build identity");
   const unfinished = await unfinishedWork(database, tables);
   const projects = await database.all<{ root: string }>(
     "SELECT root FROM pal_projects WHERE mode = 'existing' AND removed_at IS NULL ORDER BY root",
@@ -239,7 +244,7 @@ async function storeFacts(database: SqliteDatabase) {
       for (const field of fields) if (typeof document[field] === "string") referenced.add(document[field]);
     }
   }
-  return { schema, installation, unfinished, external, referenced };
+  return { schema, installation, build, unfinished, external, referenced };
 }
 
 /** Counts of durable work a store still holds, for the tables its schema has. */
@@ -283,9 +288,8 @@ async function copyStore(
   let browserProfiles: BackupManifest["browserProfiles"] = "absent";
   if ((await lstat(join(dataRoot, BROWSER)).catch(() => undefined)) !== undefined)
     browserProfiles = options.includeBrowserProfiles ? "included" : "excluded";
-  return {
-    format: 1,
-    kind: "pal-stopped-backup",
+  const manifest = {
+    kind: "pal-stopped-backup" as const,
     createdAt: Date.now(),
     dataRoot,
     version: options.version,
@@ -298,6 +302,7 @@ async function copyStore(
     unfinished: facts.unfinished,
     entries,
   };
+  return facts.build === undefined ? { ...manifest, format: 1 } : { ...manifest, format: 2, build: facts.build };
 }
 
 async function copyEntry(
@@ -427,6 +432,12 @@ function verifyDatabase(path: string, manifest: BackupManifest, actual: { size: 
     const installation = (db.prepare("SELECT id FROM pal_installation").get() as { id?: string } | undefined)?.id;
     if (schema !== manifest.schema || installation !== manifest.installation)
       throw new BackupError("the database copy does not match the manifest's schema or installation");
+    if (manifest.format === 2) {
+      const build = db.prepare("SELECT value FROM pal_settings WHERE key = 'extensions:release'").get() as
+        { value: string } | undefined;
+      if (build?.value !== manifest.build)
+        throw new BackupError("the database copy does not match the manifest's build identity");
+    }
     return (db.prepare("SELECT count(*) AS n FROM pal_owner").get() as { n: number }).n;
   } finally {
     db.close();
@@ -578,6 +589,7 @@ function summary(manifest: BackupManifest) {
   const files = manifest.entries.filter((entry) => entry.type === "file");
   return {
     format: manifest.format,
+    build: manifest.format === 2 ? manifest.build : null,
     dataRoot: manifest.dataRoot,
     version: manifest.version,
     schema: manifest.schema,
