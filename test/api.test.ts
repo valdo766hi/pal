@@ -172,6 +172,55 @@ describe("API", () => {
     expect(await reopened.settings.defaultModel()).toBeUndefined();
   });
 
+  it("stores an owner-only working goal without choosing a model, starting work or dropping stale edits", async () => {
+    const { api, pal, fixture, base, cookie } = await signedIn();
+    const project = await pal.projects.create("working-project", { name: "Working state" });
+    const chat = await pal.chats.createChat("working-chat", { projectId: project.id }, context);
+    const path = `chats/${chat.id}/context/working-state`;
+    expect((await fetch(`${base}/api/${path}`)).status).toBe(401);
+    const initial = await api("GET", path);
+    expect(initial.status).toBe(200);
+    expect(initial.body.goal).toEqual({ revision: 0, text: "", constraints: [], acceptance: [] });
+    const goal = {
+      revision: 0,
+      text: "Fix receipt rounding",
+      constraints: ["Round each unit before multiplying"],
+      acceptance: ["The independent rounding cases pass"],
+    };
+    expect(
+      (
+        await fetch(`${base}/api/${path}`, {
+          method: "PUT",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify(goal),
+        })
+      ).status,
+    ).toBe(403);
+    const conversation = await pal.harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing working-state conversation");
+    const before = await conversation.entries({}, 100, undefined, context);
+    const saved = await api("PUT", path, goal);
+    expect(saved.status).toBe(200);
+    expect(saved.body.goal).toEqual({ ...goal, revision: 1 });
+    expect(saved.body.checkpoint).toBeNull();
+    expect((await api("GET", path)).body).toEqual(saved.body);
+    expect((await api("PUT", path, { ...goal, text: "stale overwrite" })).status).toBe(409);
+    expect((await api("PUT", path, { ...goal, revision: 1, provider: "openai" })).status).toBe(400);
+    expect((await api("PUT", path, { ...goal, revision: 1, text: "界".repeat(2000) })).status).toBe(400);
+    expect((await api("GET", path)).body).toEqual(saved.body);
+    expect((await api("PUT", path, { revision: 1, text: "", constraints: [], acceptance: [] })).body.goal).toEqual({
+      revision: 2,
+      text: "",
+      constraints: [],
+      acceptance: [],
+    });
+    expect((await conversation.entries({}, 100, undefined, context)).items).toEqual(before.items);
+    expect(await pal.settings.defaultModel()).toBeUndefined();
+    expect(fixture.authorizations).toEqual([]);
+    expect(fixture.tokenRequests).toEqual([]);
+    expect(fixture.apiRequests).toEqual([]);
+  });
+
   it("keeps release observation and exact-digest consent owner-only and validates before forwarding private IPC", async () => {
     const control = fakeReleaseControl();
     const { api, pal, base, cookie } = await start(undefined, control.access);

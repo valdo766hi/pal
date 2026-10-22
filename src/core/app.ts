@@ -32,6 +32,7 @@ import { chatConfiguration, ChatService } from "./chats.ts";
 import { AGENTS_NAMESPACE, helperBudget, HelperLinks, type HelperLimits, helperTools } from "./delegation.ts";
 import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
+import { WORKING_NAMESPACE, WorkingState } from "./working-state.ts";
 import { INSTRUCTIONS_NAMESPACE, ProjectInstructions } from "./instructions.ts";
 import { GuidanceFiles } from "./guidance-files.ts";
 import { ProjectSkills, SKILLS_NAMESPACE } from "./skills.ts";
@@ -90,6 +91,7 @@ export type Pal = {
   readonly memory: ProjectMemory;
   readonly capabilities: CompiledCapabilities;
   readonly context: ChatContext;
+  readonly working: WorkingState;
   readonly instructions: ProjectInstructions;
   readonly skills: ProjectSkills;
   readonly chats: ChatService;
@@ -283,6 +285,11 @@ export async function openPal(
       ...(options.guidanceHome === undefined ? {} : { home: options.guidanceHome }),
     });
 
+    const working = new WorkingState(database, () => {
+      if (harness === undefined) throw new Error("the harness is not open");
+      return harness;
+    });
+
     // Host writes/commands are the owner's explicit high-trust mode; every nested call rechecks the live project grant.
     const projectFor = async (conversation: ConversationId) =>
       await database.get<{ id: string; root: string }>(
@@ -314,6 +321,8 @@ export async function openPal(
           name === "instructions_scope" ||
           name === "skills_search" ||
           name === "skills_read" ||
+          name === "working_read" ||
+          name === "working_checkpoint" ||
           name === "agents_delegate" ||
           (name.startsWith(BROWSER_NAMESPACE.prefix) && browsers?.allows(conversation) === true) ||
           (await mcp?.allowsInConversation(conversation, name)) === true
@@ -326,6 +335,7 @@ export async function openPal(
         BROWSER_NAMESPACE,
         INSTRUCTIONS_NAMESPACE,
         SKILLS_NAMESPACE,
+        WORKING_NAMESPACE,
         AGENTS_NAMESPACE,
       ],
     });
@@ -391,6 +401,7 @@ export async function openPal(
           BROWSER_NAMESPACE,
           INSTRUCTIONS_NAMESPACE,
           SKILLS_NAMESPACE,
+          WORKING_NAMESPACE,
           AGENTS_NAMESPACE,
           ...namespaces,
         ]),
@@ -418,11 +429,13 @@ export async function openPal(
         ...(chatContext.extension.tools ?? []),
         ...(instructions.extension.tools ?? []),
         ...(skills.extension.tools ?? []),
+        ...(working.extension.tools ?? []),
       ],
       sections: [
         ...(chatContext.extension.sections ?? []),
         ...(instructions.extension.sections ?? []),
         ...(skills.extension.sections ?? []),
+        ...(working.extension.sections ?? []),
       ],
       hooks: [
         ...(chatContext.extension.hooks ?? []),
@@ -556,6 +569,7 @@ export async function openPal(
       },
       capabilities: openedCapabilities,
       context: chatContext,
+      working,
       instructions,
       skills,
       workspaces: openedWorkspaces,

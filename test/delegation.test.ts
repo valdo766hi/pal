@@ -133,14 +133,21 @@ describe("research helpers", () => {
     expect(access).toEqual(["read", "write"]);
   });
 
-  it("refuses writes, commands, the browser and nested helpers inside a helper", async () => {
+  it("refuses writes, commands, browser, working state and nested helpers inside a helper", async () => {
     const f = await fixture();
     const chat = await f.chat("authority-chat");
+    await f.pal.working.setGoal(
+      chat,
+      { revision: 0, text: "Parent-only goal", constraints: [], acceptance: [] },
+      context,
+    );
     const attempts = [
       'tools.files_write({path:"made-by-helper.txt", content:"x", expectedHash:null})',
       'tools.shell_run({command:"printf x > shell-by-helper.txt"})',
       'tools.agents_delegate({purpose:"again", task:"recurse"})',
       "tools.browser_observe({})",
+      "tools.working_read({})",
+      'tools.working_checkpoint({revision:0,goalRevision:1,summary:"helper note",plan:[],next:"",questions:[]})',
     ];
     await f.send(chat, [
       code(DELEGATE),
@@ -158,6 +165,10 @@ describe("research helpers", () => {
     for (const name of ["made-by-helper.txt", "shell-by-helper.txt"])
       expect(await readFile(join(f.project.root, name), "utf8").catch(() => undefined)).toBeUndefined();
     expect(await f.helpers(chat)).toHaveLength(1);
+    expect(await f.pal.working.inspect(chat, context)).toMatchObject({
+      goal: { revision: 1, text: "Parent-only goal" },
+      checkpoint: null,
+    });
   });
 
   it("keeps the parent's admitted folder scope and immediately honours revocation", async () => {

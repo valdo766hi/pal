@@ -2082,3 +2082,165 @@ describe("browser address drafts", () => {
     },
   );
 });
+
+describe("saved working goals", () => {
+  async function panel(page: Page, base: string, id: string, width: number) {
+    await page.goto(`${base}/#/chat/${id}`);
+    if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+    await page.getByRole("button", { name: "Context", exact: true }).click();
+    return page.getByRole("region", { name: "Working goal", exact: true });
+  }
+
+  it.each([1440, 390])(
+    "saves and clears a passive owner goal across reload without model work at %s px",
+    async (width) => {
+      const { pal, page, base, saved, provider, errors, mutations, restart } = await setup(width);
+      let working = await panel(page, base, saved.id, width);
+      await working.getByRole("button", { name: "Edit working goal", exact: true }).click();
+      await working.getByLabel("Goal", { exact: true }).fill("Correct receipt rounding");
+      await working.getByLabel("Constraints (one per line)").fill("Round each unit first\nKeep currency formatting");
+      await working.getByLabel("Acceptance checks (one per line)").fill("Independent rounding cases pass");
+      await working.getByRole("button", { name: "Save working goal", exact: true }).click();
+      await working.getByText("Correct receipt rounding", { exact: true }).waitFor();
+      const value = await pal.working.inspect(saved, context);
+      expect(value.goal).toEqual({
+        revision: 1,
+        text: "Correct receipt rounding",
+        constraints: ["Round each unit first", "Keep currency formatting"],
+        acceptance: ["Independent rounding cases pass"],
+      });
+      expect(provider.requests).toEqual([]);
+      const reopened = await restart();
+      await page.reload();
+      if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+      await page.getByRole("button", { name: "Context", exact: true }).click();
+      working = page.getByRole("region", { name: "Working goal", exact: true });
+      await working.getByText("Correct receipt rounding", { exact: true }).waitFor();
+      await screenshot(page, `working-goal-${width}`);
+      await working.getByRole("button", { name: "Clear current goal", exact: true }).click();
+      await working.getByText("No saved working goal.", { exact: true }).waitFor();
+      expect((await reopened.working.inspect(saved, context)).goal).toEqual({
+        revision: 2,
+        text: "",
+        constraints: [],
+        acceptance: [],
+      });
+      expect(mutations).toEqual([
+        `PUT /api/chats/${saved.id}/context/working-state`,
+        `PUT /api/chats/${saved.id}/context/working-state`,
+      ]);
+      expect(provider.requests).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+
+  it.each([1440, 390])("retains a conflicting goal draft until explicit revision review at %s px", async (width) => {
+    const { pal, page, base, saved, provider, errors } = await setup(width);
+    const working = await panel(page, base, saved.id, width);
+    await working.getByRole("button", { name: "Edit working goal", exact: true }).click();
+    await working.getByLabel("Goal", { exact: true }).fill("My unsent goal");
+    await pal.working.setGoal(
+      saved,
+      { revision: 0, text: "Another owner edit", constraints: [], acceptance: [] },
+      context,
+    );
+    await working.getByRole("button", { name: "Save working goal", exact: true }).click();
+    await working.getByText("Another owner edit", { exact: true }).waitFor();
+    expect(await working.getByLabel("Goal", { exact: true }).inputValue()).toBe("My unsent goal");
+    expect(await working.getByRole("button", { name: "Save working goal", exact: true }).isDisabled()).toBe(true);
+    await working.getByRole("button", { name: "Use current goal revision for my draft", exact: true }).click();
+    await working.getByRole("button", { name: "Save working goal", exact: true }).click();
+    await working.getByText("My unsent goal", { exact: true }).waitFor();
+    expect((await pal.working.inspect(saved, context)).goal).toMatchObject({ revision: 2, text: "My unsent goal" });
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it.each([1440, 390])("labels checkpoint text as unverified and never renders it as HTML at %s px", async (width) => {
+    const { page, base, saved, provider, errors, mutations } = await setup(width);
+    const summary = '<script>document.documentElement.dataset.checkpoint="executed"</script>';
+    await page.route(`**/api/chats/${saved.id}/context/working-state`, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        json: {
+          ...(await response.json()),
+          goal: { revision: 1, text: "Saved fixture goal", constraints: [], acceptance: [] },
+          checkpoint: {
+            revision: 1,
+            goalRevision: 1,
+            at: 0,
+            summary,
+            plan: ["Inspect first"],
+            next: "Run checks",
+            questions: ["What changed?"],
+          },
+        },
+      });
+    });
+    const working = await panel(page, base, saved.id, width);
+    await working.getByRole("heading", { name: "Unverified agent checkpoint", exact: true }).waitFor();
+    await working.getByText(summary, { exact: true }).waitFor();
+    expect(await working.locator("script").count()).toBe(0);
+    expect(await page.locator("html").getAttribute("data-checkpoint")).toBeNull();
+    await working.getByText("Plan and open questions", { exact: true }).click();
+    await working.getByText("What changed?", { exact: true }).waitFor();
+    await screenshot(page, `working-checkpoint-${width}`);
+    expect(await working.innerText()).toContain("notes do not prove checks or completion");
+    expect(mutations).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it.each([1440, 390])(
+    "retries failed working-state loads and ignores a late response after navigation at %s px",
+    async (width) => {
+      const { page, base, saved, other, provider, errors } = await setup(width);
+      const seen = Promise.withResolvers<undefined>();
+      const release = Promise.withResolvers<undefined>();
+      const done = Promise.withResolvers<undefined>();
+      let reads = 0;
+      await page.route(`**/api/chats/${saved.id}/context/working-state`, async (route) => {
+        if (++reads === 1) {
+          await route.fulfill({ status: 503, json: { error: "fixture", message: "Working state unavailable" } });
+          return;
+        }
+        try {
+          const response = await route.fetch();
+          seen.resolve(undefined);
+          await release.promise;
+          await route.fulfill({
+            response,
+            json: {
+              ...(await response.json()),
+              goal: { revision: 1, text: "Old chat goal", constraints: [], acceptance: [] },
+            },
+          });
+        } finally {
+          done.resolve(undefined);
+        }
+      });
+      try {
+        const working = await panel(page, base, saved.id, width);
+        await working.getByRole("alert").waitFor();
+        await working.getByRole("button", { name: "Refresh working state", exact: true }).click();
+        await seen.promise;
+        await page.getByRole("button", { name: "Close panel", exact: true }).click();
+        const next = await panel(page, base, other.id, width);
+        await next.getByText("No saved working goal.", { exact: true }).waitFor();
+        release.resolve(undefined);
+        await done.promise;
+        await page.evaluate(
+          () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+        );
+        await next.getByRole("button", { name: "Edit working goal", exact: true }).click();
+        expect(await next.getByLabel("Goal", { exact: true }).inputValue()).toBe("");
+        expect(await next.innerText()).not.toContain("Old chat goal");
+        expect(provider.requests).toEqual([]);
+        expect(errors).toEqual([]);
+      } finally {
+        release.resolve(undefined);
+      }
+    },
+  );
+});

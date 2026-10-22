@@ -231,6 +231,23 @@ Browser and release activation currently fail closed without their Linux protect
 replacements pass adversarial tests; do not count unavailable capabilities or skipped tests as completed
 macOS support. Service installation or host security changes require a separately approved host plan.
 
+### Saved working state
+
+Owner-authenticated `GET /api/chats/:id/context/working-state` reads passive state. `PUT` sets
+`{ revision, text, constraints, acceptance }`; use the returned goal revision for the next update.
+A conflicting edit returns 409. An identical retry preserves the current revision and checkpoint.
+Saving never selects a model, submits input, grants permissions or certifies completion.
+
+The bounded Pi document survives restart and compaction. Only explicit owner goals enter the native system
+section. Root-chat Code Mode tools `working_read` and `working_checkpoint` retain unverified summary, plan,
+next action and questions; helpers cannot use them. Checkpoints bind both goal and checkpoint revisions.
+Owner correction or clearing the goal invalidates them. Agent notes may be stale and never substitute for
+source checks, durable effect receipts or tested-revision evidence. Clearing removes current state, not old
+transcript entries or backups, and does not cancel running work. The prepared-context inspector shows the
+owner section actually prepared for a request, not unsent edits. The Context panel lets the owner edit/clear
+the goal, explicitly rebase a retained conflicting draft, and refresh unverified checkpoint notes. There is
+no automated completion/budget workflow yet.
+
 ### Evaluations
 
 Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting repository under

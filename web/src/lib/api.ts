@@ -25,6 +25,8 @@ export type { GrantedFolder } from "../../../src/core/folders.ts";
 export type { Workspace, WorkspaceMode } from "../../../src/core/workspaces.ts";
 export type { MemoryItem, MemoryInput } from "../../../src/core/memory.ts";
 export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
+import type { WorkingState } from "../../../src/core/working-state.ts";
+export type WorkingStateInfo = Awaited<ReturnType<WorkingState["inspect"]>>;
 import type { InstructionInfo, InstructionSettings } from "../../../src/core/instructions.ts";
 export type { InstructionInfo, InstructionSettings };
 import type { SkillInfo, SkillSettings } from "../../../src/core/skills.ts";
@@ -201,6 +203,10 @@ export const api = {
       inWorkspace(`projects/${id}/changes?scope=${scope}`, workspace),
     ),
   context: (id: string) => call<import("../../../src/core/context.ts").ContextInfo>("GET", `chats/${id}/context`),
+  workingState: (id: string, signal?: AbortSignal) =>
+    call<WorkingStateInfo>("GET", `chats/${id}/context/working-state`, undefined, signal),
+  saveWorkingGoal: (id: string, goal: WorkingStateInfo["goal"]) =>
+    call<WorkingStateInfo>("PUT", `chats/${id}/context/working-state`, goal),
   pinInstructions: (id: string, revision: number, text: string) =>
     call<{ saved: boolean }>("PUT", `chats/${id}/context/instructions`, { revision, text }),
   contextPrompt: (id: string, offset = 0, request?: string) =>
