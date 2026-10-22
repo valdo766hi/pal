@@ -45,6 +45,13 @@ jobs:
           git rev-parse HEAD 'HEAD^{tree}' | tee identity.txt
           uname -srm | tee -a identity.txt
           nix --version | tee -a identity.txt
+          if [ "$RUNNER_OS" = macOS ]; then
+            /usr/bin/swift -e '
+              import Virtualization
+              let supported = VZVirtualMachine.isSupported
+              print("virtualization_supported=\(supported)")
+            ' | tee -a identity.txt
+          fi
       - name: Static checks, portable tests and build
         env:
           SYSTEM: ${{ matrix.system }}
