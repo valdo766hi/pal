@@ -97,18 +97,24 @@ export async function writeReleaseJson(path: string, value: unknown): Promise<vo
 
 /** flock locks the shared open-file description; this process retains it after the small helper exits. */
 export async function releaseLock(path: string): Promise<FileHandle> {
-  if (process.platform !== "linux") throw new Error("controlled releases currently require Linux");
+  const native = process.env.PAL_RELEASE_LOCK;
+  if (process.platform !== "linux" && (process.platform !== "darwin" || !native))
+    throw new Error("release locking requires Linux or the bundled macOS lock helper");
   const file = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
   try {
     await privateFile(file);
-    const result = spawnSync(process.env.PAL_FLOCK ?? "flock", ["--nonblock", "3"], {
-      stdio: ["ignore", "pipe", "pipe", file.fd],
-      timeout: 5000,
-      maxBuffer: 4096,
-      env: { PATH: process.env.PATH ?? "/run/current-system/sw/bin", LC_ALL: "C" },
-    });
+    const result = spawnSync(
+      native ?? process.env.PAL_FLOCK ?? "flock",
+      native === undefined ? ["--nonblock", "3"] : [],
+      {
+        stdio: ["ignore", "pipe", "pipe", file.fd],
+        timeout: 5000,
+        maxBuffer: 4096,
+        env: { PATH: process.env.PATH ?? "/run/current-system/sw/bin", LC_ALL: "C" },
+      },
+    );
     if (result.error !== undefined || result.status !== 0)
-      throw new Error("another release operation owns this lock, or flock is unavailable");
+      throw new Error("another release operation owns this lock, or its helper is unavailable");
     return file;
   } catch (error) {
     await file.close();
