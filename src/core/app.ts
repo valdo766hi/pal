@@ -3,7 +3,13 @@ import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import type { Context } from "@earendil-works/chord";
 import { createModels, type Models } from "@earendil-works/pi-ai";
-import { type AgentChange, type ConversationId, createRegistry, Harness } from "@earendil-works/pi-durable";
+import {
+  type AgentChange,
+  type ConversationId,
+  createRegistry,
+  Harness,
+  type SubmissionId,
+} from "@earendil-works/pi-durable";
 import type { SqliteExecutor } from "@earendil-works/pi-durable/storage/sqlite";
 import {
   CHATGPT_PROVIDER,
@@ -22,7 +28,7 @@ import { openStore, type Store } from "../storage/store.ts";
 import { CommandApprovals } from "./approvals.ts";
 import { BROWSER_NAMESPACE, browserTools } from "../pi/browser-tools.ts";
 import { type BrowserRuntime, browserRuntime, ProjectBrowsers } from "./browser.ts";
-import { ChatService } from "./chats.ts";
+import { chatConfiguration, ChatService } from "./chats.ts";
 import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { INSTRUCTIONS_NAMESPACE, ProjectInstructions } from "./instructions.ts";
@@ -45,6 +51,7 @@ import {
 } from "./execution.ts";
 import { Owner } from "./owner.ts";
 import { type Project, Projects } from "./projects.ts";
+import { Schedules } from "./schedules.ts";
 import { ProjectSearch } from "./search.ts";
 import { Uploads } from "./uploads.ts";
 import { Terminals } from "./terminals.ts";
@@ -83,6 +90,8 @@ export type Pal = {
   readonly instructions: ProjectInstructions;
   readonly skills: ProjectSkills;
   readonly chats: ChatService;
+  /** Opt-in scheduled messages, admitted like typed ones. */
+  readonly schedules: Schedules;
   readonly approvals: CommandApprovals;
   readonly extensions: BuiltinExtensions;
   readonly chatgpt: ChatGPTConnection;
@@ -143,6 +152,7 @@ export async function openPal(
   let workspaces: Workspaces | undefined;
   let approvals: CommandApprovals | undefined;
   let capabilities: CompiledCapabilities | undefined;
+  let schedules: Schedules | undefined;
   // The Harness, once open, owns the storage and closes it; scripts stop before their sandbox and connections do.
   let closing: Promise<void> | undefined;
   const close = () => {
@@ -150,6 +160,7 @@ export async function openPal(
     return (closing ??= (async () => {
       const failures: unknown[] = [];
       for (const stop of [
+        () => schedules?.close(),
         () => workspaces?.close(),
         () => approvals?.close(),
         () => (harness === undefined ? store.close() : harness.close(context)),
@@ -458,6 +469,35 @@ export async function openPal(
       },
       context,
     );
+    const openedSchedules = await Schedules.open({
+      database,
+      settings: async (chatId) => {
+        const chat = await openedChats.get(chatId);
+        const conversation = chat === undefined ? undefined : await running.conversation(chat.conversationId, context);
+        // A chat deleted meanwhile has no command mode either.
+        const mode = await commandApprovals.mode(chatId).catch((error: unknown) => {
+          if (error instanceof HttpError && error.status === 404) return undefined;
+          throw error;
+        });
+        if (conversation === undefined || mode === undefined) return undefined;
+        const agent = await conversation.agent(context);
+        const problem =
+          agent.model === undefined
+            ? { message: "Choose a model for this chat first." }
+            : await providers.problem(agent.model);
+        return {
+          configuration: chatConfiguration(agent),
+          mode,
+          ...(problem === undefined ? {} : { problem: problem.message }),
+        };
+      },
+      submit: (chatId, requestId, body) => openedChats.submit(chatId, requestId, body, context),
+      running: async (id) => {
+        const state = await (await running.submission(id as SubmissionId, context))?.status(context);
+        return state?.status === "queued" || state?.status === "placed";
+      },
+    });
+    schedules = openedSchedules;
     if (status !== "starting") throw new Error("durable runtime closed during startup");
     status = "ready";
     running.resume();
@@ -480,6 +520,7 @@ export async function openPal(
       skills,
       workspaces: openedWorkspaces,
       chats: openedChats,
+      schedules: openedSchedules,
       approvals: commandApprovals,
       extensions,
       chatgpt: new ChatGPTConnection(credentials, {

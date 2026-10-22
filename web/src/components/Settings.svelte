@@ -16,6 +16,7 @@
   import ProviderSettings from "./ProviderSettings.svelte";
   import WorkspaceCleanup from "./WorkspaceCleanup.svelte";
   import ExtensionSettings from "./ExtensionSettings.svelte";
+  import SchedulerSettings from "./SchedulerSettings.svelte";
   import { api } from "../lib/api.ts";
   import { copyText } from "../lib/copy.ts";
 
@@ -141,6 +142,7 @@
           {#if diagnosticsError !== undefined}
             <div class="callout er" role="alert">Couldn't copy diagnostics: {diagnosticsError}</div>
           {/if}
+          <SchedulerSettings />
         </div>
         <WorkspaceCleanup />
       {:else if tab === "extensions"}

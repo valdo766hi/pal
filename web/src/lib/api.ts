@@ -11,6 +11,9 @@ export type { McpServer, McpServerInput };
 
 import type { Admission } from "../../../src/core/chats.ts";
 export type { Admission };
+import type { ScheduleInput, ScheduleNotice, ScheduleView } from "../../../src/core/schedules.ts";
+export type { ScheduleInput, ScheduleNotice, ScheduleView };
+export type Scheduler = { enabled: boolean; schedules: (ScheduleView & { chat: string | null })[] };
 
 export type Session = { owner: boolean; signedIn: boolean };
 export type { Change, ChangeComment, ChangeSet } from "../../../src/core/changes.ts";
@@ -375,6 +378,25 @@ export const api = {
     return data.upload;
   },
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
+  scheduler: () => call<Scheduler>("GET", "scheduler"),
+  setScheduler: (enabled: boolean) => call<Scheduler>("PUT", "scheduler", { enabled }),
+  schedules: (chat: string) =>
+    call<{ enabled: boolean; notice: ScheduleNotice; schedules: ScheduleView[] }>("GET", `chats/${chat}/schedules`),
+  /** Sending it is the owner's approval of the notice's cost and effects for every run. */
+  createSchedule: (chat: string, key: string, input: ScheduleInput) =>
+    call<{ schedule: ScheduleView }>("POST", `chats/${chat}/schedules`, {
+      requestId: key,
+      ...input,
+      acknowledged: true,
+    }),
+  changeSchedule: (chat: string, id: string, change: "pause" | "cancel") =>
+    call<{ schedule: ScheduleView }>("POST", `chats/${chat}/schedules/${id}/${change}`, {}),
+  resumeSchedule: (chat: string, id: string, notice: Pick<ScheduleNotice, "configuration" | "mode">) =>
+    call<{ schedule: ScheduleView }>("POST", `chats/${chat}/schedules/${id}/resume`, {
+      configuration: notice.configuration,
+      mode: notice.mode,
+      acknowledged: true,
+    }),
   diagnostics: () => call<Record<string, unknown>>("GET", "diagnostics"),
   chatDiagnostics: (id: string) => call<Record<string, unknown>>("GET", `chats/${id}/diagnostics`),
   renameChat: (id: string, title: string, expectedTitle: string | null) =>

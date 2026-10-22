@@ -2,7 +2,7 @@ import { once } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type ProviderAuthInteraction } from "@earendil-works/pi-ai";
-import { type AgentEvent, watchEvents } from "@earendil-works/pi-durable";
+import { type AgentEvent, type Conversation, watchEvents } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import {
   CHATGPT_PROVIDER,
@@ -12,7 +12,7 @@ import {
   listChatGPTModels,
 } from "../pi/chatgpt.ts";
 import { McpConfigError } from "../pi/mcp.ts";
-import { API_PROVIDERS, CompatibleBody, isApiProvider, ProviderConfigError } from "../pi/providers.ts";
+import { CompatibleBody, isApiProvider, ProviderConfigError } from "../pi/providers.ts";
 import { StdioConfigError, StdioServerBody } from "../pi/mcp-stdio.ts";
 import type { Pal } from "./app.ts";
 import { ApprovalDecision, CommandModeBody } from "./approvals.ts";
@@ -38,6 +38,7 @@ import { TerminalSize } from "./terminals.ts";
 import { MemoryBody } from "./memory.ts";
 import type { ReleaseRpc } from "./release-rpc.ts";
 import { ReleaseDigest } from "./release-state.ts";
+import type { ScheduleNotice, ScheduleView } from "./schedules.ts";
 
 const WorkspaceId = Type.Optional(Type.String({ minLength: 1, maxLength: 64 }));
 const workspaceQuery = (url: URL) => {
@@ -274,6 +275,57 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     };
   }
 
+  /** What a scheduled run of this chat would cost and could do, shown before the owner approves a schedule. */
+  async function scheduleNotice(
+    chat: ChatSummary,
+    agent: Awaited<ReturnType<Conversation["agent"]>>,
+  ): Promise<ScheduleNotice> {
+    const mode = await pal.approvals.mode(chat.id);
+    const workspace = await pal.workspaces.info(chat.id);
+    const model = agent.model;
+    const known = model === undefined ? undefined : pal.models.getModel(model.provider, model.modelId);
+    const provider =
+      model === undefined || model.provider === CHATGPT_PROVIDER
+        ? { name: "ChatGPT", billing: "Counts against your ChatGPT plan's usage limits." }
+        : ((await pal.providers.list()).find((item) => item.id === model.provider) ?? {
+            name: model.provider,
+            billing: "Billed by this model's provider.",
+          });
+    return {
+      configuration: chatConfiguration(agent),
+      mode,
+      model:
+        model === undefined
+          ? null
+          : {
+              provider: model.provider,
+              providerName: provider.name,
+              modelId: model.modelId,
+              effort: known === undefined ? "off" : clampThinkingLevel(known, agent.thinkingLevel),
+            },
+      cost:
+        model === undefined
+          ? "This chat has no model yet. Choose one before scheduling."
+          : `${provider.billing} Each run is one message, but it can make many model requests while it uses tools; Pal can't predict its size.`,
+      effects: [
+        mode === "full"
+          ? "Full access: agent shell commands run on this host without asking, as the Pal host user."
+          : "Ask for approval: each agent shell command waits for you and is declined if nobody answers within 2 minutes.",
+        workspace?.mode === "read-only"
+          ? "Read-only workspace: no file writes or agent shell commands."
+          : "File changes in this chat's workspace happen without asking.",
+        "Internet tools granted to this project can reach outside services without asking.",
+        "If this chat's model or command mode changes, the schedule pauses until you review it again.",
+      ],
+    };
+  }
+
+  async function scheduleViews(schedules: ScheduleView[]) {
+    return Promise.all(
+      schedules.map(async (schedule) => ({ ...schedule, chat: (await pal.chats.get(schedule.chatId))?.title ?? null })),
+    );
+  }
+
   async function signedIn(request: IncomingMessage): Promise<boolean> {
     return pal.owner.authenticate(cookie(request, SESSION_COOKIE));
   }
@@ -355,6 +407,15 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
 
     if (resource === "diagnostics" && path.length === 1 && method === "GET")
       return send(200, await installationDiagnostics(pal));
+
+    if (resource === "scheduler" && path.length === 1) {
+      if (method === "PUT") await pal.schedules.setEnabled(validate(Toggle, await readJson(request)).enabled);
+      if (method === "GET" || method === "PUT")
+        return send(200, {
+          enabled: await pal.schedules.enabled(),
+          schedules: await scheduleViews(await pal.schedules.list()),
+        });
+    }
 
     if (resource === "extensions" && path.length === 1) {
       if (method === "GET") return send(200, await pal.extensions.view());
@@ -726,6 +787,27 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           configuration: chatConfiguration(agent),
         });
       }
+      if (action === "schedules") {
+        const [, , , scheduleId, change] = path;
+        if (path.length === 3 && method === "GET")
+          return send(200, {
+            enabled: await pal.schedules.enabled(),
+            notice: await scheduleNotice(chat, await conversation.agent(context)),
+            schedules: await pal.schedules.list(chat.id),
+          });
+        if (path.length === 3 && method === "POST") {
+          const { requestId, ...body } = validate(Keyed, await readJson(request));
+          return send(200, { schedule: await pal.schedules.create(chat.id, requestId, body) });
+        }
+        if (path.length === 5 && scheduleId !== undefined && method === "POST") {
+          if (change === "pause") return send(200, { schedule: await pal.schedules.pause(chat.id, scheduleId) });
+          if (change === "cancel") return send(200, { schedule: await pal.schedules.cancel(chat.id, scheduleId) });
+          if (change === "resume")
+            return send(200, {
+              schedule: await pal.schedules.resume(chat.id, scheduleId, await readJson(request)),
+            });
+        }
+      }
       if (action === "extensions" && path.length === 3 && method === "GET")
         return send(200, {
           release: pal.extensions.release,
@@ -770,22 +852,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         const { requestId, ...body } = validate(Keyed, await readJson(request));
         // A chat on a disabled provider or a removed model stops here; it is never sent anywhere else instead.
         const chosen = (await conversation.agent(context)).model;
-        if (chosen !== undefined && isApiProvider(chosen.provider)) {
-          if (!(await pal.providers.usable(chosen.provider))) {
-            throw new HttpError(
-              409,
-              "provider_unavailable",
-              `${API_PROVIDERS[chosen.provider].name} isn't enabled. Enable it in Settings → Models or choose another model.`,
-            );
-          }
-          if (pal.models.getModel(chosen.provider, chosen.modelId) === undefined) {
-            throw new HttpError(
-              409,
-              "model_unavailable",
-              `${chosen.modelId} is no longer offered; choose another model.`,
-            );
-          }
-        }
+        const problem = chosen === undefined ? undefined : await pal.providers.problem(chosen);
+        if (problem !== undefined) throw new HttpError(409, problem.code, problem.message);
         return send(200, { admission: await pal.chats.submit(chat.id, requestId, body, context) });
       }
       if (action === "stop" && method === "POST") {

@@ -17,11 +17,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { backupDataRoot, inspectBackup, restoreBackup } from "../src/core/backup.ts";
 import { MIGRATIONS } from "../src/storage/migrations.ts";
+import { openStore } from "../src/storage/store.ts";
+import { chatConfiguration } from "../src/core/chats.ts";
 
 const exec = promisify(execFile);
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -140,6 +142,89 @@ describe("stopped-state backup and restore", () => {
     expect(await readFile(join(fixture.worktree.root, "notes.md"), "utf8")).toBe("managed bytes\n");
     expect((await lstat(join(fixture.project.root, "run.sh"))).mode & 0o777).toBe(0o700);
     expect(await readlink(join(fixture.project.root, "latest"))).toBe("notes.md");
+  });
+
+  it("restores automatic messages paused and never retries a claimed firing", async () => {
+    const fixture = await installation();
+    const pal = await openPal({ dataRoot: fixture.dataRoot, installRoot: fixture.installRoot }, context);
+    const faux = fauxProvider();
+    (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+    const model = faux.getModel();
+    let id: string;
+    let unclaimed: string;
+    try {
+      await pal.chats.configure(
+        fixture.local.id,
+        { model: { provider: model.provider, modelId: model.id }, thinkingLevel: "off" },
+        context,
+      );
+      const agent = await (await pal.harness.conversation(fixture.local.conversationId, context))?.agent(context);
+      if (agent === undefined) throw new Error("missing fixture conversation");
+      await pal.schedules.setEnabled(true);
+      const input = {
+        text: "Future check",
+        timezone: "UTC",
+        rule: { kind: "daily", time: "00:00" },
+        missed: "run-once",
+        configuration: chatConfiguration(agent),
+        mode: "ask",
+        acknowledged: true,
+      };
+      id = (await pal.schedules.create(fixture.local.id, "restore-schedule", input)).id;
+      unclaimed = (await pal.schedules.create(fixture.local.id, "restore-unclaimed", input)).id;
+    } finally {
+      await pal.close();
+    }
+    const request = `schedule-${id}-1`;
+    const store = await openStore(fixture.dataRoot);
+    try {
+      const row = await store.database.get<{ value: string }>(
+        "SELECT value FROM pal_settings WHERE key = ?",
+        `schedule:${id}`,
+      );
+      if (row === undefined) throw new Error("missing stored schedule");
+      // A valid checkpoint immediately after the claim, before normal admission creates its own record.
+      const schedule = JSON.parse(row.value);
+      schedule.pending = { sequence: 1, due: Date.now() - 1000, request };
+      schedule.fired = 1;
+      schedule.sequence = 2;
+      await store.database.run(
+        "UPDATE pal_settings SET value = ? WHERE key = ?",
+        JSON.stringify(schedule),
+        `schedule:${id}`,
+      );
+    } finally {
+      await store.close();
+    }
+    const backup = join(fixture.root, "scheduled-backup");
+    const made = await backupDataRoot({
+      dataRoot: fixture.dataRoot,
+      output: backup,
+      version: "test",
+      includeCredentialKey: true,
+      includeBrowserProfiles: false,
+    });
+    await rename(fixture.dataRoot, join(fixture.root, "data-before"));
+    const report = await restoreBackup(backup, fixture.dataRoot);
+    expect(report.schedulesPaused).toBe(2);
+    const restored = await openPal({ dataRoot: fixture.dataRoot, installRoot: fixture.installRoot }, context);
+    cleanups.push(() => restored.close());
+    await restored.harness.waitForIdle(context);
+    const admissions = await restored.store.database.get<{ n: number }>(
+      "SELECT count(*) AS n FROM pal_admissions WHERE request_id = ?",
+      request,
+    );
+    const schedules = await restored.schedules.list();
+    const schedule = schedules.find((schedule) => schedule.id === id);
+    expect(schedules.find((schedule) => schedule.id === unclaimed)).toMatchObject({ state: "paused", next: null });
+    expect({
+      claims: made.unfinished.schedules,
+      enabled: await restored.schedules.enabled(),
+      state: schedule?.state,
+      admissions: admissions?.n,
+    }).toEqual({ claims: 1, enabled: false, state: "paused", admissions: 0 });
+    expect(schedule?.reason).toContain(request);
+    expect(schedule?.history[0]).toMatchObject({ kind: "paused", request });
   });
 
   it("refuses a running store, an existing destination and a different destination", async () => {

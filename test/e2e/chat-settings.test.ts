@@ -1799,3 +1799,52 @@ describe("long transcript updates", () => {
     expect(errors).toEqual([]);
   });
 });
+
+describe("scheduled messages", () => {
+  it.each([1440, 390])(
+    "needs the opt-in, shows cost and effects, then schedules, pauses, resumes and cancels at %s px",
+    async (width) => {
+      const { pal, page, base, saved, provider, errors } = await setup(width);
+      const message = page.getByLabel("Message", { exact: true });
+      const openDialog = async () => {
+        await page.getByRole("button", { name: "Add", exact: true }).click();
+        await page.getByRole("menuitem", { name: /Schedule a message/ }).click();
+        return page.getByRole("dialog", { name: "Schedule a message" });
+      };
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      await message.fill("Check the nightly build");
+      const off = await openDialog();
+      await off.getByText("Scheduled messages are off").waitFor();
+      await off.getByRole("button", { name: "Open Settings" }).click();
+      const toggle = page.getByRole("switch", { name: /^Scheduled messages/ });
+      await toggle.check();
+      await expect.poll(() => pal.schedules.enabled()).toBe(true);
+
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      const dialog = await openDialog();
+      const notice = dialog.getByRole("note");
+      await notice.getByText(/claude-haiku-4-5 on Anthropic API, reasoning/).waitFor();
+      await notice.getByText(/Pay per token on your Anthropic API account/).waitFor();
+      await notice.getByText(/Ask for approval/).waitFor();
+      expect(await dialog.getByLabel("Message").inputValue()).toBe("Check the nightly build");
+      await dialog.getByLabel("Time", { exact: true }).fill("07:30");
+      await dialog.getByLabel("Time zone").fill("UTC");
+      await screenshot(page, `schedule-notice-${width}`);
+      await dialog.getByRole("button", { name: "Schedule", exact: true }).click();
+      const item = dialog.getByRole("listitem").filter({ hasText: "Every day at 07:30 (UTC)" });
+      await item.getByText("active", { exact: true }).waitFor();
+      await screenshot(page, `schedule-list-${width}`);
+      await item.getByRole("button", { name: "Pause" }).click();
+      await item.getByText("paused", { exact: true }).waitFor();
+      await item.getByRole("button", { name: "Resume with current settings" }).click();
+      await item.getByText("active", { exact: true }).waitFor();
+      await item.getByRole("button", { name: "Cancel" }).click();
+      await item.getByText("cancelled", { exact: true }).waitFor();
+      expect(await pal.schedules.list(saved.id)).toMatchObject([
+        { text: "Check the nightly build", state: "cancelled", binding: { mode: "ask" }, fired: 0 },
+      ]);
+      expect(provider.requests).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+});

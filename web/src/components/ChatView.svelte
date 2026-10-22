@@ -112,6 +112,7 @@
   const writing = drafts.open(untrack(() => chat.id));
   let typing = $state(false);
   let composer: HTMLTextAreaElement | undefined = $state();
+  let scheduling = $state(false);
   /** Add text the owner chose elsewhere (a terminal selection, a file reference) to the draft; never sends it. */
   export function insertText(text: string): boolean {
     const added = writing.append(text);
@@ -1053,7 +1054,10 @@
           onblur={() => (typing = false)}
           onkeydown={onKey}></textarea>
         <div class="tools">
-          {#if writing.active && !writing.blocked}<AddMenu onFiles={upload} />{/if}
+          {#if writing.active && !writing.blocked}<AddMenu
+              onFiles={upload}
+              onSchedule={() => (scheduling = true)}
+            />{/if}
           {#if !phone}
             {#if workspace?.mode !== "read-only"}<CommandMode mode={stream?.mode} onChoose={chooseMode} />{/if}
             <WorkspaceMode {workspace} {onNewChat} />
@@ -1077,6 +1081,12 @@
     </div>
   </div>
 </section>
+
+{#if scheduling}
+  {#await import("./ScheduleDialog.svelte") then { default: ScheduleDialog }}
+    <ScheduleDialog chatId={chat.id} draft={writing.text} onClose={() => (scheduling = false)} />
+  {:catch failure}<div class="callout er" role="alert">Couldn't open scheduling: {String(failure)}</div>{/await}
+{/if}
 
 {#if phone && tools}
   <dialog

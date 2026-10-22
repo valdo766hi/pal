@@ -335,6 +335,19 @@ export class ModelProviders {
     return (await this.#ready(id)) && (await this.#enabled(id));
   }
 
+  /** Why a chat's chosen model can't be sent to now, if it can't; never a reason to send it elsewhere instead. */
+  async problem(model: { provider: string; modelId: string }): Promise<{ code: string; message: string } | undefined> {
+    if (!isApiProvider(model.provider)) return undefined;
+    if (!(await this.usable(model.provider)))
+      return {
+        code: "provider_unavailable",
+        message: `${API_PROVIDERS[model.provider].name} isn't enabled. Enable it in Settings → Models or choose another model.`,
+      };
+    if (this.#models.getModel(model.provider, model.modelId) === undefined)
+      return { code: "model_unavailable", message: `${model.modelId} is no longer offered; choose another model.` };
+    return undefined;
+  }
+
   /** Save or replace a key (the next request uses it), or remove it, which also disables a provider that needs it. */
   async setKey(id: ApiProviderId, key: string | null): Promise<void> {
     if (key === null) {

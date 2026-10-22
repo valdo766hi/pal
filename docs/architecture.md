@@ -56,6 +56,12 @@ already finished. A tool marked replay-safe may run again. One marked unsafe, su
 write, is reported as interrupted and never re-run blindly. A command still waiting for approval asks again,
 because nothing was recorded as started.
 
+Scheduled messages (`src/core/schedules.ts`) are an opt-in timer on top of the same admission. Schedules live in
+Pal's settings table. A due run is first claimed there under the request ID `schedule-<id>-<n>` and then admitted
+like a typed input, so reopening after a crash completes the claimed run rather than repeating it. Trigger times
+are computed separately from authority: a run only admits a message, and what it may do is decided by the chat's
+grants and approvals.
+
 ## Projects and workspaces
 
 - `src/core/projects.ts`: a project is a **managed** folder under the data directory or an **existing** folder on

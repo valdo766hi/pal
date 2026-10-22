@@ -1040,6 +1040,59 @@ describe("API", () => {
     expect(projects[0].chats).toContainEqual(expect.objectContaining({ id: chat.id, title: "hi" }));
   });
 
+  it("schedules messages only after opt-in, against the cost and effects the owner reviewed", async () => {
+    const { api } = await signedIn();
+    await connectChatGPT(api);
+    const project = (await api("POST", "projects", { requestId: "schedule-project", name: "Notes" })).body.project;
+    const chat = (await api("POST", "chats", { requestId: "schedule-chat", projectId: project.id })).body.chat;
+    // Off unless the owner turns it on; chats work without it.
+    expect((await api("GET", "scheduler")).body).toEqual({ enabled: false, schedules: [] });
+    const ask = (await api("GET", `chats/${chat.id}/schedules`)).body;
+    expect(ask).toMatchObject({
+      enabled: false,
+      schedules: [],
+      notice: {
+        mode: "ask",
+        model: { provider: "openai", providerName: "ChatGPT", modelId: "gpt-5.5" },
+        cost: expect.stringContaining("ChatGPT plan's usage limits"),
+      },
+    });
+    expect(ask.notice.effects).toContainEqual(expect.stringContaining("Ask for approval"));
+    const body = {
+      requestId: "schedule-request-1",
+      text: "Summarize yesterday's changes",
+      timezone: "UTC",
+      rule: { kind: "daily", time: "09:00" },
+      missed: "skip",
+      configuration: ask.notice.configuration,
+      mode: ask.notice.mode,
+      acknowledged: true,
+    };
+    expect((await api("POST", `chats/${chat.id}/schedules`, body)).body.error).toBe("scheduler_disabled");
+    expect((await api("PUT", "scheduler", { enabled: true })).body.enabled).toBe(true);
+
+    // Full access changes what a run may do, so the notice reviewed for Ask no longer authorizes a schedule.
+    await api("PUT", `chats/${chat.id}/command-mode`, { mode: "full" });
+    expect(await api("POST", `chats/${chat.id}/schedules`, body)).toMatchObject({
+      status: 409,
+      body: { error: "schedule_stale" },
+    });
+    const full = (await api("GET", `chats/${chat.id}/schedules`)).body.notice;
+    expect(full.effects).toContainEqual(expect.stringContaining("Full access"));
+    const created = await api("POST", `chats/${chat.id}/schedules`, { ...body, mode: "full" });
+    expect(created.status).toBe(200);
+    const id = created.body.schedule.id;
+    expect((await api("GET", "scheduler")).body.schedules).toMatchObject([
+      { id, chatId: chat.id, chat: null, state: "active", binding: { mode: "full" } },
+    ]);
+    const path = `chats/${chat.id}/schedules/${id}`;
+    expect((await api("POST", `${path}/pause`, {})).body.schedule.state).toBe("paused");
+    const resume = { configuration: full.configuration, mode: "full", acknowledged: true };
+    expect((await api("POST", `${path}/resume`, resume)).body.schedule.state).toBe("active");
+    expect((await api("POST", `${path}/cancel`, {})).body.schedule.state).toBe("cancelled");
+    expect((await api("POST", `chats/missing-chat/schedules/${id}/pause`, {})).status).toBe(404);
+  });
+
   it("persists per-chat reasoning effort, clamps model switches, and rejects invalid choices", async () => {
     const { api, pal, dataRoot, fixture } = await signedIn();
     const project = (await api("POST", "projects", { requestId: "effort-project", name: "Notes" })).body.project;

@@ -1136,8 +1136,9 @@ describe("Pal in a browser", () => {
     await add.focus();
     await page.keyboard.press("Enter");
     const menu = page.getByRole("menu", { name: "Add" });
-    // Only device files for now: no folders, plugins or other pictured actions.
-    expect(await menu.getByRole("menuitem").count()).toBe(1);
+    expect(await menu.getByRole("menuitem").count()).toBe(2);
+    const scheduled = menu.getByRole("menuitem", { name: /^Schedule a message/ });
+    expect(await scheduled.count()).toBe(1);
     const item = menu.getByRole("menuitem", { name: /^Add file from this device/ });
     await expect.poll(() => item.evaluate((node) => node === document.activeElement)).toBe(true);
     for (const width of [1440, 768, 390]) {
@@ -1153,8 +1154,11 @@ describe("Pal in a browser", () => {
     expect(await add.evaluate((node) => node === document.activeElement)).toBe(true);
     // Listening first lets Playwright's file chooser interception settle before the key that opens it.
     const chooser = page.waitForEvent("filechooser");
-    // Arrow keys open the menu on its only item, the way a keyboard user would reach it.
     await page.keyboard.press("ArrowDown");
+    await expect.poll(() => item.evaluate((node) => node === document.activeElement)).toBe(true);
+    await page.keyboard.press("End");
+    await expect.poll(() => scheduled.evaluate((node) => node === document.activeElement)).toBe(true);
+    await page.keyboard.press("ArrowUp");
     await expect.poll(() => item.evaluate((node) => node === document.activeElement)).toBe(true);
     await page.keyboard.press("Enter");
     const picked = await chooser;

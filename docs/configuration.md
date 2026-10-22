@@ -87,6 +87,11 @@ Restored folders are new filesystem objects, so the folder identities Pal pinned
 remapped to them; pins on external folders are untouched. Moving an installation to a different path is not
 supported yet.
 
+Restoring turns scheduled messages off and pauses active schedules. A claimed firing is retained in its history,
+not automatically retried: inspect the chat's receipts and external outcomes before enabling scheduling and
+reviewing/resuming individual schedules. Work already admitted to a chat retains its normal durable recovery
+rules; a data restore cannot undo external effects.
+
 ## First run
 
 On first start, Pal prints a one-time setup link (`http://127.0.0.1:7337/#setup=…`). Open it and choose an owner
@@ -164,6 +169,31 @@ Settings → **MCP servers**:
   - **Read-only** has no agent writes and no agent shell.
 - **Extensions** (Settings → Extensions) switch built-in tools and panels (files, shell, memory, browser) for new
   chats. Existing chats keep what they started with.
+
+## Scheduled messages
+
+Off until you turn on **Scheduled messages** in Settings → General. With it off, nothing runs on a schedule and Pal
+needs no queue service or extra process. Once it's on, a chat's **+** menu → **Schedule a message** sends that chat a
+message once, every day or on chosen weekdays, at a time in a time zone you pick.
+
+- **Cost and effects.** Before you schedule, Pal shows the chat's model and how it's billed, how often it can run,
+  and what a run may do under the chat's command mode, workspace and internet-tool grants. Scheduling approves that
+  for every run. A run is an ordinary message in the chat, with the same grants and approvals as one you type: in
+  Ask mode, a command waits for you and is declined if nobody answers within 2 minutes.
+- **Changed settings.** If the chat's model, reasoning or command mode changes, or its provider is turned off, the
+  next run doesn't happen and the schedule pauses until you review the new settings and resume it.
+- **Time zones.** Times are wall-clock times in the chosen zone, across daylight-saving changes. A time skipped when
+  clocks go forward runs that much later (02:30 runs at 03:30). A time repeated when clocks go back runs once, at
+  its first occurrence.
+- **Missed runs.** A run Pal notices more than 5 minutes late, because Pal was stopped or asleep, is skipped by
+  default. Choose **Send it once when Pal is back** to send only the most recent missed run instead.
+- **Overlaps.** A run due while the schedule's previous run is still working is skipped.
+- **Pause, resume and cancel.** Paused, cancelled and finished schedules start nothing. Resuming or turning
+  scheduling back on starts from the next time; runs due meanwhile are skipped. A schedule can stop after a set
+  number of runs, and ends without running if its chat is deleted. Each schedule keeps its recent history.
+- **Restarts.** Each run is claimed under a fixed request ID before it's sent, so a crash or restart finishes that run
+  once instead of sending it again. The attempt count includes claims whose admission was blocked or interrupted;
+  history distinguishes actual admissions. Backup restoration pauses automation as described above.
 
 ## Browser
 

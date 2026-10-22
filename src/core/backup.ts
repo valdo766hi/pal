@@ -26,6 +26,7 @@ import { MIGRATIONS } from "../storage/migrations.ts";
 import { DatabaseOwnedError, openDatabase } from "../storage/sqlite.ts";
 import type { Command } from "./config.ts";
 import { releaseLock } from "./release-files.ts";
+import { pauseRestoredSchedule } from "./schedules.ts";
 
 const DATABASE = "pal.sqlite";
 const KEY = "credentials.key";
@@ -136,6 +137,11 @@ const UNFINISHED = [
   ["admissions", "pal_admissions", "SELECT count(*) AS n FROM pal_admissions WHERE state = 'admitting'"],
   ["approvals", "pal_command_approvals", "SELECT count(*) AS n FROM pal_command_approvals WHERE state = 'pending'"],
   ["purges", "pal_workspace_purges", "SELECT count(*) AS n FROM pal_workspace_purges WHERE completed_at IS NULL"],
+  [
+    "schedules",
+    "pal_settings",
+    "SELECT count(*) AS n FROM pal_settings WHERE key GLOB 'schedule:*' AND CASE WHEN json_valid(value) THEN json_type(value, '$.pending') IS NOT 'null' ELSE 1 END",
+  ],
 ] as const;
 
 export type BackupOptions = {
@@ -465,7 +471,12 @@ export async function restoreBackup(from: string, dataRoot: string, credentialKe
     await writePrivate(join(staging, KEY), key);
     const remapped = remapIdentities(join(staging, DATABASE), remap);
     await rename(staging, target);
-    return { ...report, restored: target, remappedIdentities: remapped };
+    return {
+      ...report,
+      restored: target,
+      remappedIdentities: remapped.identities,
+      schedulesPaused: remapped.schedules,
+    };
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     // Only the empty folder claimed above; a successful rename never reaches here.
@@ -494,7 +505,7 @@ async function materialize(source: string, staging: string, manifest: BackupMani
   return remap;
 }
 
-function remapIdentities(path: string, remap: ReadonlyMap<string, string>): number {
+function remapIdentities(path: string, remap: ReadonlyMap<string, string>) {
   const db = new DatabaseSync(path);
   try {
     const tables = new Set(
@@ -503,6 +514,7 @@ function remapIdentities(path: string, remap: ReadonlyMap<string, string>): numb
       ),
     );
     let changed = 0;
+    let schedules = 0;
     db.exec("BEGIN IMMEDIATE");
     try {
       for (const { table, update } of IDENTITY_COLUMNS) {
@@ -523,6 +535,20 @@ function remapIdentities(path: string, remap: ReadonlyMap<string, string>): numb
           if (touched.length > 0) changed += Number(statement.run(JSON.stringify(document), row.id).changes);
         }
       }
+      if (tables.has("pal_settings")) {
+        const update = db.prepare("UPDATE pal_settings SET value = ? WHERE key = ?");
+        for (const row of db.prepare("SELECT key, value FROM pal_settings WHERE key GLOB 'schedule:*'").all() as {
+          key: string;
+          value: string;
+        }[]) {
+          const paused = pauseRestoredSchedule(row.value);
+          if (paused !== row.value) {
+            update.run(paused, row.key);
+            schedules++;
+          }
+        }
+        update.run("false", "scheduler:enabled");
+      }
       db.exec("COMMIT");
     } catch (error) {
       db.exec("ROLLBACK");
@@ -530,7 +556,7 @@ function remapIdentities(path: string, remap: ReadonlyMap<string, string>): numb
     }
     const check = db.prepare("PRAGMA integrity_check").get() as { integrity_check?: string } | undefined;
     if (check?.integrity_check !== "ok") throw new BackupError("the restored database failed its integrity check");
-    return changed;
+    return { identities: changed, schedules };
   } finally {
     db.close();
   }
