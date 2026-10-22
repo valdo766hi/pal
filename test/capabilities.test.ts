@@ -301,8 +301,9 @@ describe("compiled capability contract", () => {
   it("removes memory at composition time without removing core guidance or the owner's other capabilities", async () => {
     const f = await fixture([]);
     const view = await f.pal.extensions.view();
-    expect(view.catalog.map((item) => item.id)).toEqual(["files", "shell", "browser", "compact"]);
+    expect(view.catalog.map((item) => item.id)).toEqual(["files", "shell", "browser", "helpers", "compact"]);
     expect(view.selected.map((item) => item.id)).not.toContain("memory");
+    expect(view.selected.map((item) => item.id)).not.toContain("helpers");
     expect(f.pal.capabilities.namespaces).toEqual([]);
     expect(() => f.pal.memory).toThrow("Memory is not included");
     const chat = await f.pal.chats.createChat("without-memory", { projectId: f.project.id }, context);
@@ -312,6 +313,7 @@ describe("compiled capability contract", () => {
     );
     const agent = await conversation.agent(context);
     expect(agent.callable.map((tool) => tool.name)).not.toContain("memory_search");
+    expect(agent.callable.map((tool) => tool.name)).not.toContain("agents_delegate");
     expect(agent.callable.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["files_read", "instructions_scope", "skills_read"]),
     );

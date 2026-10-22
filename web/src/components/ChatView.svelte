@@ -6,6 +6,7 @@
     type ChatSummary,
     type CommandMode as Approval,
     type Effort,
+    type HelperView,
     type Project,
     requestId,
     type WorkspaceMode as Mode,
@@ -93,6 +94,7 @@
     | { kind: "note"; id: string; text: string }
     | { kind: "shell"; id: string; receipt: ShellReceipt }
     | { kind: "mcp"; id: string; receipt: McpReceipt }
+    | { kind: "helper"; id: string; task: number; purpose: string; status: "answered" | "unanswered" | undefined }
     | { kind: "approval"; id: string; approval: CommandApproval };
 
   const USAGE_URL = "https://chatgpt.com/settings/usage";
@@ -224,6 +226,44 @@
 
   // Live text changes often; keep committed history from being rebuilt for each partial update.
   const historyItems = $derived(build(stream?.entries ?? [], undefined, stream?.approvals ?? []));
+  /** Durable helper status, including calls left with unknown outcomes; refreshed as helpers and runs change. */
+  let helpers: HelperView[] = $state([]);
+  let helpersError: string | undefined = $state();
+  let helpersPending = $state(false);
+  let helpersRefresh = $state(0);
+  const helperUpdates = $derived((stream?.entries ?? []).filter((entry) => entry.kind === "pal.helper").length);
+  $effect(() => {
+    const id = chat.id;
+    const running = stream?.running;
+    void helpersRefresh;
+    if (helperUpdates === 0 || running === undefined) return;
+    let current = true;
+    helpersPending = true;
+    helpersError = undefined;
+    api.helpers(id).then(
+      (loaded) => {
+        if (!current) return;
+        helpers = loaded.helpers;
+        helpersPending = false;
+      },
+      (failure) => {
+        if (!current) return;
+        helpersError = failure instanceof Error ? failure.message : String(failure);
+        helpersPending = false;
+      },
+    );
+    return () => {
+      current = false;
+    };
+  });
+  function helperStatus(status: "answered" | "unanswered" | undefined, view: HelperView | undefined) {
+    if (status === "answered" || view?.status === "answered") return { text: "answered", failed: false };
+    if (status === "unanswered" || view?.status === "unanswered" || view?.status === "stopped")
+      return { text: view?.reason ? `stopped: ${view.reason}` : "stopped", failed: true };
+    if (view?.status === "running")
+      return { text: helpersError || helpersPending ? "last observed working" : "working", failed: false };
+    return { text: helpersPending ? "checking status" : "status unavailable", failed: true };
+  }
   const items = $derived(historyItems.concat(build([], stream?.partial, [])));
   const awaiting = $derived((stream?.approvals ?? []).some((approval) => approval.state === "pending"));
   const connected = $derived(app.chatgpt?.account != null);
@@ -344,6 +384,13 @@
         entry.data?.shell?.status === "finished" ? [[entry.data.shell.callId, entry.data.shell] as const] : [],
       ),
     );
+    const answers = new Map(
+      entries.flatMap((entry) =>
+        entry.kind === "pal.helper" && entry.data?.result
+          ? [[entry.data.result.task, entry.data.result.status] as const]
+          : [],
+      ),
+    );
     const internet = new Map(
       entries.flatMap((entry) =>
         entry.kind === "pal.mcp" && entry.data?.mcp ? [[entry.data.mcp.callId, entry.id] as const] : [],
@@ -360,6 +407,17 @@
       if (entry.kind === "pal.mcp" && entry.data?.mcp !== undefined) {
         if (internet.get(entry.data.mcp.callId) === entry.id)
           built.push({ kind: "mcp", id: String(entry.id), receipt: entry.data.mcp });
+        continue;
+      }
+      if (entry.kind === "pal.helper") {
+        if (entry.data?.helper !== undefined)
+          built.push({
+            kind: "helper",
+            id: String(entry.id),
+            task: entry.data.helper.task,
+            purpose: entry.data.helper.purpose,
+            status: answers.get(entry.data.helper.task),
+          });
         continue;
       }
       if (entry.kind === "pal.shell" && entry.data?.shell?.status === "started") {
@@ -700,6 +758,12 @@
       style:padding-inline={phone ? "18px" : "24px"}
       style:padding-bottom={app.pet.enabled ? "54px" : undefined}
     >
+      {#if helperUpdates > 0 && helpersError !== undefined}
+        <div class="callout er" role="alert">
+          Couldn't load helper status: {helpersError}
+          <button class="b sm" disabled={helpersPending} onclick={() => helpersRefresh++}>Retry helper status</button>
+        </div>
+      {/if}
       {#if stream?.loaded && items.length === 0}
         <div class="empty">
           <h2>Start the conversation</h2>
@@ -736,6 +800,21 @@
             <div class="note"><Icon name="info" /><span>{item.text}</span></div>
           {:else if item.kind === "mcp"}
             <InternetSources receipt={item.receipt} />
+          {:else if item.kind === "helper"}
+            {@const view = helpers.find((helper) => helper.task === item.task)}
+            {@const status = helperStatus(item.status, view)}
+            <div class="note helper">
+              <Icon name="search" />
+              <span
+                >Research helper · {item.purpose} · <span class={{ er: status.failed }}>{status.text}</span>
+                {#if view !== undefined && view.unknownEffects.length > 0}
+                  <span class="er"
+                    >Outcome unknown for {view.unknownEffects.map((effect) => effect.tool).join(", ")}; check before
+                    repeating.</span
+                  >
+                {/if}
+              </span>
+            </div>
           {:else if item.kind === "approval"}
             {@const approval = item.approval}
             {@const browser = approval.tool === "browser_act"}

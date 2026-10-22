@@ -49,7 +49,13 @@ export type Entry = {
   id: number;
   kind: string;
   model?: Message[];
-  data?: { attachments?: Attachment[]; shell?: ShellReceipt; mcp?: McpReceipt };
+  data?: {
+    attachments?: Attachment[];
+    shell?: ShellReceipt;
+    mcp?: McpReceipt;
+    helper?: { task: number; purpose: string };
+    result?: { task: number; status: "answered" | "unanswered" };
+  };
 };
 
 type Change =

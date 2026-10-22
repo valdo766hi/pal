@@ -201,7 +201,15 @@ describe("saved chat settings", () => {
   );
 
   it("refuses a destination changed in another tab and keeps the draft for an explicit retry", async () => {
-    const { page, base, saved, provider, errors } = await setup(1440);
+    const { pal, page, base, saved, provider, errors } = await setup(1440);
+    const transport: { event: string; method: string; path: string; status: number | undefined }[] = [];
+    const observe = (event: string, request: import("playwright-core").Request, status?: number) => {
+      const path = new URL(request.url()).pathname;
+      if (path.startsWith(`/api/chats/${saved.id}`)) transport.push({ event, method: request.method(), path, status });
+    };
+    page.on("request", (request) => observe("request", request));
+    page.on("response", (response) => observe("response", response.request(), response.status()));
+    page.on("requestfailed", (request) => observe("failed", request));
     await page.goto(`${base}/#/chat/${saved.id}`);
     const control = page.getByRole("button", { name: /^Model and reasoning:/ });
     await expect.poll(() => control.getAttribute("title")).toContain("Anthropic API");
@@ -222,7 +230,27 @@ describe("saved chat settings", () => {
     await page.getByRole("button", { name: "Try again", exact: true }).click();
     await expect.poll(() => control.getAttribute("title")).toContain("OpenRouter");
     await page.getByRole("button", { name: "Send", exact: true }).click();
-    await expect.poll(() => provider.requests.map((request) => request.path)).toEqual(["/api/v1/chat/completions"]);
+    try {
+      await expect.poll(() => provider.requests.map((request) => request.path)).toEqual(["/api/v1/chat/completions"]);
+    } catch (failure) {
+      const admissions = await pal.store.database.all(
+        "SELECT request_id, state, submission_id FROM pal_admissions WHERE chat_id = ?",
+        saved.id,
+      );
+      const tasks = (
+        await pal.store.storage.scanTasks({ conversationId: saved.conversationId }, 20, undefined, context)
+      ).items.map(({ id, state }) => {
+        const checkpoint = "checkpoint" in state ? state.checkpoint : null;
+        const phase =
+          checkpoint !== null && typeof checkpoint === "object" && !Array.isArray(checkpoint)
+            ? checkpoint.phase
+            : undefined;
+        return { id, status: state.status, phase: typeof phase === "string" ? phase : undefined };
+      });
+      throw new Error(`Routing fixture: ${JSON.stringify({ transport, admissions, tasks, errors })}`, {
+        cause: failure,
+      });
+    }
     expect(errors).toEqual([]);
   });
 
@@ -1845,6 +1873,88 @@ describe("scheduled messages", () => {
       ]);
       expect(provider.requests).toEqual([]);
       expect(errors).toEqual([]);
+    },
+  );
+});
+
+describe("research helper status", () => {
+  it.each([1440, 390])(
+    "recovers status without letting an older response hide an unknown effect at %s px",
+    async (width) => {
+      const { pal, page, base, saved, provider, errors, mutations } = await setup(width);
+      const conversation = await pal.harness.conversation(saved.conversationId, context);
+      if (conversation === undefined) throw new Error("missing fixture conversation");
+      await conversation.submit(
+        {
+          type: "write",
+          entry: {
+            kind: "pal.helper",
+            data: { helper: { task: 42, conversation: 43, purpose: "Find the build result" } },
+          },
+        },
+        context,
+      );
+      const emit = await bridgeChatEvents(page);
+      const pending = Promise.withResolvers<undefined>(),
+        release = Promise.withResolvers<undefined>();
+      cleanups.push(async () => release.resolve(undefined));
+      let requests = 0;
+      const stopped = {
+        task: 42,
+        conversation: 43,
+        purpose: "Find the build result",
+        status: "unanswered",
+        reason: "its time limit passed",
+        turns: 2,
+        calls: 3,
+        tokens: 10,
+        unknownEffects: [{ tool: "mcp__web__search", task: 44 }],
+      };
+      await page.route(`**/api/chats/${saved.id}/helpers`, async (route) => {
+        const request = ++requests;
+        if (request === 1) {
+          await route.fulfill({ status: 503, json: { error: "fixture", message: "Status unavailable" } });
+          return;
+        }
+        if (request === 2) {
+          pending.resolve(undefined);
+          await release.promise;
+        }
+        await route.fulfill({
+          json: {
+            helpers: [request === 2 ? { ...stopped, status: "running", reason: null, unknownEffects: [] } : stopped],
+          },
+        });
+      });
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      const alert = page.getByRole("alert").filter({ hasText: "Couldn't load helper status" });
+      await alert.waitFor({ timeout: 5000 });
+      const note = page.locator(".note.helper");
+      expect(await note.innerText()).not.toContain("working");
+      await alert.getByRole("button", { name: "Retry helper status" }).click();
+      await pending.promise;
+      try {
+        const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}");
+        await emit("snapshot", { ...snapshot, run: { inputs: [1] }, inbox: [] });
+        await note.getByText("stopped: its time limit passed", { exact: true }).waitFor();
+        expect(await note.innerText()).toContain("Outcome unknown for mcp__web__search; check before repeating.");
+        const oldResponse = page.waitForResponse((response) => response.url().endsWith(`/chats/${saved.id}/helpers`));
+        release.resolve(undefined);
+        await (await oldResponse).finished();
+        await page.evaluate(
+          () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+        );
+        expect(await note.innerText()).toContain("stopped: its time limit passed");
+        expect(await note.innerText()).toContain("Outcome unknown for mcp__web__search");
+        expect(await note.innerText()).not.toContain("working");
+        await emit("event", { type: "run_end" });
+        await screenshot(page, `helper-recovery-${width}`);
+        expect(mutations).toEqual([]);
+        expect(provider.requests).toEqual([]);
+        expect(errors).toEqual([]);
+      } finally {
+        release.resolve(undefined);
+      }
     },
   );
 });

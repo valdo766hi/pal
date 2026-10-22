@@ -167,8 +167,26 @@ Settings → **MCP servers**:
   - **Local** works in the project folder.
   - **Worktree** works in a separate Git worktree from `HEAD`.
   - **Read-only** has no agent writes and no agent shell.
-- **Extensions** (Settings → Extensions) switch built-in tools and panels (files, shell, memory, browser) for new
-  chats. Existing chats keep what they started with.
+- **Extensions** (Settings → Extensions) switch built-in tools and panels for new chats. Existing chats keep what
+  they started with.
+
+## Research helpers
+
+Off unless selected in Settings → Extensions for new chats. A helper answers one self-contained research question
+using the parent chat's model/reasoning and admitted folder scope, with current project internet-tool grants.
+It cannot write files, run commands, use the browser or start helpers. The file tools are read-only; granted internet
+tools can still have external effects. Each helper uses additional provider requests and quota, not a free model.
+
+One parent run can start four helpers; a project can have two active at once. Each helper has 12 model requests,
+40 tool calls, a 200,000-token threshold and 10 minutes; all helpers in one parent run share a 500,000-token
+threshold. Counters, deadlines, ownership and project slots survive restarts. Helpers decline history compaction
+(which uses additional model requests); if their context fills, they stop without an answer rather than exceed the
+request limit. Ordinary chats keep native compaction. Token thresholds are checked before the next request/tool
+call, not billing caps: a completed response can cross a threshold.
+
+The transcript links each helper's purpose and result to its parent call. Stop cancels owned helper work; a crash
+resumes the same submission and ingests its result once. Interrupted internet calls can have unknown outcomes:
+check their external effects before repeating them. Retrying a failed status lookup only reads status, not tools.
 
 ## Scheduled messages
 

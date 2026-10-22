@@ -1,5 +1,4 @@
 import type { Context } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   defineDoc,
   defineExtension,
@@ -10,6 +9,7 @@ import {
   type Harness,
   type HookApi,
 } from "@earendil-works/pi-durable";
+import { abortBudgetTask } from "./budget.ts";
 
 type BudgetState = { maxTurns: number; turns: number; deadline: number; task: number; exceeded: boolean };
 const Budget = defineDoc({
@@ -70,19 +70,7 @@ export function evaluationBudget(harness: () => Harness) {
       hook(GenerationTask, {
         beforeRequest: async (_request, api, context) => {
           if (await allow(api, true, context)) return;
-          let cancelled = () => {};
-          const signalled = new Promise<void>((resolve) => {
-            cancelled = resolve;
-            context.abortSignal?.addEventListener("abort", cancelled, { once: true });
-            if (context.abortSignal?.aborted) resolve();
-          });
-          try {
-            // Request-hook throws alone are advisory. Abort this native task, without joining our own invocation.
-            await Promise.race([harness().abortTask(api.taskId, BACKGROUND_CONTEXT), signalled]);
-          } finally {
-            context.abortSignal?.removeEventListener("abort", cancelled);
-          }
-          throw new Error("the evaluation budget is exhausted");
+          return abortBudgetTask(harness(), api.taskId, context);
         },
       }),
       hook(ToolTask, {

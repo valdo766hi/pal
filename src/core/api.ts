@@ -16,6 +16,7 @@ import { CompatibleBody, isApiProvider, ProviderConfigError } from "../pi/provid
 import { StdioConfigError, StdioServerBody } from "../pi/mcp-stdio.ts";
 import type { Pal } from "./app.ts";
 import { ApprovalDecision, CommandModeBody } from "./approvals.ts";
+import { helperViews } from "./delegation.ts";
 import { chatDiagnostics, installationDiagnostics } from "./diagnostics.ts";
 import { ExtensionSelection } from "./extensions.ts";
 import {
@@ -284,6 +285,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     const workspace = await pal.workspaces.info(chat.id);
     const model = agent.model;
     const known = model === undefined ? undefined : pal.models.getModel(model.provider, model.modelId);
+    const effort = known === undefined ? "off" : clampThinkingLevel(known, agent.thinkingLevel);
     const provider =
       model === undefined || model.provider === CHATGPT_PROVIDER
         ? { name: "ChatGPT", billing: "Counts against your ChatGPT plan's usage limits." }
@@ -301,7 +303,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
               provider: model.provider,
               providerName: provider.name,
               modelId: model.modelId,
-              effort: known === undefined ? "off" : clampThinkingLevel(known, agent.thinkingLevel),
+              effort,
             },
       cost:
         model === undefined
@@ -808,6 +810,10 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
             });
         }
       }
+      if (action === "helpers" && path.length === 3 && method === "GET")
+        return send(200, {
+          helpers: await helperViews(pal.harness, pal.store.storage, chat.conversationId, context),
+        });
       if (action === "extensions" && path.length === 3 && method === "GET")
         return send(200, {
           release: pal.extensions.release,

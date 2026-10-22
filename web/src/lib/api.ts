@@ -13,6 +13,7 @@ import type { Admission } from "../../../src/core/chats.ts";
 export type { Admission };
 import type { ScheduleInput, ScheduleNotice, ScheduleView } from "../../../src/core/schedules.ts";
 export type { ScheduleInput, ScheduleNotice, ScheduleView };
+export type { HelperView } from "../../../src/core/delegation.ts";
 export type Scheduler = { enabled: boolean; schedules: (ScheduleView & { chat: string | null })[] };
 
 export type Session = { owner: boolean; signedIn: boolean };
@@ -378,6 +379,8 @@ export const api = {
     return data.upload;
   },
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
+  helpers: (chat: string) =>
+    call<{ helpers: import("../../../src/core/delegation.ts").HelperView[] }>("GET", `chats/${chat}/helpers`),
   scheduler: () => call<Scheduler>("GET", "scheduler"),
   setScheduler: (enabled: boolean) => call<Scheduler>("PUT", "scheduler", { enabled }),
   schedules: (chat: string) =>

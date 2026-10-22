@@ -1,9 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative } from "node:path";
 import type { Context } from "@earendil-works/chord";
-import { LiveDoc, type Storage, type ToolExecutionApi } from "@earendil-works/pi-durable";
+import {
+  type ConversationId,
+  LiveDoc,
+  type Storage,
+  type TaskId,
+  type ToolExecutionApi,
+} from "@earendil-works/pi-durable";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
+import type { HelperLinks } from "./delegation.ts";
 import { FileAccessError } from "./files.ts";
 import type { Projects } from "./projects.ts";
 import type { ProjectSearch } from "./search.ts";
@@ -53,6 +60,7 @@ export class FolderGrants {
   readonly search: ProjectSearch;
   readonly forbidden: readonly string[];
   readonly workspaces: Workspaces | undefined;
+  readonly links: Pick<HelperLinks, "parent"> | undefined;
 
   constructor(
     database: SqliteDatabase,
@@ -61,6 +69,7 @@ export class FolderGrants {
     search: ProjectSearch,
     forbidden: readonly string[],
     workspaces?: Workspaces,
+    links?: Pick<HelperLinks, "parent">,
   ) {
     this.database = database;
     this.projects = projects;
@@ -68,6 +77,7 @@ export class FolderGrants {
     this.search = search;
     this.forbidden = forbidden;
     this.workspaces = workspaces;
+    this.links = links;
   }
 
   async list(projectId: string, workspaceId?: string): Promise<GrantedFolder[]> {
@@ -191,12 +201,13 @@ export class FolderGrants {
   }
 
   async forTool(api: ToolExecutionApi, context: Context, id = "primary"): Promise<FolderLease> {
-    const { projectId, scope, input } = await this.#run(api, context);
+    const { projectId, scope, input, readOnly } = await this.#run(api, context);
     if (id !== "primary" && !scope.references.includes(id))
       throw new FileAccessError("this folder was not granted when the run was admitted; start a new run");
     const lease = await this.#lease(projectId, id, id === "primary" ? scope.primary : undefined, scope.workspace);
     return {
       ...lease,
+      access: readOnly ? "read" : lease.access,
       check: async () => {
         if ((await this.#run(api, context)).input !== input)
           throw new FileAccessError("the run's folder authority changed");
@@ -207,7 +218,7 @@ export class FolderGrants {
   }
 
   async forRun(api: ToolExecutionApi, context: Context): Promise<GrantedFolder[]> {
-    const { projectId, scope, input } = await this.#run(api, context);
+    const { projectId, scope, input, readOnly } = await this.#run(api, context);
     if ((await this.#run(api, context)).input !== input)
       throw new FileAccessError("the run's folder authority changed");
     await (await this.#lease(projectId, "primary", scope.primary, scope.workspace)).check();
@@ -215,28 +226,22 @@ export class FolderGrants {
       (entry) => entry.id === "primary" || scope.references.includes(entry.id),
     );
     context.abortSignal?.throwIfAborted();
-    return folders;
+    return readOnly ? folders.map<GrantedFolder>((entry) => ({ ...entry, access: "read" })) : folders;
   }
 
+  /**
+   * The authority of a tool call: its run's admitted folder scope. A helper's call must belong to the helper's live run
+   * and has exactly its parent run's scope, reached through the delegating call, which must still be running.
+   */
   async #run(api: ToolExecutionApi, context: Context) {
-    const live = await api.snapshot(LiveDoc, api.conversationId, context);
-    // Pi hands taskId between generations; the first input stays stable through tool rounds and steering.
-    const input = live?.run?.inputs[0];
-    const current = [...(live?.tools ?? []), ...(live?.nestedTools ?? [])].some(
-      (slot) => slot.taskId === api.taskId && slot.status !== "done",
-    );
-    if (input === undefined || !current) throw new FileAccessError("this tool no longer belongs to an active run");
-    const submission = await this.storage.submission(input, context);
-    if (
-      submission?.conversationId !== api.conversationId ||
-      submission.type !== "input" ||
-      submission.status !== "placed"
-    )
-      throw new FileAccessError("this input no longer owns an active run");
+    const link = await this.links?.parent(api.conversationId);
+    if (link !== undefined) await this.#active(api, api.conversationId, api.taskId, context);
+    const conversation = link?.conversation ?? api.conversationId;
+    const { input, submission } = await this.#active(api, conversation, link?.task ?? api.taskId, context);
     const row = await this.database.get<{ chat_id: string; project_id: string; folder_scope: string | null }>(
       "SELECT c.id AS chat_id, c.project_id, a.folder_scope FROM pal_chats c JOIN pal_projects p ON p.id = c.project_id LEFT JOIN pal_admissions a ON a.chat_id = c.id AND a.request_id = ? WHERE c.conversation_id = ? AND c.deleted_at IS NULL AND p.removed_at IS NULL AND p.state = 'ready'",
       submission.requestId ?? null,
-      api.conversationId,
+      conversation,
     );
     if (row === undefined) throw new FileAccessError("this conversation has no ready project");
     // Pre-grant/host-direct submissions retain primary-only access, never references added later.
@@ -249,7 +254,26 @@ export class FolderGrants {
       throw new FileAccessError("the run's workspace does not belong to this chat");
     if (this.workspaces !== undefined && workspace === undefined)
       throw new FileAccessError("this chat has no workspace");
-    return { projectId: row.project_id, scope: { ...scope, workspace: scope.workspace ?? workspace?.id }, input };
+    return {
+      projectId: row.project_id,
+      scope: { ...scope, workspace: scope.workspace ?? workspace?.id },
+      input,
+      readOnly: link !== undefined,
+    };
+  }
+
+  async #active(api: ToolExecutionApi, conversation: ConversationId, task: TaskId, context: Context) {
+    const live = await api.snapshot(LiveDoc, conversation, context);
+    // Pi hands taskId between generations; the first input stays stable through tool rounds and steering.
+    const input = live?.run?.inputs[0];
+    const current = [...(live?.tools ?? []), ...(live?.nestedTools ?? [])].some(
+      (slot) => slot.taskId === task && slot.status !== "done",
+    );
+    if (input === undefined || !current) throw new FileAccessError("this tool no longer belongs to an active run");
+    const submission = await this.storage.submission(input, context);
+    if (submission?.conversationId !== conversation || submission.type !== "input" || submission.status !== "placed")
+      throw new FileAccessError("this input no longer owns an active run");
+    return { input, submission };
   }
 
   async #lease(projectId: string, id: string, pinnedIdentity?: string, workspaceId?: string): Promise<FolderLease> {

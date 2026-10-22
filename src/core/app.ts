@@ -29,6 +29,7 @@ import { CommandApprovals } from "./approvals.ts";
 import { BROWSER_NAMESPACE, browserTools } from "../pi/browser-tools.ts";
 import { type BrowserRuntime, browserRuntime, ProjectBrowsers } from "./browser.ts";
 import { chatConfiguration, ChatService } from "./chats.ts";
+import { AGENTS_NAMESPACE, helperBudget, HelperLinks, type HelperLimits, helperTools } from "./delegation.ts";
 import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { INSTRUCTIONS_NAMESPACE, ProjectInstructions } from "./instructions.ts";
@@ -74,6 +75,8 @@ export type PalOptions = {
   readonly approvalTtlMs?: number;
   /** Host-account discovery root; isolated fixtures supply their own home. */
   readonly guidanceHome?: string;
+  /** Research helper bounds, read at each check; tests lower them. */
+  readonly helperLimits?: HelperLimits;
 };
 
 /** One running installation: the store's single owner and every service built on it. */
@@ -188,6 +191,7 @@ export async function openPal(
   };
   try {
     const { database } = store;
+    const links = new HelperLinks(store.storage, database);
     const registry = createRegistry();
     const extensions = await BuiltinExtensions.open(
       database,
@@ -219,7 +223,13 @@ export async function openPal(
       dataRoot: options.dataRoot,
       installRoot: options.installRoot,
     });
-    const openedWorkspaces = await Workspaces.open(database, openedProjects, options.dataRoot, options.installRoot);
+    const openedWorkspaces = await Workspaces.open(
+      database,
+      openedProjects,
+      options.dataRoot,
+      options.installRoot,
+      links,
+    );
     workspaces = openedWorkspaces;
     const folders = new FolderGrants(
       database,
@@ -228,6 +238,7 @@ export async function openPal(
       search,
       [options.dataRoot, options.installRoot, "/nix/store"],
       openedWorkspaces,
+      links,
     );
 
     const openedCapabilities = await CompiledCapabilities.open(definitions, {
@@ -273,7 +284,7 @@ export async function openPal(
     const projectFor = async (conversation: ConversationId) =>
       await database.get<{ id: string; root: string }>(
         "SELECT p.id, p.root FROM pal_chats c JOIN pal_projects p ON p.id = c.project_id WHERE c.conversation_id = ? AND c.deleted_at IS NULL AND p.removed_at IS NULL AND p.state = 'ready'",
-        conversation,
+        await links.chat(conversation),
       );
     const workspaceRoot = async (conversation: ConversationId, write = false) => {
       const workspace = await openedWorkspaces.forConversation(conversation);
@@ -285,6 +296,13 @@ export async function openPal(
       allows: async (conversation, name) => {
         const workspace = await openedWorkspaces.forConversation(conversation);
         if (workspace?.state !== "ready") return false;
+        // Helpers get read-only project tools plus the parent's internet and capability grants, never more.
+        if ((await links.parent(conversation)) !== undefined)
+          return HelperLinks.allows(
+            name,
+            async (tool) =>
+              openedCapabilities.allows(tool) || (await mcp?.allowsInConversation(conversation, tool)) === true,
+          );
         if (workspace.mode === "read-only" && ["files_write", "files_edit", "shell_run"].includes(name)) return false;
         return (
           name.startsWith(FILES_NAMESPACE.prefix) ||
@@ -293,6 +311,7 @@ export async function openPal(
           name === "instructions_scope" ||
           name === "skills_search" ||
           name === "skills_read" ||
+          name === "agents_delegate" ||
           (name.startsWith(BROWSER_NAMESPACE.prefix) && browsers?.allows(conversation) === true) ||
           (await mcp?.allowsInConversation(conversation, name)) === true
         );
@@ -304,6 +323,7 @@ export async function openPal(
         BROWSER_NAMESPACE,
         INSTRUCTIONS_NAMESPACE,
         SKILLS_NAMESPACE,
+        AGENTS_NAMESPACE,
       ],
     });
     sandbox = codemode.sandbox;
@@ -336,6 +356,12 @@ export async function openPal(
     );
     registry.install(compactOutput);
     registry.install(browserTools(() => browsers));
+    registry.install(
+      helperTools({
+        project: async (conversation) => (await projectFor(conversation))?.id,
+        ...(options.helperLimits === undefined ? {} : { limits: options.helperLimits }),
+      }),
+    );
     const commandApprovals = new CommandApprovals({
       database,
       root: (conversation) => workspaceRoot(conversation, true),
@@ -362,6 +388,7 @@ export async function openPal(
           BROWSER_NAMESPACE,
           INSTRUCTIONS_NAMESPACE,
           SKILLS_NAMESPACE,
+          AGENTS_NAMESPACE,
           ...namespaces,
         ]),
     });
@@ -375,10 +402,12 @@ export async function openPal(
       models,
       store.storage,
     );
-    const budget = evaluationBudget(() => {
+    const currentHarness = () => {
       if (harness === undefined) throw new Error("the harness is not open");
       return harness;
-    });
+    };
+    const budget = evaluationBudget(currentHarness);
+    const helperBudgets = helperBudget(currentHarness, options.helperLimits);
     // Existing conversations already select this mandatory extension; a new name would leave their core hooks out.
     registry.install({
       ...chatContext.extension,
@@ -392,7 +421,12 @@ export async function openPal(
         ...(instructions.extension.sections ?? []),
         ...(skills.extension.sections ?? []),
       ],
-      hooks: [...(chatContext.extension.hooks ?? []), ...(instructions.extension.hooks ?? []), ...(budget.hooks ?? [])],
+      hooks: [
+        ...(chatContext.extension.hooks ?? []),
+        ...(instructions.extension.hooks ?? []),
+        ...(budget.hooks ?? []),
+        ...(helperBudgets.hooks ?? []),
+      ],
     });
     const running = await Harness.open(store.storage, { models, registry }, context);
     harness = running;
