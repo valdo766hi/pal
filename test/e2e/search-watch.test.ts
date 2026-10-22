@@ -4,6 +4,7 @@ import { join, relative } from "node:path";
 import { FileFinder, type WatchBatchCallback, type WatchEvent } from "@ff-labs/fff-node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectSearch } from "../../src/core/search.ts";
+import { PrivateFiles } from "../../src/core/file-policy.ts";
 
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
@@ -42,7 +43,7 @@ describe("native project search watcher", () => {
       };
     });
     const created = vi.spyOn(FileFinder, "create");
-    const search = new ProjectSearch([]);
+    const search = new ProjectSearch([], await PrivateFiles.open([]), (options) => FileFinder.create(options));
     cleanups.push(() => search.close());
     expect(await search.search(root, "watchfixture", "files")).toMatchObject({ indexing: false, hits: [] });
     const initial = created.mock.results[0];

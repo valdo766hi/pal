@@ -8,6 +8,7 @@ import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/pi-durable/
 import { WorkspaceLocks } from "./execution.ts";
 import { FileAccessError, readFileSnapshot, resolveProjectPath } from "./files.ts";
 import { HttpError } from "./http.ts";
+import type { PrivateFiles } from "./file-policy.ts";
 import type { Projects } from "./projects.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { directoryIdentity } from "./workspace-root.ts";
@@ -64,6 +65,7 @@ export class Changes {
   readonly #database: SqliteDatabase;
   readonly #projects: Projects;
   readonly #deny: string;
+  readonly #privateFiles: PrivateFiles;
   readonly #locks: WorkspaceLocks;
   readonly #workspaces: Workspaces | undefined;
   #active = 0;
@@ -71,12 +73,14 @@ export class Changes {
     database: SqliteDatabase,
     projects: Projects,
     dataRoot: string,
+    privateFiles: PrivateFiles,
     locks = new WorkspaceLocks(),
     workspaces?: Workspaces,
   ) {
     this.#database = database;
     this.#projects = projects;
     this.#deny = dataRoot;
+    this.#privateFiles = privateFiles;
     this.#locks = locks;
     this.#workspaces = workspaces;
   }
@@ -311,7 +315,7 @@ export class Changes {
       const info = await lstat(target);
       if (info.isSymbolicLink() || !info.isFile()) throw new Error("non-regular file");
       if (!this.#allowed(root, relative(root, await realpath(target)))) throw new Error("outside grant");
-      const snapshot = await readFileSnapshot(target);
+      const snapshot = await readFileSnapshot(target, undefined, this.#privateFiles);
       if (snapshot.truncated) throw new Error("too large");
       after = snapshot.bytes;
     } catch (error) {
@@ -455,7 +459,7 @@ export class Changes {
       const unchanged = async (target: string) => {
         await location.check();
         await this.#permission(root, path, scope, signal);
-        const now = await readFileSnapshot(target).then(
+        const now = await readFileSnapshot(target, undefined, this.#privateFiles).then(
           (snapshot) => (snapshot.truncated ? undefined : snapshot.bytes),
           (error: NodeJS.ErrnoException) => (error.code === "ENOENT" ? null : undefined),
         );

@@ -131,9 +131,11 @@ It uses a private temporary copy, local fake providers and isolated Pal data. Th
 and fixture screenshots; zero tests, skips and todos fail the gate. The DOM-policy suite uses only controlled
 pages; it proves neither production browser confinement nor real-site credential recognition. The watcher case
 uses the pinned native fff through `ProjectSearch`, recording real notifications and checking create/modify/rename/
-remove outcomes, Unicode paths, UTF-8 match ranges and index release. It does not inject events; simulated gap
-controls remain separate. These are chat/onboarding/DOM/watcher subsets, not a full macOS browser-runtime or
-release-security gate.
+remove outcomes, Unicode paths, UTF-8 match ranges and index release. It injects the real in-process SDK factory
+for event recording, not fake events. The default finder subprocess is exercised in `native-finder` tests;
+`process-probe` also checks actual controller death with an idle or stopped worker and the external lifetime.
+Simulated gap controls remain separate. These are chat/onboarding/DOM/watcher subsets, not a full macOS
+browser-runtime or release-security gate.
 
 This is an initial CI foundation for [#15](https://github.com/valdo766hi/pal/issues/15), not full platform
 acceptance. Build logs distinguish prerequisite errors from assertions; a failure before a suite runs

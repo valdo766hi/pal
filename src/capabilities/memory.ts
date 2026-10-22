@@ -15,7 +15,7 @@ export const memoryCapability = {
     tools: [{ name: "memory_search", replay: "safe", permissions: ["project.read"], maxOutputBytes: 4096 }],
   },
   open(host) {
-    const memory = new ProjectMemory(host.database, host.folders, host.storage, host.deny);
+    const memory = new ProjectMemory(host.database, host.folders, host.storage, host.deny, host.privateFiles);
     return { memory, tools: memory.tools(host.project).tools ?? [] };
   },
 } satisfies CompiledCapability;

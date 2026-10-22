@@ -43,9 +43,17 @@ Each script has one 100-call host budget shared by `tools.*`, `searchTools()`, `
 Pi journals budget rejections in the same order as other results. Changing the call limit or its adapter version
 refuses an unfinished replay rather than silently resetting its budget.
 
-- **File tools** resolve real paths, refuse symlink escapes and never touch Pal's data directory or credentials.
-  Writes check the revision the agent read. Each write runs in a short-lived helper whose working directory is
-  the checked parent folder; relative operations cannot be redirected into a replacement folder or symlink.
+- **File tools** resolve real paths and refuse symlink escapes and paths inside Pal's data directory.
+  Before reading project content, file tools, previews, Changes, memory and guidance also check the opened file's
+  identity against Pal's database, WAL/SHM and credential key. Startup identities remain protected after a rename;
+  current private paths cover replacements. Known private identities are refused before open too: closing a
+  database alias could release SQLite's locks. Native fff work runs in up to three lazy child processes for that
+  reason, with no credentials and a fixed ten-minute external lifetime plus one-second kill grace. This is process
+  separation, not a sandbox or native-memory cap. Search snippets are re-read through the file policy before delivery.
+  Ordinary project hardlinks remain usable. This does not identify copied secret bytes or every historical private
+  object; listings can still show alias metadata. Writes check the revision the agent read. Each write runs in a
+  short-lived helper whose working directory is the checked parent folder; relative operations cannot be redirected
+  into a replacement folder or symlink.
   Parent/revision/grant changes observed before preparation or publication refuse the write, and unpublished
   temporary files are cleaned up, including when Pal is killed mid-write. These checks are not an atomic
   filesystem snapshot: a parent renamed after the final check can carry the write with the original folder,

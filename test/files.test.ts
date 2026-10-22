@@ -6,6 +6,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ConversationId, ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
 import { fileTools } from "../src/core/files.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -28,7 +29,8 @@ async function setup(root: "home" | "managed" = "home") {
   await writeFile(join(home, "secret.txt"), "not for the model");
   await symlink(join(home, "secret.txt"), join(home, "repo", "escape.txt"));
   const projectRoot = root === "home" ? home : join(dataRoot, "projects", "p1", "workspace");
-  const extension = fileTools({ root: async () => projectRoot, deny: [dataRoot] });
+  const privateFiles = await PrivateFiles.open([join(dataRoot, "credentials.key")]);
+  const extension = fileTools({ root: async () => projectRoot, deny: [dataRoot], privateFiles });
   const tools = Object.fromEntries((extension.tools ?? []).map((tool) => [tool.name, tool]));
   const run = async (name: string, args: Record<string, unknown>): Promise<string> => {
     const tool = tools[name] as ToolRegistration;
@@ -63,7 +65,11 @@ describe("project file tools", () => {
     const { home, run } = await setup();
     // The home-folder project contains the link's target, so this read is inside it.
     expect(await run("files_read", { path: "repo/escape.txt" })).toContain("1\tnot for the model");
-    const narrow = fileTools({ root: async () => join(home, "repo"), deny: [] });
+    const narrow = fileTools({
+      root: async () => join(home, "repo"),
+      deny: [],
+      privateFiles: await PrivateFiles.open([]),
+    });
     const read = (narrow.tools ?? []).find((tool) => tool.name === "files_read") as ToolRegistration;
     const api = { conversationId: 1 as ConversationId } as ToolExecutionApi;
     await expect(read.execute({ path: "escape.txt" } as never, api, context)).rejects.toThrow(
@@ -123,7 +129,11 @@ describe("project file tools", () => {
       run("files_write", { path: "../../../credentials.key", expectedHash: null, content: "bad" }),
     ).rejects.toThrow(/outside/);
     expect(await readFile(join(dataRoot, "credentials.key"), "utf8")).toBe("master key bytes");
-    const extension = fileTools({ root: async () => join(home, "repo"), deny: [dataRoot] });
+    const extension = fileTools({
+      root: async () => join(home, "repo"),
+      deny: [dataRoot],
+      privateFiles: await PrivateFiles.open([join(dataRoot, "credentials.key")]),
+    });
     const tool = extension.tools?.find((tool) => tool.name === "files_write") as ToolRegistration;
     const api = { conversationId: 1 as ConversationId } as ToolExecutionApi;
     await expect(

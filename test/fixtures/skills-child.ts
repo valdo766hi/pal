@@ -6,6 +6,7 @@ import { createRegistry, defineExtension, defineTool, Harness } from "@earendil-
 import { Type } from "typebox";
 import { ChatService } from "../../src/core/chats.ts";
 import { GuidanceFiles } from "../../src/core/guidance-files.ts";
+import { PrivateFiles } from "../../src/core/file-policy.ts";
 import { Projects } from "../../src/core/projects.ts";
 import { ProjectSkills, SKILLS_NAMESPACE } from "../../src/core/skills.ts";
 import { Workspaces } from "../../src/core/workspaces.ts";
@@ -24,9 +25,9 @@ const store = await openStore(configuredData);
 const dataRoot = dirname(store.path);
 const projects = await Projects.open({ database: store.database, dataRoot, installRoot: "/nonexistent-install" });
 const workspaces = await Workspaces.open(store.database, projects, dataRoot, "/nonexistent-install");
-const files = await GuidanceFiles.open({
+const files = new GuidanceFiles({
   deny: [dataRoot, "/nix/store"],
-  privateFiles: [store.path, `${store.path}-wal`, `${store.path}-shm`],
+  privateFiles: await PrivateFiles.open([store.path, `${store.path}-wal`, `${store.path}-shm`]),
 });
 let bodyReads = 0;
 const read = files.read.bind(files);

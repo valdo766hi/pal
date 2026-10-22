@@ -11,6 +11,7 @@ import type { ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-dura
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { fileTools, searchFolder } from "../src/core/files.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 import { WorktreeFiles } from "../src/core/worktree-files.ts";
 import type { WorkspaceMode } from "../src/core/workspaces.ts";
 
@@ -230,6 +231,7 @@ describe("immutable per-chat workspaces", () => {
     const tools = fileTools({
       root: async () => source,
       deny: [],
+      privateFiles: await PrivateFiles.open([]),
       folders: {
         list: () => pal.folders.list(project.id, created.workspace.id),
         open: () => pal.folders.owner(project.id, "primary", created.workspace.id),

@@ -13,6 +13,7 @@ import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
 import { Type, type Static } from "typebox";
 import type { FolderGrants, FolderLease } from "../core/folders.ts";
 import type { ProjectMemory } from "../core/memory.ts";
+import type { PrivateFiles } from "../core/file-policy.ts";
 import { validate } from "../core/requests.ts";
 
 export const CAPABILITY_API = 1;
@@ -66,6 +67,7 @@ export type CapabilityHost = {
   storage: Storage;
   folders: FolderGrants;
   deny: readonly string[];
+  privateFiles: PrivateFiles;
   project(conversation: ConversationId): Promise<{ id: string; workspace: string } | undefined>;
   authorize(api: ToolExecutionApi, context: Context): Promise<FolderLease>;
 };

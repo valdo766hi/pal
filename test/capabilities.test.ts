@@ -23,6 +23,7 @@ import { openPal, type Pal } from "../src/core/app.ts";
 import type { Chat } from "../src/core/chats.ts";
 import { BuiltinExtensions } from "../src/core/extensions.ts";
 import { FileAccessError } from "../src/core/files.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -81,12 +82,14 @@ async function fixture(definitions: readonly CompiledCapability[] = [memoryCapab
     },
   };
 }
+const publicFiles = await PrivateFiles.open([]);
 function host(pal: Pal): CapabilityHost {
   return {
     database: pal.store.database,
     storage: pal.store.storage,
     folders: pal.folders,
     deny: [],
+    privateFiles: publicFiles,
     project: async (conversation) => {
       const workspace = await pal.workspaces.forConversation(conversation);
       return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;

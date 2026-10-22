@@ -4,6 +4,7 @@ import { createRegistry, Harness } from "@earendil-works/pi-durable";
 import { Changes } from "../../src/core/changes.ts";
 import { type Barrier, ChatService } from "../../src/core/chats.ts";
 import { Projects } from "../../src/core/projects.ts";
+import { PrivateFiles } from "../../src/core/file-policy.ts";
 import { Workspaces } from "../../src/core/workspaces.ts";
 import { openStore } from "../../src/storage/store.ts";
 
@@ -11,7 +12,8 @@ export async function openFeedback(dataRoot: string, barrier?: (point: Barrier) 
   const store = await openStore(dataRoot);
   const projects = await Projects.open({ database: store.database, dataRoot, installRoot: "/nonexistent" });
   const workspaces = await Workspaces.open(store.database, projects, dataRoot, "/nonexistent");
-  const changes = new Changes(store.database, projects, dataRoot, undefined, workspaces);
+  const privateFiles = await PrivateFiles.open([store.path, `${store.path}-wal`, `${store.path}-shm`]);
+  const changes = new Changes(store.database, projects, dataRoot, privateFiles, undefined, workspaces);
   const faux = fauxProvider();
   const models = createModels();
   models.setProvider(faux.provider);

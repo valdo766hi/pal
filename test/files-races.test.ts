@@ -9,6 +9,7 @@ import { BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/
 import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileTools } from "../src/core/files.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 import { gnuTimeout } from "../src/core/timeout.ts";
 
 let barrier: ((phase: string) => Promise<void>) | undefined;
@@ -72,7 +73,9 @@ async function setup() {
   await fs.mkdir(outside);
   await fs.writeFile(join(parent, "main.txt"), original);
   await fs.writeFile(join(outside, "main.txt"), original);
-  const tool = fileTools({ root: async () => root, deny: [] }).tools?.find((tool) => tool.name === "files_write");
+  const tool = fileTools({ root: async () => root, deny: [], privateFiles: await PrivateFiles.open([]) }).tools?.find(
+    (tool) => tool.name === "files_write",
+  );
   if (tool === undefined) throw new Error("missing write tool");
   const api = { conversationId: 1 as ConversationId } as ToolExecutionApi;
   const write = (signal?: AbortSignal) =>

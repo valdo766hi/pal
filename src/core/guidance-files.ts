@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { FileAccessError, isProtected } from "./files.ts";
+import type { PrivateFiles } from "./file-policy.ts";
 
 export const guidanceHash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 export const guidanceMissing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -12,32 +13,17 @@ const inside = (root: string, path: string) => {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 };
 
-type Options = { deny: readonly string[]; privateFiles: readonly string[] };
+type Options = { deny: readonly string[]; privateFiles: PrivateFiles };
 type ReadOptions = { global: boolean; fileBytes: number; headerBytes?: number };
 
 /** Bounded document reads share the same protected-object checks; they never grant execution authority. */
 export class GuidanceFiles {
   readonly #deny: readonly string[];
-  readonly #privateFiles: readonly string[];
-  readonly #privateInodes: ReadonlySet<string>;
+  readonly #privateFiles: PrivateFiles;
 
-  private constructor(options: Options, privateInodes: ReadonlySet<string>) {
+  constructor(options: Options) {
     this.#deny = options.deny;
     this.#privateFiles = options.privateFiles;
-    this.#privateInodes = privateInodes;
-  }
-
-  static async open(options: Options) {
-    // Retain protected objects even when their original paths are moved.
-    const inodes = new Set<string>();
-    for (const path of options.privateFiles) {
-      const info = await stat(path).catch((error) => {
-        if (guidanceMissing(error)) return undefined;
-        throw error;
-      });
-      if (info !== undefined) inodes.add(`${info.dev}:${info.ino}`);
-    }
-    return new GuidanceFiles(options, inodes);
   }
 
   async directory(root: string, name: string, global: boolean) {
@@ -94,14 +80,7 @@ export class GuidanceFiles {
     const before = await lstat(target);
     if (!before.isFile() || before.nlink !== 1 || before.size > options.fileBytes)
       throw new FileAccessError("guidance must be a bounded regular file without hardlinks");
-    if (this.#privateInodes.has(`${before.dev}:${before.ino}`)) throw new FileAccessError("private guidance source");
-    for (const path of this.#privateFiles) {
-      const info = await stat(path).catch((error) => {
-        if (guidanceMissing(error)) return undefined;
-        throw error;
-      });
-      if (info?.dev === before.dev && info.ino === before.ino) throw new FileAccessError("private guidance source");
-    }
+    if (await this.#privateFiles.contains(before)) throw new FileAccessError("private guidance source");
     const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const info = await handle.stat();

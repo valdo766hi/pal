@@ -35,6 +35,7 @@ import { ChatContext } from "./context.ts";
 import { WORKING_NAMESPACE, WorkingState } from "./working-state.ts";
 import { INSTRUCTIONS_NAMESPACE, ProjectInstructions } from "./instructions.ts";
 import { GuidanceFiles } from "./guidance-files.ts";
+import { PrivateFiles } from "./file-policy.ts";
 import { ProjectSkills, SKILLS_NAMESPACE } from "./skills.ts";
 import { Changes } from "./changes.ts";
 import { FILES_NAMESPACE, fileTools, projectFiles } from "./files.ts";
@@ -146,7 +147,7 @@ export async function openPal(
   const store = await openStore(options.dataRoot);
   options = { ...options, dataRoot: dirname(store.path) };
   const commands = new HostCommands();
-  const search = new ProjectSearch([options.dataRoot]);
+  let search: ProjectSearch | undefined;
   let changes: Changes | undefined;
   const locks = new WorkspaceLocks(async (root) => {
     await changes?.capture(root);
@@ -181,7 +182,7 @@ export async function openPal(
       }
       const cleanup = await Promise.allSettled(
         [
-          () => search.close(),
+          () => search?.close(),
           () => commands.close(),
           () => terminals?.close(),
           () => browsers?.close(),
@@ -213,6 +214,14 @@ export async function openPal(
       await loadMasterKey(join(options.dataRoot, "credentials.key")),
       store.installationId,
     );
+    const privateFiles = await PrivateFiles.open([
+      store.path,
+      `${store.path}-wal`,
+      `${store.path}-shm`,
+      join(options.dataRoot, "credentials.key"),
+    ]);
+    const openedSearch = new ProjectSearch([options.dataRoot], privateFiles);
+    search = openedSearch;
     const endpoints = options.endpoints ?? OPENAI_CHATGPT;
     const models = createModels({ credentials, authContext: NO_AMBIENT_AUTH });
     models.setProvider(chatGPTProvider(endpoints));
@@ -240,7 +249,7 @@ export async function openPal(
       database,
       openedProjects,
       store.storage,
-      search,
+      openedSearch,
       [options.dataRoot, options.installRoot, "/nix/store"],
       openedWorkspaces,
       links,
@@ -251,6 +260,7 @@ export async function openPal(
       storage: store.storage,
       folders,
       deny: [options.dataRoot],
+      privateFiles,
       project: async (conversation) => {
         const workspace = await openedWorkspaces.forConversation(conversation);
         return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
@@ -258,9 +268,9 @@ export async function openPal(
       authorize: (api, ctx) => folders.forTool(api, ctx),
     });
     capabilities = openedCapabilities;
-    const guidanceFiles = await GuidanceFiles.open({
+    const guidanceFiles = new GuidanceFiles({
       deny: [options.dataRoot, options.installRoot, "/nix/store"],
-      privateFiles: [store.path, `${store.path}-wal`, `${store.path}-shm`, join(options.dataRoot, "credentials.key")],
+      privateFiles,
     });
     const instructions = new ProjectInstructions({
       database,
@@ -346,8 +356,9 @@ export async function openPal(
       fileTools({
         root: projectRoot,
         deny: [options.dataRoot],
+        privateFiles,
         locks,
-        search,
+        search: openedSearch,
         folders: {
           list: (api, ctx) => folders.forRun(api, ctx),
           open: (api, ctx, id) => folders.forTool(api, ctx, id),
@@ -479,7 +490,7 @@ export async function openPal(
       modelSetupDeferred: async () => (await setting("setup:model-deferred")) === "true",
       setModelSetupDeferred: (deferred) => save("setup:model-deferred", String(deferred)),
     };
-    changes = new Changes(database, openedProjects, options.dataRoot, locks, openedWorkspaces);
+    changes = new Changes(database, openedProjects, options.dataRoot, privateFiles, locks, openedWorkspaces);
     const owner = new Owner(database);
     const reviews = changes;
     terminals = new Terminals(openedProjects, owner, (root) => reviews.capture(root), openedWorkspaces);
@@ -595,6 +606,7 @@ export async function openPal(
           return project?.state === "ready" ? project.root : undefined;
         },
         deny: [options.dataRoot],
+        privateFiles,
         folder: (project, id, workspaceId) => folders.owner(project, id, workspaceId),
       }),
       terminals,
@@ -603,7 +615,7 @@ export async function openPal(
         openedBrowsers.handles(request)
           ? openedBrowsers.upgrade(request, socket, head, publicOrigin)
           : humanTerminals.upgrade(request, socket, head, publicOrigin),
-      search,
+      search: openedSearch,
       workspacePurge: new WorkspacePurge(database, options.dataRoot, locks),
       close,
     };
