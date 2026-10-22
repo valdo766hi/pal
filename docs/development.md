@@ -95,6 +95,8 @@ jobs must also run those suites from the immutable `native-check` artifact outsi
 The host runner verifies every named suite executed and fails on zero tests, skips or todos. Its test-only
 probe uses Linux `/proc` or macOS `libproc`; unavailable/failed inspection is an error, never evidence that
 a process died. Positive controls check a live process and its exact cwd before cleanup assertions.
+The host runner also executes `instructions` and `skills` on its temporary filesystem and records its case
+sensitivity. A run on a case-sensitive volume does not verify a case-insensitive one, or vice versa.
 Neither portable counts alone nor Linux host results establish native macOS process coverage.
 
 ```sh
