@@ -166,8 +166,8 @@ CI measures the fixed pre-extraction `0ac668e` baseline and exact candidate pack
 builds finish. These are sequential batches with fresh processes/stores, **not flushed filesystem caches**, peak or
 aggregate worker RSS, configured chat latency, model quality, or full platform acceptance. Compare like hosts and
 repeat before attributing a difference to code. No regression budget or optimization claim is established by the
-runner alone. Browser/PTY/search activation and cached/live MCP measurements remain required for #14; do not change
-isolation without profiling and correctness regressions.
+runner alone. Browser/PTY/search activation measurements and host-specific regression budgets remain required
+for #14; do not change isolation without profiling and correctness regressions.
 
 Optional capabilities start nothing until the owner uses them: `test/idle-capabilities.test.ts` checks that
 startup and ordinary chat setup create no worker threads, child processes, terminal addon, browser or search index,
@@ -190,6 +190,23 @@ reports no errors. Only the web bundle is selected: the server, fixture and brow
 so compare bundles that speak the same API. These are not network, model or page-load latency results. CI runs
 the same pre-extraction baseline and candidate bundles on macOS and on Ubuntu 22.04; hosted Ubuntu 24.04 disallows
 the user namespaces Chromium's sandbox needs, and the runner never launches Chromium without its sandbox.
+
+### Loopback MCP cache measurements
+
+```sh
+nix build --out-link mcp-benchmark .#mcp-benchmark
+./mcp-benchmark/bin/pal-benchmark-mcp 7 > mcp.json
+```
+
+Each sample creates a fresh store, guidance scope, loopback MCP server and chat. A scripted model performs three
+real Code Mode/durable-tool round trips: first read, cached read and explicitly forced live read. Assertions require
+successful source receipts, the expected cache/bypass state and exact remote tool counts (1/0/1); failed samples
+are errors, not fast successes. JSON retains raw round-trip and MCP receipt durations, HTTP request/catalog-list
+counts, process RSS and nearest-rank p50/p95, plus immutable source and native host identity. Owner setup/enablement
+is outside the measured phases. Samples share a process and filesystem caches; RSS is neither peak nor aggregate.
+This measures this runner's Pal/journal/local transport overhead, not provider/internet latency or model quality.
+CI retains seven samples on each native target. It is a baseline measurement, not evidence for connection pooling
+or an optimization claim; cache hits still perform the conservative current catalog/authority checks.
 
 ### Platform acceptance matrix
 

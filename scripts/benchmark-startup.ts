@@ -25,7 +25,7 @@ export function distribution(values: readonly number[]) {
 }
 
 export function sampleCount(value = "7") {
-  assert(/^(?:[3-9]|1\d|2[0-5])$/.test(value), "Use 3–25 startup samples.");
+  assert(/^(?:[3-9]|1\d|2[0-5])$/.test(value), "Use 3–25 samples.");
   return Number(value);
 }
 

@@ -111,6 +111,13 @@ jobs:
             "$PWD/baseline-package" 7 > startup-baseline.json
           ./startup-benchmark/bin/pal-benchmark-startup \
             "$PWD/candidate-package" 7 > startup-candidate.json
+      - name: Loopback MCP cache measurements, not provider latency
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link mcp-benchmark \
+            ".#packages.$SYSTEM.mcp-benchmark"
+          ./mcp-benchmark/bin/pal-benchmark-mcp 7 > mcp-candidate.json
       # Hosted Ubuntu 24.04 disallows the user namespaces Chromium's sandbox
       # needs; Linux transcripts run in the Ubuntu 22.04 job below instead.
       - name: Long-chat transcript measurements, not model evaluations
@@ -144,6 +151,9 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
           tee -a "$GITHUB_STEP_SUMMARY" < startup-baseline.json
           tee -a "$GITHUB_STEP_SUMMARY" < startup-candidate.json
+          printf '\n### Loopback MCP cache; scripted model\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < mcp-candidate.json
           if test -f transcript-candidate.json; then
             printf '\n### Long-chat transcript; selected web bundles\n\n' \
               >> "$GITHUB_STEP_SUMMARY"
@@ -167,6 +177,7 @@ jobs:
             smoke/
             startup-baseline.json
             startup-candidate.json
+            mcp-candidate.json
             transcript-baseline.json
             transcript-candidate.json
             native-ui/summary.json
