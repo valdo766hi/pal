@@ -236,7 +236,7 @@ macOS support. Service installation or host security changes require a separatel
 Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting repository under
 `test/fixtures/evaluation` and an independent grader: `checkout-rounding` (development; bug fix across two files),
 `module-inventory` (development; repository understanding, answered in a file while sources stay unchanged),
-`slug-test-repair` (held out; graded on cases the repository's own test does not contain), and
+`slug-test-repair` (held out, version 2; independent cases plus a byte-identical public test), and
 `checkout-owner-correction` (development; a later owner correction must preserve the earlier rounding rules).
 Continuations are delivered after an idle checkpoint in the same conversation/history, not concatenated into the
 initial prompt. Scripted owner corrections count as interventions and remain visible in the trace.
@@ -271,7 +271,9 @@ approve spending separately. Tool interfaces, prompts, context policy
 and approvals differ between harnesses and are recorded, not claimed identical merely because the model matches.
 
 After the run's owned work settles, the workspace is copied read-only and graded; the grader never runs the
-candidate's tests or trusts its claims. A run during which the grader, tasks or starting repositories changed is
+candidate's tests or trusts its claims. Listed unchanged paths are checked against the frozen starting snapshot
+for both program and answer tasks; changing or removing them fails even if every output is correct.
+A run during which the grader, tasks or starting repositories changed is
 recorded as `evaluator_changed`, not graded. From the Nix package those files are in the read-only store. The report
 (`report.json`, `report.md`) keeps every run, including failures, budget overruns and approvals granted under
 `--approvals approve-all` (counted as interventions). Each row links the task and starting-repository digests,

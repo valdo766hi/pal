@@ -20,6 +20,7 @@ type Common = {
 export type ProgramTask = Common & {
   readonly kind: "program";
   readonly entrypoint: string;
+  readonly unchanged?: readonly string[];
   readonly cases: readonly { readonly id: string; readonly input: unknown; readonly expected: unknown }[];
 };
 /** Graded by the candidate's answer file, with the listed paths required to stay byte-identical. */
@@ -89,11 +90,12 @@ export const inventory = {
 export const slug = {
   kind: "program",
   id: "slug-test-repair",
-  version: 1,
+  version: 2,
   split: "held-out",
   categories: ["test-repair"],
   snapshot: "slug",
   entrypoint: "src/main.mjs",
+  unchanged: ["test.mjs"],
   prompt:
     "node test.mjs fails. Fix src/slug.mjs, not the test: a slug is lowercase ASCII letters and digits in words " +
     "joined by single hyphens. Remove accents from letters, treat every other character as a separator, and " +

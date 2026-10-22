@@ -125,7 +125,28 @@ function programCases(candidate: string, task: ProgramTask): Case[] {
   });
 }
 
-async function answerCases(candidate: string, initial: string, task: AnswerTask): Promise<Case[]> {
+async function unchangedCases(candidate: string, initial: string, paths: readonly string[]): Promise<Case[]> {
+  const cases: Case[] = [];
+  for (const path of paths) {
+    const started = performance.now();
+    const before = (await snapshot(join(initial, path), false)).digest;
+    const after = await snapshot(join(candidate, path)).catch(() => undefined);
+    const failure = after?.digest === before ? null : "changed";
+    cases.push({
+      id: `unchanged:${path}`,
+      passed: failure === null,
+      failure,
+      exitCode: null,
+      signal: null,
+      elapsedMs: Math.round(performance.now() - started),
+      output: null,
+      stderr: "",
+    });
+  }
+  return cases;
+}
+
+async function answerCases(candidate: string, task: AnswerTask): Promise<Case[]> {
   const started = performance.now();
   const read = async (): Promise<{ output: unknown; failure: string | null }> => {
     const info = await lstat(join(candidate, task.answer.file)).catch(() => undefined);
@@ -138,24 +159,19 @@ async function answerCases(candidate: string, initial: string, task: AnswerTask)
       return { output: null, failure: "invalid_json" };
     }
   };
-  const result = (id: string, output: unknown, failure: string | null): Case => ({
-    id,
-    passed: failure === null,
-    failure,
-    exitCode: null,
-    signal: null,
-    elapsedMs: Math.round(performance.now() - started),
-    output,
-    stderr: "",
-  });
   const { output, failure } = await read();
-  const cases = [result("answer", output, failure)];
-  for (const path of task.unchanged) {
-    const before = (await snapshot(join(initial, path), false)).digest;
-    const after = await snapshot(join(candidate, path)).catch(() => undefined);
-    cases.push(result(`unchanged:${path}`, null, after?.digest === before ? null : "changed"));
-  }
-  return cases;
+  return [
+    {
+      id: "answer",
+      passed: failure === null,
+      failure,
+      exitCode: null,
+      signal: null,
+      elapsedMs: Math.round(performance.now() - started),
+      output,
+      stderr: "",
+    },
+  ];
 }
 
 /** Grade frozen artifacts, never a candidate's tests, commands or self-reported success. */
@@ -167,7 +183,10 @@ export async function grade(candidate: string, task: Task = checkout) {
     .update(await readFile(grader))
     .update(await readFile(tasks))
     .digest("hex");
-  const cases = task.kind === "program" ? programCases(candidate, task) : await answerCases(candidate, original, task);
+  const cases = [
+    ...(task.kind === "program" ? programCases(candidate, task) : await answerCases(candidate, task)),
+    ...(await unchangedCases(candidate, original, task.unchanged ?? [])),
+  ];
   return {
     schema: 1,
     kind: "independent-development-grade",

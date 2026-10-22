@@ -23,6 +23,12 @@ let
     for a in $(seq 1 3); do
       for b in $(seq 1 95); do mkdir -p "$out/entries/$a/$b"; done
     done
+    for name in changed-test missing-test; do
+      cp -R ${source}/test/fixtures/evaluation/slug-fixed "$out/$name"
+      chmod -R u+w "$out/$name"
+    done
+    printf 'process.exit(0);\n' > "$out/changed-test/test.mjs"
+    rm "$out/missing-test/test.mjs"
   '';
 in
 runCommand "pal-evaluation-controls" { nativeBuildInputs = [ nodejs_24 ]; } ''

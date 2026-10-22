@@ -67,6 +67,18 @@ for (const [task, name, passed] of [
   checks++;
 }
 assert.equal(slug.split, "held-out");
+for (const name of ["changed-test", "missing-test"]) {
+  const result = await grade(join(malformed, name), slug);
+  assert.equal(result.cases.length, slug.cases.length + 1);
+  assert.equal(result.passed, false);
+  assert(result.cases.every((test) => test.id === "unchanged:test.mjs" || test.passed));
+  assert.deepEqual(
+    result.cases.flatMap((test) => (test.passed ? [] : [test.id])),
+    ["unchanged:test.mjs"],
+  );
+  await writeFile(join(output, `${name}.json`), `${JSON.stringify(result, null, 2)}\n`);
+  checks++;
+}
 await assert.rejects(grade(output), /frozen Nix-store candidate|writable path/);
 checks++;
 for (const [name, pattern] of [
