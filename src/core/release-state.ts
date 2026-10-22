@@ -81,7 +81,8 @@ export async function unfinishedWork(database: SqliteExecutor): Promise<number> 
       " + (SELECT count(*) FROM pal_projects WHERE state = 'provisioning')" +
       " + (SELECT count(*) FROM pal_workspaces WHERE state = 'provisioning')" +
       " + (SELECT count(*) FROM pal_workspace_purges WHERE completed_at IS NULL)" +
-      " + (SELECT count(*) FROM pal_command_approvals WHERE state = 'pending') AS n",
+      " + (SELECT count(*) FROM pal_command_approvals WHERE state = 'pending')" +
+      " + (SELECT count(*) FROM pal_settings WHERE key GLOB 'schedule:*' AND CASE WHEN json_valid(value) THEN json_type(value, '$.pending') IS NOT 'null' ELSE 1 END) AS n",
   );
   return row?.n ?? 0;
 }
