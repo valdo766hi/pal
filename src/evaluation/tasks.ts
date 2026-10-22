@@ -1,6 +1,11 @@
 // Versioned evaluation tasks. Each names its frozen starting snapshot under test/fixtures/evaluation and the checks
 // its independent grader runs; held-out tasks are never used while developing Pal's prompts or tools.
-export type Continuation = { readonly prompt: string; readonly owner: boolean };
+export type Continuation = {
+  readonly prompt: string;
+  readonly owner: boolean;
+  /** Request compaction before this input; native history without an old prefix needs no summary request. */
+  readonly compact?: boolean;
+};
 type Common = {
   readonly id: string;
   readonly version: number;
@@ -133,4 +138,11 @@ export const continuedCheckout = {
   ],
 } as const satisfies ProgramTask;
 
-export const TASKS: readonly Task[] = [checkout, inventory, slug, continuedCheckout];
+export const checkpointCheckout = {
+  ...continuedCheckout,
+  id: "checkout-context-checkpoint",
+  categories: [...continuedCheckout.categories, "compaction-checkpoint"],
+  continuations: continuedCheckout.continuations.map((next) => ({ ...next, compact: true })),
+} as const satisfies ProgramTask;
+
+export const TASKS: readonly Task[] = [checkout, inventory, slug, continuedCheckout, checkpointCheckout];

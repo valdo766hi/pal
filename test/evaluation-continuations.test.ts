@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { DEFAULT_COMPACTION_POLICY } from "@earendil-works/pi-durable";
 import { afterEach, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { baselineHarness, externalHarness, palHarness } from "../src/evaluation/harnesses.ts";
@@ -148,4 +149,133 @@ it("refuses a multi-turn external comparison instead of silently grading only it
   const outcome = await externalHarness("single-prompt", "printf ignored > ignored.txt").run(input);
   expect(outcome).toMatchObject({ status: "harness_error", error: expect.stringMatching(/continuation/) });
   await expect(readFile(join(input.workspace, "ignored.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+async function compactionAgent(kind: string) {
+  const fixture = await agent(kind);
+  const complete = vi.spyOn(fixture.pal.models, "completeSimple");
+  const constraint = "Retain the original rounding constraint across compaction.";
+  if (kind === "pal") {
+    const submit = fixture.pal.chats.submit.bind(fixture.pal.chats);
+    vi.spyOn(fixture.pal.chats, "submit").mockImplementationOnce(async (...args) => {
+      const admission = await submit(...args);
+      const native = await fixture.pal.harness.submission(admission.submissionId, context);
+      if (native === undefined) throw new Error("missing fixture submission");
+      const settled = await native.wait(context);
+      await fixture.pal.harness.waitForIdle(context);
+      const conversation = await fixture.pal.harness.conversation(settled.conversationId, context);
+      if (conversation === undefined) throw new Error("missing fixture conversation");
+      // Native compaction retains a recent tail; older history makes this a real summary rather than a no-op.
+      for (let i = 0; i < 50; i++)
+        await conversation.submit(
+          {
+            type: "write",
+            entry: {
+              kind: "pi.assistant",
+              model: [fauxAssistantMessage(`${constraint} Checkpoint ${i}: ${"reference context ".repeat(250)}`)],
+            },
+          },
+          context,
+        );
+      return admission;
+    });
+  }
+  const requests: string[] = [];
+  fixture.faux.setResponses(
+    ["first checkpoint", `retained-summary-marker: ${constraint}`, "continued after compaction"].map(
+      (text) => (request) => {
+        requests.push(JSON.stringify(request.messages));
+        return fauxAssistantMessage(text);
+      },
+    ),
+  );
+  return {
+    ...fixture,
+    requests,
+    constraint,
+    complete,
+    input: {
+      ...fixture.input,
+      prompt: `${constraint} ${fixture.input.prompt}`,
+      continuations: fixture.input.continuations.map((next) => ({ ...next, compact: true })),
+      budget: { seconds: 20, turns: 3 },
+    },
+  };
+}
+
+it.each(["pal", "baseline"])("%s applies a compaction checkpoint before the next prompt", async (kind) => {
+  const { input, faux, harness, requests, constraint, complete } = await compactionAgent(kind);
+  const outcome = await harness.run(input);
+  expect(outcome).toMatchObject({ status: "completed", turns: 3, interventions: 1 });
+  expect(faux.state.callCount).toBe(3);
+  expect(requests[1]).toContain(constraint);
+  expect(requests[1]).not.toContain(input.continuations[0]?.prompt);
+  expect(requests[2]).toContain("retained-summary-marker");
+  expect(requests[2]).toContain(input.continuations[0]?.prompt);
+  expect(requests[2]).not.toContain("first checkpoint");
+  expect(JSON.stringify(outcome.trace)).toContain("first checkpoint");
+  expect(JSON.stringify(outcome.trace)).toContain(constraint);
+  expect(JSON.stringify(outcome.trace)).toContain("retained-summary-marker");
+  const model = faux.getModel();
+  const summary = complete.mock.calls[kind === "pal" ? 0 : 1];
+  expect(summary?.[0]).toMatchObject({ id: model.id, provider: model.provider });
+  expect(summary?.[2]).toMatchObject({
+    maxTokens: Math.min(
+      Math.floor(0.8 * DEFAULT_COMPACTION_POLICY.reserveTokens),
+      model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+    ),
+    cacheRetention: "none",
+  });
+  expect(summary?.[2]?.reasoning).toBeUndefined();
+});
+
+it.each(["pal", "baseline"])("%s charges a compaction checkpoint to the original turn allowance", async (kind) => {
+  const { input, faux, harness } = await compactionAgent(kind);
+  expect(await harness.run({ ...input, budget: { seconds: 20, turns: 2 } })).toMatchObject({
+    status: "budget_exceeded",
+    turns: 2,
+  });
+  expect(faux.state.callCount).toBe(2);
+});
+
+it("allows a native no-op checkpoint without pretending a summary request occurred", async () => {
+  const { input, faux, harness } = await agent("pal");
+  faux.setResponses([fauxAssistantMessage("small checkpoint"), fauxAssistantMessage("continued")]);
+  expect(
+    await harness.run({ ...input, continuations: input.continuations.map((next) => ({ ...next, compact: true })) }),
+  ).toMatchObject({ status: "completed", turns: 2 });
+  expect(faux.state.callCount).toBe(2);
+});
+
+it.each(["pal", "baseline"])("%s stops when a checkpoint summary fails", async (kind) => {
+  const { input, faux, harness } = await compactionAgent(kind);
+  faux.setResponses([
+    fauxAssistantMessage("first checkpoint"),
+    fauxAssistantMessage("", { stopReason: "error", errorMessage: "fixture summary rejected (400)" }),
+    fauxAssistantMessage("must not run"),
+  ]);
+  const outcome = await harness.run(input);
+  expect(outcome).toMatchObject({ status: "harness_error", turns: 2, interventions: 0 });
+  expect(outcome.error).toContain("fixture summary rejected (400)");
+  expect(faux.state.callCount).toBe(2);
+});
+
+it.each(["pal", "baseline"])("%s retains the original deadline through a checkpoint summary", async (kind) => {
+  const { input, faux, harness } = await compactionAgent(kind);
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  faux.setResponses([
+    fauxAssistantMessage("first checkpoint"),
+    () => {
+      now += 20_000;
+      return fauxAssistantMessage("summary after the original deadline");
+    },
+    fauxAssistantMessage("must not run"),
+  ]);
+  expect(await harness.run({ ...input, budget: { seconds: 10, turns: 3 } })).toMatchObject({
+    status: "budget_exceeded",
+    turns: 2,
+    interventions: 0,
+  });
+  expect(faux.state.callCount).toBe(2);
 });

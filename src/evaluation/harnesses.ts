@@ -18,6 +18,7 @@ import type {
 import {
   type ConversationId,
   type Cursor,
+  DEFAULT_COMPACTION_POLICY,
   type EntryRecord,
   type JsonObject,
   UsageDoc,
@@ -134,8 +135,13 @@ export async function palTrace(pal: Pal, root: ConversationId) {
 export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "approve-all" = "full"): Harness {
   return {
     id: "pal",
-    version: 2,
-    configuration: { model, approvals, tools: "Pal's selected capabilities through codemode" },
+    version: 3,
+    configuration: {
+      model,
+      approvals,
+      tools: "Pal's selected capabilities through codemode",
+      compaction: { method: "pi-native", policy: { ...DEFAULT_COMPACTION_POLICY } },
+    },
     matched: true,
     async run({ workspace, prompt, continuations = [], runId, budget }) {
       const expires = Date.now() + budget.seconds * 1000;
@@ -176,6 +182,18 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
             });
         }, 200);
       }
+      // A completed summary task may still have a queued write; settle it before delivering the next prompt.
+      const compact = async () => {
+        const receipt = await pal.harness.waitForTask(await conversation.compact(undefined, context), context);
+        const outcome = receipt.state.outcome;
+        if (outcome.status === "failed") throw new Error(`compaction checkpoint failed: ${outcome.error.message}`);
+        if (outcome.status !== "completed") throw new Error(`compaction checkpoint ${outcome.status}`);
+        if (outcome.result.submissionId === undefined) return false;
+        const summary = await pal.harness.submission(outcome.result.submissionId, context);
+        if (summary === undefined) throw new Error("compaction summary is missing");
+        if ((await summary.wait(context)).status !== "done") throw new Error("compaction summary was not placed");
+        return true;
+      };
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         await setEvaluationBudget(pal.harness, chat.conversationId, budget.turns, expires, context);
@@ -183,7 +201,16 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
           timer = setTimeout(() => done("timeout"), Math.max(0, expires - Date.now()));
         });
         let stage = 0;
-        for (const input of [{ prompt, owner: false }, ...continuations]) {
+        for (const input of [{ prompt, owner: false, compact: false }, ...continuations]) {
+          if (input.compact) {
+            const placed = await Promise.race([compact(), deadline]);
+            if (placed === "timeout" || Date.now() >= expires) {
+              status = "budget_exceeded";
+              await conversation.abort(context, { background: true });
+              break;
+            }
+            if (await evaluationBudgetExceeded(pal.harness, chat.conversationId, context)) break;
+          }
           if (input.owner) interventions++;
           await pal.chats.submit(chat.id, `eval-input-${request}-${stage++}`, { text: input.prompt }, context);
           if ((await Promise.race([conversation.waitForIdle(context), deadline])) === "timeout") {
@@ -291,10 +318,19 @@ export function baselineHarness(
   model: Parameters<Pal["models"]["completeSimple"]>[0],
   choice: ModelChoice,
 ): Harness {
+  const summaryMaxTokens = Math.min(
+    Math.floor(0.8 * DEFAULT_COMPACTION_POLICY.reserveTokens),
+    model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+  );
   return {
     id: "baseline-loop",
-    version: 2,
-    configuration: { model: choice, approvals: "full", tools: TOOLS.map((tool) => tool.name) },
+    version: 3,
+    configuration: {
+      model: choice,
+      approvals: "full",
+      tools: TOOLS.map((tool) => tool.name),
+      compaction: { method: "whole-active-context", maxTokens: summaryMaxTokens, cacheRetention: "none" },
+    },
     matched: true,
     async run({ workspace, prompt, continuations = [], budget }) {
       const root = await realpath(workspace);
@@ -322,14 +358,53 @@ export function baselineHarness(
       const system =
         "You are a coding agent working in a repository. Use the tools to inspect and change files and to run " +
         "commands. When the task is done, reply with a short summary and no tool calls.";
-      const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
+      const messages: Message[] = [];
+      const trace: Message[] = [];
+      const record = (message: Message) => {
+        messages.push(message);
+        trace.push(message);
+      };
+      record({ role: "user", content: prompt, timestamp: Date.now() });
       const assistant: AssistantMessage[] = [];
       let toolCalls = 0,
         failedToolCalls = 0,
         interventions = 0,
         stage = 0;
+      const compact = async () => {
+        if (assistant.length >= budget.turns || Date.now() >= deadline) return false;
+        const source = messages.map((message) =>
+          message.role === "assistant"
+            ? { ...message, content: message.content.filter((block) => block.type !== "thinking") }
+            : message,
+        );
+        const instruction: Message = {
+          role: "user",
+          content: `Summarize this coding conversation, preserving its goal, constraints, decisions, exact file paths, errors and unfinished work. Do not continue the task.\n\n${JSON.stringify(source)}`,
+          timestamp: Date.now(),
+        };
+        const reply = await models.completeSimple(
+          model,
+          { systemPrompt: "You summarize coding conversations for later continuation.", messages: [instruction] },
+          {
+            signal,
+            maxTokens: summaryMaxTokens,
+            cacheRetention: "none",
+            ...(choice.effort === "off" ? {} : { reasoning: choice.effort }),
+          },
+        );
+        assistant.push(reply);
+        trace.push(instruction, reply);
+        if (signal.aborted || Date.now() >= deadline) return false;
+        if (reply.stopReason === "error" || reply.stopReason === "aborted")
+          throw new Error(`compaction checkpoint failed: ${reply.errorMessage ?? "the summary request failed"}`);
+        const summary = reply.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+        if (summary.trim() === "") throw new Error("the summary request returned no text");
+        messages.length = 0;
+        record({ role: "user", content: `Earlier conversation summary:\n${summary}`, timestamp: Date.now() });
+        return true;
+      };
       try {
-        for (let turn = 0; turn < budget.turns; turn++) {
+        while (assistant.length < budget.turns) {
           if (Date.now() >= deadline) return outcome("budget_exceeded", null);
           const reply = await models.completeSimple(
             model,
@@ -337,7 +412,7 @@ export function baselineHarness(
             { signal, ...(choice.effort === "off" ? {} : { reasoning: choice.effort }) },
           );
           assistant.push(reply);
-          messages.push(reply);
+          record(reply);
           if (signal.aborted) return outcome("budget_exceeded", null);
           if (reply.stopReason === "error" || reply.stopReason === "aborted")
             return outcome("harness_error", reply.errorMessage ?? "the model request failed");
@@ -345,15 +420,16 @@ export function baselineHarness(
           if (calls.length === 0) {
             const next = continuations[stage++];
             if (next === undefined) return outcome("completed", null);
+            if (next.compact && !(await compact())) return outcome("budget_exceeded", null);
             if (next.owner) interventions++;
-            messages.push({ role: "user", content: next.prompt, timestamp: Date.now() });
+            record({ role: "user", content: next.prompt, timestamp: Date.now() });
           }
           for (const call of calls) {
             signal.throwIfAborted();
             const result = await execute(tools, call);
             toolCalls++;
             if (result.isError) failedToolCalls++;
-            messages.push(result);
+            record(result);
           }
         }
         return outcome("budget_exceeded", null);
@@ -372,7 +448,7 @@ export function baselineHarness(
           failedToolCalls,
           interventions,
           usage: sumUsage(assistant, choice.provider),
-          trace: messages,
+          trace,
         };
       }
     },

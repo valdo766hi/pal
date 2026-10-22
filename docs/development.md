@@ -269,9 +269,18 @@ zero failures. Pal's trace names each conversation and owner edge and includes r
 not just the current prompt. Export is limited to 256 conversations, 32,768 entries and 64 MiB; exceeding a limit
 fails the run rather than silently dropping evidence. Treat these complete retained histories as private artifacts.
 Results are only comparable between like model/settings/budget rows.
-The four-task corpus includes two-phase continuation, not a long-horizon/compaction/restart benchmark;
-those scenarios remain required for #26/#27. Ordinary checks use scripted fake models; those reports say
-so and are not model or harness quality results. Real-provider results are owner-run.
+Version 3 of both harness adapters supports task-requested compaction checkpoints within the original deadline
+and turn allowance. Summaries use the selected model/effort, Pi-default output-token cap and no cache retention.
+Pal uses native prefix compaction and waits for its summary write before the next input; a short native history can
+legitimately be a no-op. The baseline summarizes its whole active JSON transcript, omitting thinking, while keeping
+the original audit history. These context policies are recorded harness differences, not identical input sequences.
+Inspect the trace for an actual summary: a requested checkpoint alone does not prove one occurred.
+
+The five-task initial corpus includes an owner-correction variant with a requested checkpoint and the same frozen
+snapshot/independent cases, so earlier rounding constraints must still pass after the correction. This is a protocol
+and grading fixture, not a representative long-horizon/restart or compaction-quality benchmark; those remain
+required for #26/#27. Ordinary checks use scripted fake models; those reports say so and are not model or harness
+quality results. Real-provider results are owner-run.
 
 The grading controls check correct, buggy, forged, hanging and flooding candidates, task starts and reference
 solutions. The owner-correction control requires both the new cancellation rule and every original rounding case:
