@@ -2491,6 +2491,8 @@ describe("Pal in a browser", () => {
     await view.keyboard.press("ArrowDown");
     expect(await choice(/^OpenRouter/).isChecked()).toBe(true);
     await view.keyboard.press("Tab");
+    expect(await focused(view.getByRole("button", { name: "Set up later" }))).toBe(true);
+    await view.keyboard.press("Tab");
     expect(await focused(next)).toBe(true);
     await view.keyboard.press("Enter");
     await heading("Connect OpenRouter").waitFor();

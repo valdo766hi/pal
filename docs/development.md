@@ -113,8 +113,10 @@ No host policy is disabled. Nix may reuse an identical derivation; a successful 
 necessarily a fresh runtime execution. Both full and portable checks repeat the PTY suite with readline-enabled
 Bash, testing bracketed paste on/off without assuming a newline immediately precedes command output.
 
-The macOS job also runs independent chat UI, browser DOM-policy and filesystem-watcher fixtures (loading,
-failure/retry, navigation, cross-provider conflicts, bounded rendering, sensitive fields and native file changes).
+The macOS job also runs independent chat UI, provider onboarding, browser DOM-policy and filesystem-watcher
+fixtures (loading, failure/retry, navigation, cross-provider conflicts, bounded rendering, sensitive fields and
+native file changes). Onboarding uses fresh stores and loopback providers for ChatGPT, API-key, keyless endpoint,
+skip/resume, explicit-default and interruption/restart controls at desktop and phone widths.
 One test file runs at a time to retain the single-browser resource bound. Its artifact is built by Nix, then run
 on the native host: Chromium's
 macOS sandbox cannot nest inside Nix's build sandbox. Chromium's own sandbox stays enabled; production browser
@@ -130,15 +132,14 @@ and fixture screenshots; zero tests, skips and todos fail the gate. The DOM-poli
 pages; it proves neither production browser confinement nor real-site credential recognition. The watcher case
 uses the pinned native fff through `ProjectSearch`, recording real notifications and checking create/modify/rename/
 remove outcomes, Unicode paths, UTF-8 match ranges and index release. It does not inject events; simulated gap
-controls remain separate. These are chat/DOM/watcher subsets, not a full macOS browser-runtime, onboarding or
+controls remain separate. These are chat/onboarding/DOM/watcher subsets, not a full macOS browser-runtime or
 release-security gate.
 
 This is an initial CI foundation for [#15](https://github.com/valdo766hi/pal/issues/15), not full platform
 acceptance. Build logs distinguish prerequisite errors from assertions; a failure before a suite runs
 leaves that coverage unexecuted, not passed. CI retains commit/tree/OS identity, bounded counts and macOS UI-fixture
-screenshots; it does not upload credentials, full transcripts or live runtime data. Independent onboarding fixtures,
-sanitized rendered failure artifacts and host-scope security/release gates remain
-required work. The Nix e2e suite's user-systemd-scope skip is also unexecuted coverage.
+screenshots; it does not upload credentials, full transcripts or live runtime data. Sanitized rendered failure
+artifacts and host-scope security/release gates remain required work. The Nix e2e suite's user-systemd-scope skip is also unexecuted coverage.
 
 ### Packaged startup measurements
 

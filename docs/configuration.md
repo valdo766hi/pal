@@ -111,6 +111,10 @@ Onboarding then walks you through four steps:
 3. **Internet tools** offers the Exa and Context7 presets, which you can enable now or later.
 4. **Create a project**, either a Pal-managed folder or an existing folder on the server.
 
+**Set up later** skips provider/model setup without choosing a default or enabling a provider. This choice survives
+reloads and restarts. Create a project now and return through **Connect** or Settings → Models; Send stays disabled
+until you explicitly choose a usable model.
+
 Setup makes no model request. If the chosen provider or model later becomes unavailable, Pal stops sending instead
 of switching to another one.
 

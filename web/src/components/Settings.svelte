@@ -157,7 +157,8 @@
         <h2 class="h2">Models</h2>
         <p class="sub">
           Connect the providers you want to use. Each is billed as shown, and Pal never falls back from one provider to
-          another.
+          another. Sending shares your message and selected conversation history with the provider you choose, or its
+          configured compatible endpoint. Chat history is not sent until you send a message.
         </p>
         {#if chosen !== null}
           <p class="setd">

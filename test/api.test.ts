@@ -133,6 +133,45 @@ async function putBytes(base: string, cookie: string, id: string, bytes: Uint8Ar
 }
 
 describe("API", () => {
+  it("persists owner-only model setup deferral without selecting a provider or changing credentials", async () => {
+    const { api, pal, dataRoot, fixture, base, cookie } = await start();
+    expect((await api("GET", "model-setup")).status).toBe(401);
+    expect((await api("PUT", "model-setup", { deferred: true })).status).toBe(401);
+    await api("POST", "setup", { token: pal.owner.setupToken, passphrase: "correct horse battery" });
+    expect(await api("GET", "model-setup")).toEqual({ status: 200, body: { deferred: false } });
+    const providers = await pal.providers.list();
+    expect((await api("PUT", "model-setup", { deferred: "yes" })).status).toBe(400);
+    expect((await api("PUT", "model-setup", { deferred: true, provider: "openai" })).status).toBe(400);
+    expect(
+      (
+        await fetch(`${base}/api/model-setup`, {
+          method: "PUT",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify({ deferred: true }),
+        })
+      ).status,
+    ).toBe(403);
+    expect((await api("GET", "model-setup")).body).toEqual({ deferred: false });
+    for (let i = 0; i < 2; i++)
+      expect(await api("PUT", "model-setup", { deferred: true })).toEqual({ status: 200, body: { deferred: true } });
+    expect(await pal.settings.defaultModel()).toBeUndefined();
+    expect(await pal.providers.list()).toEqual(providers);
+    expect(await pal.chatgpt.account()).toBeUndefined();
+    expect(fixture.authorizations).toEqual([]);
+    expect(fixture.tokenRequests).toEqual([]);
+    expect(fixture.apiRequests).toEqual([]);
+    await pal.close();
+    const reopened = await openPal(
+      { dataRoot, installRoot: "/nonexistent-install", endpoints: fixture.endpoints },
+      context,
+    );
+    cleanups.push(() => reopened.close());
+    expect(
+      await reopened.store.database.get("SELECT value FROM pal_settings WHERE key = 'setup:model-deferred'"),
+    ).toEqual({ value: "true" });
+    expect(await reopened.settings.defaultModel()).toBeUndefined();
+  });
+
   it("keeps release observation and exact-digest consent owner-only and validates before forwarding private IPC", async () => {
     const control = fakeReleaseControl();
     const { api, pal, base, cookie } = await start(undefined, control.access);
@@ -1008,7 +1047,9 @@ describe("API", () => {
     const project = (await api("POST", "projects", { requestId: "project-request-1", name: "Notes" })).body.project;
     const unset = (await api("POST", "chats", { requestId: "chat-request-0", projectId: project.id })).body.chat;
     expect((await api("GET", `chats/${unset.id}`)).body.model).toBeNull();
+    expect((await api("PUT", "model-setup", { deferred: true })).body).toEqual({ deferred: true });
     expect((await api("PUT", "default-model", { provider: "openai", model: "gpt-5.5" })).status).toBe(200);
+    expect((await api("GET", "model-setup")).body).toEqual({ deferred: false });
     expect((await api("GET", "chatgpt")).body).toMatchObject({
       model: "gpt-5.5",
       default: { provider: "openai", modelId: "gpt-5.5" },

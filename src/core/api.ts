@@ -113,6 +113,7 @@ const ProgramApproval = Type.Object(
 );
 const KeyBody = Type.Object({ key: Type.String({ maxLength: 4096 }) }, { additionalProperties: false });
 const Toggle = Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false });
+const ModelSetup = Type.Object({ deferred: Type.Boolean() }, { additionalProperties: false });
 const ToolChoice = Type.Object(
   { tools: Type.Array(Type.String({ maxLength: 200 }), { maxItems: 128 }) },
   { additionalProperties: false },
@@ -371,6 +372,12 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       await pal.owner.signOut(cookie(request, SESSION_COOKIE));
       response.setHeader("set-cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
       return send(200, { signedIn: false });
+    }
+
+    if (resource === "model-setup" && path.length === 1 && (method === "GET" || method === "PUT")) {
+      if (method === "PUT")
+        await pal.settings.setModelSetupDeferred(validate(ModelSetup, await readJson(request)).deferred);
+      return send(200, { deferred: await pal.settings.modelSetupDeferred() });
     }
 
     if (resource === "releases") {

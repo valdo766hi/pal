@@ -31,7 +31,7 @@ writeShellApplication {
     status=0
     node node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts \
       test/e2e/chat-settings.test.ts test/e2e/browser-page.test.ts \
-      test/e2e/search-watch.test.ts --maxWorkers 1 \
+      test/e2e/search-watch.test.ts test/e2e/onboarding.test.ts --maxWorkers 1 \
       --reporter=default --reporter=json --outputFile="$output/results.json" || status=$?
     node --input-type=module - "$output" <<'JS'
     import assert from "node:assert/strict";

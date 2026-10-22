@@ -128,6 +128,9 @@ export type Settings = {
   /** The model new chats start with: the ChatGPT default unless the owner chose another provider's model. */
   defaultModel(): Promise<ModelRef | undefined>;
   setDefaultModel(model: ModelRef): Promise<void>;
+  /** Deferring onboarding never chooses a model or grants permission to send. */
+  modelSetupDeferred(): Promise<boolean>;
+  setModelSetupDeferred(deferred: boolean): Promise<void>;
 };
 
 // Subscription mode never reads the process environment, so an ambient OPENAI_API_KEY cannot be picked up.
@@ -458,7 +461,10 @@ export async function openPal(
         database.transaction(async (tx) => {
           await save(provider === CHATGPT_PROVIDER ? "model" : "default_model", modelId, tx);
           await save("default_provider", provider, tx);
+          await save("setup:model-deferred", "false", tx);
         }),
+      modelSetupDeferred: async () => (await setting("setup:model-deferred")) === "true",
+      setModelSetupDeferred: (deferred) => save("setup:model-deferred", String(deferred)),
     };
     changes = new Changes(database, openedProjects, options.dataRoot, locks, openedWorkspaces);
     const owner = new Owner(database);
