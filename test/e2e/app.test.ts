@@ -14,6 +14,7 @@ import { createApi } from "../../src/core/api.ts";
 import { openPal, type Pal } from "../../src/core/app.ts";
 import { browserRuntime } from "../../src/core/browser.ts";
 import { startServer } from "../../src/core/server.ts";
+import { chatDiagnostics } from "../../src/core/diagnostics.ts";
 import { startMcpFixture } from "../fixtures/mcp-server.ts";
 import { startCachedMcp } from "../fixtures/cached-mcp.ts";
 import { STDIO_FIXTURE } from "../fixtures/stdio-server.ts";
@@ -40,6 +41,7 @@ let page: Page;
 let chatUrl: string;
 const cleanups: (() => Promise<unknown>)[] = [];
 const releases = fakeReleaseControl();
+const transport: { path: string; status: number }[] = [];
 
 beforeAll(async () => {
   fixture = await startOpenAIFixture();
@@ -95,6 +97,12 @@ beforeAll(async () => {
   browser = await chromium.launch({ headless: true, chromiumSandbox: true });
   cleanups.push(() => browser.close());
   page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  page.on("response", (response) => {
+    const url = new URL(response.url());
+    if (url.origin !== base || !url.pathname.endsWith("/inputs")) return;
+    transport.push({ path: url.pathname, status: response.status() });
+    if (transport.length > 64) transport.shift();
+  });
   // A private-network HTTP page lacks randomUUID, but must still be able to create projects and send messages.
   await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: undefined }));
   if (shots !== undefined) await mkdir(shots, { recursive: true });
@@ -1306,9 +1314,22 @@ describe("Pal in a browser", () => {
     await expect.poll(() => pill.textContent()).toContain("Full access");
     const before = await page.getByRole("group", { name: "Approval request" }).count();
     fixture.behavior.script = 'return await tools.shell_run({ command: "printf full >> full.txt", timeout: 2 });';
+    const requestsBeforeFull = fixture.apiRequests.length;
     await page.getByLabel("Message").fill("run without asking");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect.poll(() => readFile(join(project.root, "full.txt"), "utf8").catch(() => "")).toBe("full");
+    try {
+      await expect.poll(() => readFile(join(project.root, "full.txt"), "utf8").catch(() => "")).toBe("full");
+    } catch (failure) {
+      const chat = await pal.chats.get(page.url().split("/chat/")[1] ?? "");
+      const diagnostics = chat === undefined ? null : await chatDiagnostics(pal, chat.id, chat.conversationId);
+      const requests = fixture.apiRequests.slice(requestsBeforeFull).map(({ path, body }) => ({
+        path,
+        tail: Array.isArray(body.input)
+          ? body.input.slice(-3).map((item: { type?: string; role?: string }) => ({ type: item.type, role: item.role }))
+          : null,
+      }));
+      throw new Error(`Approval fixture: ${JSON.stringify({ transport, diagnostics, requests })}`, { cause: failure });
+    }
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     expect(await page.getByRole("group", { name: "Approval request" }).count()).toBe(before);
     for (const width of [1440, 768, 390]) {

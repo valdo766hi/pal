@@ -141,6 +141,62 @@ async function screenshot(page: Page, name: string) {
 }
 
 describe("saved chat settings", () => {
+  it.each([
+    { width: 1440, busy: false },
+    { width: 390, busy: false },
+    { width: 1440, busy: true },
+    { width: 390, busy: true },
+  ])("keeps a pressed send when run state changes at $width px from busy=$busy", async ({ width, busy }) => {
+    const { page, base, saved, provider, errors } = await setup(width);
+    await page.addInitScript((id) => {
+      const Native = window.EventSource;
+      window.EventSource = class extends Native {
+        constructor(url: string | URL, options?: EventSourceInit) {
+          super(url, options);
+          if (new URL(url, location.href).pathname !== `/api/chats/${id}/events`) return;
+          const host = window as typeof window & { runEvent?: (type: string) => void };
+          host.runEvent = (type) => this.dispatchEvent(new MessageEvent("event", { data: JSON.stringify({ type }) }));
+        }
+      };
+    }, saved.id);
+    const inputs: { requestId: string; text: string; whenBusy: string }[] = [];
+    await page.route(`**/api/chats/${saved.id}/inputs`, async (route) => {
+      const input = route.request().postDataJSON() as (typeof inputs)[number];
+      inputs.push(input);
+      await route.fulfill({ json: { admission: { chatId: saved.id, requestId: input.requestId, submissionId: 1 } } });
+    });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
+    const publish = (running: boolean) =>
+      page.evaluate((running) => {
+        const host = window as typeof window & { runEvent?: (type: string) => void };
+        if (host.runEvent === undefined) throw new Error("missing fixture stream");
+        host.runEvent(running ? "run_start" : "run_end");
+      }, running);
+    if (busy) await publish(true);
+    await page.getByLabel("Message", { exact: true }).fill("Keep this pointer submission");
+    const button = page.getByRole("button", { name: busy ? "Queue" : "Send", exact: true });
+    await expect.poll(() => button.isEnabled()).toBe(true);
+    const box = await button.boundingBox();
+    if (box === null) throw new Error("missing send button bounds");
+    await page.mouse.move(box.x + box.width - 12, box.y + box.height / 2);
+    await page.mouse.down();
+    await publish(!busy);
+    const changed = page.getByRole("button", { name: busy ? "Send" : "Queue", exact: true });
+    await changed.waitFor();
+    const after = await changed.boundingBox();
+    await page.mouse.up();
+    try {
+      await expect.poll(() => inputs.length).toBe(1);
+    } catch (cause) {
+      throw new Error(`Pressed send: ${JSON.stringify({ box, after })}`, { cause });
+    }
+    expect(inputs[0]).toMatchObject({ text: "Keep this pointer submission", whenBusy: "followUp" });
+    await expect.poll(() => page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
   it.each([1440, 390])("waits for the saved provider before any model change or input at %s px", async (width) => {
     const { page, base, saved, provider, errors, mutations } = await setup(width);
     const held = await holdMetadata(page, saved.id);

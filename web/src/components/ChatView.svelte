@@ -1144,17 +1144,18 @@
             {@render modelControl()}
             {#if stream?.running}{@render busySwitch()}{/if}
           {/if}
-          {#if stream?.running}
-            <button class="b p send busy" onclick={send} disabled={!canSend}>
-              <Icon name={writing.whenBusy === "steer" ? "steer" : "send"} />{writing.whenBusy === "steer"
-                ? "Steer"
-                : "Queue"}
-            </button>
-          {:else}
-            <button class="b p send" aria-label="Send" title="Send" onclick={send} disabled={!canSend}>
-              <Icon name="send" size={phone ? 18 : 15} />
-            </button>
-          {/if}
+          <button
+            class={["b p send", stream?.running && "busy"]}
+            aria-label={stream?.running ? undefined : "Send"}
+            title={stream?.running ? undefined : "Send"}
+            onclick={send}
+            disabled={!canSend}
+          >
+            <Icon
+              name={stream?.running && writing.whenBusy === "steer" ? "steer" : "send"}
+              size={stream?.running ? 16 : phone ? 18 : 15}
+            />{#if stream?.running}{writing.whenBusy === "steer" ? "Steer" : "Queue"}{/if}
+          </button>
         </div>
       </div>
     </div>
@@ -1670,6 +1671,7 @@
   .tools {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 2px;
     flex-wrap: wrap;
   }
