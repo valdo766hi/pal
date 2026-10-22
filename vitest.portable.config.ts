@@ -6,10 +6,9 @@ export default mergeConfig(
   defineConfig({
     test: {
       exclude: [
-        // These suites require immutable Nix programs or Linux release-lock/source-confinement primitives.
+        // These suites require immutable Nix programs or the protected release lifecycle.
         "test/mcp-local.test.ts",
         "test/mcp-stdio.test.ts",
-        "test/release-policy.test.ts",
         "test/release-state.test.ts",
       ],
     },

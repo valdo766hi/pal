@@ -1,7 +1,21 @@
-import { chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+  type FileHandle,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { privateReleaseDirectory, readReleaseJson, releaseLock, writeReleaseJson } from "../src/core/release-files.ts";
 import {
   candidateFiles,
@@ -14,6 +28,7 @@ import {
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 async function directory() {
@@ -39,7 +54,7 @@ async function source() {
   };
 }
 
-describe.skipIf(process.platform !== "linux")("controlled release policy", () => {
+describe("controlled release policy", () => {
   it("ignores tracked non-build skill links but refuses linked, missing, private or conflicted build inputs", () => {
     const expected = ["package.json", "web/src/app.css"];
     const entry = (path: string, mode = "100644", stage = "0") => `${mode} ${"0".repeat(40)} ${stage}\t${path}\0`;
@@ -154,6 +169,21 @@ describe.skipIf(process.platform !== "linux")("controlled release policy", () =>
         snapshot.files.map((file) => file.path),
       ),
     ).rejects.toThrow(/too large/);
+  });
+
+  it("rejects a source descriptor moved outside its admitted directory during the read", async () => {
+    const { root } = await source();
+    const outside = await directory();
+    const probe = await open(join(root, "web/src/app.css"), "r");
+    const prototype = Object.getPrototypeOf(probe) as FileHandle;
+    const read = prototype.read;
+    await probe.close();
+    vi.spyOn(prototype, "read").mockImplementationOnce(async function (this: FileHandle, ...args) {
+      await rename(join(root, "web"), join(outside, "moved"));
+      return Reflect.apply(read, this, args) as ReturnType<FileHandle["read"]>;
+    });
+    await expect(readSource(root, ["web/src/app.css"])).rejects.toThrow(/confined file descriptor/);
+    expect(await readFile(join(outside, "moved/src/app.css"), "utf8")).toBe("body { color: white; }");
   });
 
   it("keeps JSON private and atomic, and refuses linked, corrupt or oversized metadata", async () => {

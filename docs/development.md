@@ -89,10 +89,11 @@ nix build .#checks.aarch64-darwin.portable
 pnpm exec vitest run --config vitest.portable.config.ts
 ```
 
-The subset explicitly excludes `mcp-local`, `mcp-stdio`, `release-policy` and `release-state`: those suites
-need immutable Nix programs or Linux release-lock/source-confinement primitives. It fails on zero tests,
-skips or todos, and exports only test counts in `summary.json`. The full `tests` check is unchanged and
-still runs these suites on Linux. A separate Ubuntu 22.04 job runs all five packaged checks above: its
+The subset explicitly excludes `mcp-local`, `mcp-stdio` and `release-state`: those suites need immutable
+Nix programs or the protected release lifecycle. Release-policy, native descriptor-confinement and
+inherited-lock controls run on both targets; they do not enable the full macOS release lifecycle.
+The subset fails on zero tests, skips or todos, and exports only test counts in `summary.json`.
+The full `tests` check still runs all suites on Linux. A separate Ubuntu 22.04 job runs all five packaged checks above: its
 user-namespace support lets Chromium keep its sandbox, unlike the restricted Ubuntu 24.04 hosted image.
 No host policy is disabled. Nix may reuse an identical derivation; a successful build request is not
 necessarily a fresh runtime execution. Both full and portable checks repeat the PTY suite with readline-enabled
