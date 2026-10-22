@@ -4,7 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { grade } from "./grade.ts";
-import { checkout, inventory, slug } from "./tasks.ts";
+import { checkout, continuedCheckout, inventory, slug } from "./tasks.ts";
 
 const output = process.argv[2];
 const malformed = process.argv[3];
@@ -50,6 +50,8 @@ for (const [task, name, passed] of [
   [inventory, "inventory-solved", true],
   [slug, "slug", false],
   [slug, "slug-fixed", true],
+  [continuedCheckout, "fixed", false],
+  [continuedCheckout, "continued-fixed", true],
 ] as const) {
   const result = await grade(join(fixtures, name), task);
   assert.equal(result.passed, passed, name);
@@ -59,7 +61,7 @@ for (const [task, name, passed] of [
       result.cases.some((test) => test.id === "unchanged:src" && test.passed),
       name,
     );
-  await writeFile(join(output, `${name}.json`), `${JSON.stringify(result, null, 2)}\n`);
+  await writeFile(join(output, `${task.id}-${name}.json`), `${JSON.stringify(result, null, 2)}\n`);
   checks++;
 }
 assert.equal(slug.split, "held-out");

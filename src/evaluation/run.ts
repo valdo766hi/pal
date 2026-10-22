@@ -79,7 +79,13 @@ async function runOnce(
   const started = performance.now();
   let outcome: RunOutcome;
   try {
-    outcome = await harness.run({ workspace, prompt: task.prompt, runId, budget: options.budget });
+    outcome = await harness.run({
+      workspace,
+      prompt: task.prompt,
+      continuations: task.continuations ?? [],
+      runId,
+      budget: options.budget,
+    });
   } catch (failure) {
     outcome = {
       status: "harness_error",

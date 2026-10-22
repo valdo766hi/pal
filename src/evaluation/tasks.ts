@@ -1,5 +1,6 @@
 // Versioned evaluation tasks. Each names its frozen starting snapshot under test/fixtures/evaluation and the checks
 // its independent grader runs; held-out tasks are never used while developing Pal's prompts or tools.
+export type Continuation = { readonly prompt: string; readonly owner: boolean };
 type Common = {
   readonly id: string;
   readonly version: number;
@@ -8,6 +9,7 @@ type Common = {
   /** Directory under test/fixtures/evaluation holding the starting repository. */
   readonly snapshot: string;
   readonly prompt: string;
+  readonly continuations?: readonly Continuation[];
 };
 /** Graded by running the candidate's program on each case's JSON input. */
 export type ProgramTask = Common & {
@@ -100,4 +102,35 @@ export const slug = {
   ],
 } as const satisfies ProgramTask;
 
-export const TASKS: readonly Task[] = [checkout, inventory, slug];
+export const continuedCheckout = {
+  ...checkout,
+  id: "checkout-owner-correction",
+  categories: ["multi-file", "continuation", "owner-intervention"],
+  continuations: [
+    {
+      prompt:
+        "Owner correction: omit lines with cancelled: true from both arrays and totals. " +
+        "Keep the earlier rounding and CLI requirements. Check the combined behavior before finishing.",
+      owner: true,
+    },
+  ],
+  cases: [
+    ...checkout.cases,
+    {
+      id: "cancelled-between-rounded-lines",
+      input: [
+        { price: "1.005", quantity: 2 },
+        { price: "20", quantity: 3, cancelled: true },
+        { price: "0.105", quantity: 3 },
+      ],
+      expected: { unitCents: [101, 11], totalCents: 235 },
+    },
+    {
+      id: "all-cancelled",
+      input: [{ price: "2.675", quantity: 3, cancelled: true }],
+      expected: { unitCents: [], totalCents: 0 },
+    },
+  ],
+} as const satisfies ProgramTask;
+
+export const TASKS: readonly Task[] = [checkout, inventory, slug, continuedCheckout];

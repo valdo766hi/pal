@@ -1,5 +1,6 @@
 import type { Context } from "@earendil-works/chord";
 import {
+  CompactionTask,
   defineDoc,
   defineExtension,
   GenerationTask,
@@ -43,12 +44,24 @@ export async function evaluationBudgetExceeded(harness: Harness, conversation: C
   return (await harness.snapshot(Budget, conversation, context))?.exceeded === true;
 }
 
+export async function evaluationBudgetTurns(harness: Harness, conversation: ConversationId, context: Context) {
+  return (await harness.snapshot(Budget, conversation, context))?.turns ?? null;
+}
+
 /** Composed into the mandatory context extension so reopening an evaluation store cannot drop its budget. */
 export function evaluationBudget(harness: () => Harness) {
   async function allow(api: HookApi, turn: boolean, context: Context): Promise<boolean> {
-    if ((await api.snapshot(Budget, api.conversationId, context)) === undefined) return true;
+    let conversation = api.conversationId;
+    if ((await api.snapshot(Budget, conversation, context)) === undefined) {
+      const parent = await harness().commit(
+        async (tx) => (await tx.conversation(conversation))?.owner?.conversationId,
+        context,
+      );
+      if (parent === undefined || (await api.snapshot(Budget, parent, context)) === undefined) return true;
+      conversation = parent;
+    }
     return harness().commit(async (tx) => {
-      const budget = await tx.doc(Budget, api.conversationId);
+      const budget = await tx.doc(Budget, conversation);
       if (
         budget.exceeded ||
         Date.now() >= budget.deadline ||
@@ -67,6 +80,11 @@ export function evaluationBudget(harness: () => Harness) {
   return defineExtension({
     name: "pal.evaluation-budget",
     hooks: [
+      // Native summary requests bypass the generation request hook.
+      hook(CompactionTask, {
+        beforeCompact: async (_compaction, api, context) =>
+          (await allow(api, true, context)) ? undefined : { decline: true },
+      }),
       hook(GenerationTask, {
         beforeRequest: async (_request, api, context) => {
           if (await allow(api, true, context)) return;

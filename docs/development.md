@@ -215,8 +215,11 @@ macOS support. Service installation or host security changes require a separatel
 
 Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting repository under
 `test/fixtures/evaluation` and an independent grader: `checkout-rounding` (development; bug fix across two files),
-`module-inventory` (development; repository understanding, answered in a file while sources stay unchanged) and
-`slug-test-repair` (held out; graded on cases the repository's own test does not contain).
+`module-inventory` (development; repository understanding, answered in a file while sources stay unchanged),
+`slug-test-repair` (held out; graded on cases the repository's own test does not contain), and
+`checkout-owner-correction` (development; a later owner correction must preserve the earlier rounding rules).
+Continuations are delivered after an idle checkpoint in the same conversation/history, not concatenated into the
+initial prompt. Scripted owner corrections count as interventions and remain visible in the trace.
 
 ```sh
 nix build --out-link evaluate .#evaluate
@@ -230,17 +233,24 @@ configured; a running Pal (such as your normal one) holds its store and refuses 
 repeat starts from a fresh copy of the task's repository. Pal runs as a chat over that copy; the baseline is a plain
 loop of the same model object and credentials with four workspace tools, so their rows are **model-matched**.
 `--external` runs another product's own command line in the copy with the prompt in `PAL_EVAL_PROMPT`; its model
-and settings are outside Pal's control, so it is reported separately as **unmatched**. External commands get a fresh
-private HOME/TMPDIR and no ambient credentials; configure the CLI with an explicitly approved evaluation profile,
+and settings are outside Pal's control, so it is reported separately as **unmatched**. This single-prompt adapter
+explicitly refuses continuation tasks before starting the command; it cannot claim a staged comparison by silently
+ignoring later prompts. External commands get a fresh private HOME/TMPDIR and no ambient credentials;
+configure the CLI with an explicitly approved evaluation profile,
 never credentials in the command or prompt. Reports/traces are private and may contain repository content.
 
-`--seconds` bounds the whole run; baseline shell calls use at most 30 seconds of the remaining time. Both use GNU
-timeout for an independent process-group deadline. Pal's turn/deadline reservation is a Pi document that survives
-reopen; exhausting it cancels the native generation task before another model request. `--turns` cannot control an
-external product. There is no token/cost cap: approve spending separately. Tool interfaces, prompts, context policy
+`--seconds` sets one execution deadline, including Pal project/chat preparation; trace export and independent
+grading are outside it. Baseline shell calls use at most 30 seconds of the remaining time. Both use GNU timeout
+for an independent process-group deadline. Pal's turn/deadline reservation is a Pi document that survives
+reopen; exhausting it cancels the native generation task before another model request. Continuations share that
+original deadline and turn allowance, including owned research helpers. Native summary tasks also consume the
+allowance; their requests bypass Pi's generation request hook. Background summaries must settle within the same
+deadline or be cancelled before grading. Provider retries within a native task are not separate turns, so this is not a strict
+physical-request or billing cap. `--turns` cannot control an external product. There is no token/cost cap:
+approve spending separately. Tool interfaces, prompts, context policy
 and approvals differ between harnesses and are recorded, not claimed identical merely because the model matches.
 
-After each run the harness is stopped, the workspace is copied read-only and graded; the grader never runs the
+After the run's owned work settles, the workspace is copied read-only and graded; the grader never runs the
 candidate's tests or trusts its claims. A run during which the grader, tasks or starting repositories changed is
 recorded as `evaluator_changed`, not graded. From the Nix package those files are in the read-only store. The report
 (`report.json`, `report.md`) keeps every run, including failures, budget overruns and approvals granted under
@@ -250,12 +260,18 @@ the graded candidate and grader digests. The candidate is read-only during gradi
 inspectable copy. Success requires both a passing independent grade and completion within budget, with 95% Wilson
 intervals per harness and split. Reports rank harness/grade/tool failures and interventions with example traces,
 and aggregate tool-failure rates, latency, tokens and SDK cost estimates (not billed costs; subscription cost and
-unreported external metrics are unknown). Results are only comparable between like model/settings/budget rows.
-The initial three-task corpus is not a long-horizon/restart benchmark; expanding it remains required for #26/#27. Ordinary checks use scripted fake models; those reports say
+unreported external metrics are unknown). Pal's metrics include owned helpers, not unrelated chats. Tool counts
+refer to model-facing calls/results, not Code Mode's nested host calls; missing result coverage is unknown, not
+zero failures. Pal's trace names each conversation and owner edge and includes retained pre-compaction entries,
+not just the current prompt. Export is limited to 256 conversations, 32,768 entries and 64 MiB; exceeding a limit
+fails the run rather than silently dropping evidence. Treat these complete retained histories as private artifacts.
+Results are only comparable between like model/settings/budget rows.
+The four-task corpus includes two-phase continuation, not a long-horizon/compaction/restart benchmark;
+those scenarios remain required for #26/#27. Ordinary checks use scripted fake models; those reports say
 so and are not model or harness quality results. Real-provider results are owner-run.
 
-The grading controls build the graders against fixed correct, buggy, forged, hanging and flooding candidates and both
-newer tasks' starts and reference solutions:
+The grading controls check correct, buggy, forged, hanging and flooding candidates, task starts and reference
+solutions. The owner-correction control requires both the new cancellation rule and every original rounding case:
 
 ```sh
 nix build .#checks.x86_64-linux.evaluation

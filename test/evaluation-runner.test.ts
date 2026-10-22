@@ -32,7 +32,8 @@ async function solutions() {
   const prices = await read("fixed/src/prices.mjs"),
     receipt = await read("fixed/src/receipt.mjs");
   const buggyPrices = await read("buggy/src/prices.mjs"),
-    buggyReceipt = await read("buggy/src/receipt.mjs");
+    buggyReceipt = await read("buggy/src/receipt.mjs"),
+    continuedReceipt = await read("continued-fixed/src/receipt.mjs");
   const done = fauxAssistantMessage("done");
   const code = (body: string) =>
     fauxAssistantMessage(fauxToolCall("codemode", { code: body }), { stopReason: "toolUse" });
@@ -43,13 +44,21 @@ async function solutions() {
     );
   return {
     pal: (task: string): AssistantMessage[] =>
-      task === "checkout-rounding"
+      task === "checkout-rounding" || task === "checkout-owner-correction"
         ? [
             code(
               `await tools.files_write({path:"src/prices.mjs",content:${JSON.stringify(prices)},expectedHash:${JSON.stringify(sha256(buggyPrices))}});` +
                 `await tools.files_write({path:"src/receipt.mjs",content:${JSON.stringify(receipt)},expectedHash:${JSON.stringify(sha256(buggyReceipt))}});`,
             ),
             done,
+            ...(task === "checkout-owner-correction"
+              ? [
+                  code(
+                    `await tools.files_write({path:"src/receipt.mjs",content:${JSON.stringify(continuedReceipt)},expectedHash:${JSON.stringify(sha256(receipt))}});`,
+                  ),
+                  done,
+                ]
+              : []),
           ]
         : task === "module-inventory"
           ? [
@@ -61,8 +70,12 @@ async function solutions() {
             ]
           : [done],
     baseline: (task: string): AssistantMessage[] =>
-      task === "checkout-rounding"
-        ? [write({ "src/prices.mjs": prices, "src/receipt.mjs": receipt }), done]
+      task === "checkout-rounding" || task === "checkout-owner-correction"
+        ? [
+            write({ "src/prices.mjs": prices, "src/receipt.mjs": receipt }),
+            done,
+            ...(task === "checkout-owner-correction" ? [write({ "src/receipt.mjs": continuedReceipt }), done] : []),
+          ]
         : task === "module-inventory"
           ? [write({ "inventory.json": JSON.stringify({ importers: ["src/db.mjs"] }) }), done]
           : [done],
@@ -115,6 +128,11 @@ describe("evaluation runner", () => {
       report.runs.filter((run) => run.task.id === task && run.harness.id === harness);
     expect(runs("checkout-rounding", "pal").map((run) => run.grade.passed)).toEqual([true, true]);
     expect(runs("checkout-rounding", "baseline-loop").map((run) => run.grade.passed)).toEqual([true, true]);
+    for (const harness of ["pal", "baseline-loop"])
+      for (const run of runs("checkout-owner-correction", harness)) {
+        expect(run.grade.passed).toBe(true);
+        expect(run.outcome).toMatchObject({ status: "completed", turns: 4, interventions: 1 });
+      }
     for (const run of runs("module-inventory", "pal")) {
       expect(run.grade.passed).toBe(true);
       // Pal asked to run a command; the runner's approval is an owner decision and is counted.
@@ -154,10 +172,10 @@ describe("evaluation runner", () => {
     ]);
     expect(report.summary.unmatched.map((row) => row.harness)).toEqual(["external-cli", "external-cli"]);
     expect(report.summary.matched.find((row) => row.harness === "pal" && row.split === "development")).toMatchObject({
-      runs: 4,
-      passed: 4,
-      interventions: 2,
-      interval95: wilson(4, 4),
+      runs: 6,
+      passed: 6,
+      interventions: 4,
+      interval95: wilson(6, 6),
     });
     expect(report.summary.bottlenecks[0]?.runs).toBeGreaterThan(0);
     const correct = runs("module-inventory", "pal")[0];

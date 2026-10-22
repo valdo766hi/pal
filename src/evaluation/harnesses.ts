@@ -15,13 +15,21 @@ import type {
   ToolResultMessage,
   Usage,
 } from "@earendil-works/pi-ai";
-import { type JsonObject, watchEvents } from "@earendil-works/pi-durable";
+import {
+  type ConversationId,
+  type Cursor,
+  type EntryRecord,
+  type JsonObject,
+  UsageDoc,
+  watchEvents,
+} from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { Pal } from "../core/app.ts";
 import { readFileSnapshot, resolveProjectPath } from "../core/files.ts";
 import { gnuTimeout } from "../core/timeout.ts";
-import { evaluationBudgetExceeded, setEvaluationBudget } from "../pi/evaluation-budget.ts";
+import { evaluationBudgetExceeded, evaluationBudgetTurns, setEvaluationBudget } from "../pi/evaluation-budget.ts";
 import { CHATGPT_PROVIDER } from "../pi/chatgpt.ts";
+import type { Continuation } from "./tasks.ts";
 
 export type ModelChoice = {
   readonly provider: string;
@@ -32,6 +40,7 @@ export type Budget = { readonly seconds: number; readonly turns: number };
 export type RunInput = {
   readonly workspace: string;
   readonly prompt: string;
+  readonly continuations?: readonly Continuation[];
   readonly runId: string;
   readonly budget: Budget;
 };
@@ -72,14 +81,64 @@ const sumUsage = (messages: readonly { usage?: Usage }[], provider: string) => {
   return { ...usage, cost: provider === CHATGPT_PROVIDER ? null : usage.cost };
 };
 
+export async function palTrace(pal: Pal, root: ConversationId) {
+  const pending = [root];
+  const conversations: {
+    conversation: ConversationId;
+    parent: ConversationId | null;
+    task: number | null;
+    entries: EntryRecord[];
+  }[] = [];
+  const usage: Usage[] = [];
+  let count = 0,
+    bytes = 0;
+  for (let i = 0; i < pending.length; i++) {
+    const id = pending[i];
+    if (id === undefined) throw new Error("missing evaluation conversation");
+    const record = await pal.store.storage.conversation(id, context);
+    if (record === undefined) throw new Error("evaluation conversation disappeared");
+    const entries: EntryRecord[] = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await pal.store.storage.scanEntries(
+        { conversationId: id, order: "ascending" },
+        128,
+        cursor,
+        context,
+      );
+      for (const entry of page.items) {
+        bytes += Buffer.byteLength(JSON.stringify(entry));
+        if (++count > 32_768 || bytes > 64 * 1024 * 1024)
+          throw new Error("evaluation trace exceeds its entry or byte limit");
+        entries.push(entry);
+      }
+      cursor = page.next;
+    } while (cursor !== undefined);
+    conversations.push({
+      conversation: id,
+      parent: record.owner?.conversationId ?? null,
+      task: record.owner?.taskId ?? null,
+      entries,
+    });
+    const spend = await pal.harness.snapshot(UsageDoc, id, context);
+    usage.push(...Object.values(spend?.models ?? {}));
+    const children = await pal.store.storage.scanConversations({ ownerConversationId: id }, 256, undefined, context);
+    if (children.next !== undefined || pending.length + children.items.length > 256)
+      throw new Error("evaluation trace exceeds its conversation limit");
+    pending.push(...children.items.map((child) => child.id));
+  }
+  return { trace: { root, conversations }, usage };
+}
+
 /** Pal itself: a project over the run's workspace and one chat, in Full access unless approvals are requested. */
 export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "approve-all" = "full"): Harness {
   return {
     id: "pal",
-    version: 1,
+    version: 2,
     configuration: { model, approvals, tools: "Pal's selected capabilities through codemode" },
     matched: true,
-    async run({ workspace, prompt, runId, budget }) {
+    async run({ workspace, prompt, continuations = [], runId, budget }) {
+      const expires = Date.now() + budget.seconds * 1000;
       const request = randomUUID();
       const project = await pal.projects.create(`eval-project-${request}`, { name: runId, folder: workspace });
       const chat = await pal.chats.createChat(`eval-chat-${request}`, { projectId: project.id, title: runId }, context);
@@ -118,19 +177,44 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
         }, 200);
       }
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const expires = Date.now() + budget.seconds * 1000;
       try {
         await setEvaluationBudget(pal.harness, chat.conversationId, budget.turns, expires, context);
-        await pal.chats.submit(chat.id, `eval-input-${request}`, { text: prompt }, context);
         const deadline = new Promise<"timeout">((done) => {
           timer = setTimeout(() => done("timeout"), Math.max(0, expires - Date.now()));
         });
-        if ((await Promise.race([conversation.waitForIdle(context), deadline])) === "timeout") {
+        let stage = 0;
+        for (const input of [{ prompt, owner: false }, ...continuations]) {
+          if (input.owner) interventions++;
+          await pal.chats.submit(chat.id, `eval-input-${request}-${stage++}`, { text: input.prompt }, context);
+          if ((await Promise.race([conversation.waitForIdle(context), deadline])) === "timeout") {
+            status = "budget_exceeded";
+            await conversation.abort(context);
+            await conversation.waitForIdle(context);
+            break;
+          }
+          if (await evaluationBudgetExceeded(pal.harness, chat.conversationId, context)) break;
+          if (stage <= continuations.length) {
+            const watch = await watchEvents(pal.harness, chat.conversationId, context);
+            const messages = watch.snapshot.entries.flatMap((entry) => entry.model ?? []) as Message[];
+            await watch.stop();
+            const last = messages.findLast((message) => message.role === "assistant");
+            if (last?.stopReason === "error" || last?.stopReason === "aborted") break;
+          }
+        }
+        const watch = await watchEvents(pal.harness, chat.conversationId, context);
+        const compactions = watch.snapshot.compactions;
+        await watch.stop();
+        if (
+          (await Promise.race([
+            Promise.all(compactions.map((task) => pal.harness.waitForTask(task.taskId, context))),
+            deadline,
+          ])) === "timeout"
+        ) {
           status = "budget_exceeded";
-          await conversation.abort(context);
-          await conversation.waitForIdle(context);
+          await conversation.abort(context, { background: true });
         }
       } catch (failure) {
+        await conversation.abort(context, { background: true });
         status = "harness_error";
         error = failure instanceof Error ? failure.message : String(failure);
       } finally {
@@ -143,29 +227,32 @@ export function palHarness(pal: Pal, model: ModelChoice, approvals: "full" | "ap
         status = "harness_error";
         error = approvalError;
       }
-      const watch = await watchEvents(pal.harness, chat.conversationId, context);
-      const entries = watch.snapshot.entries;
-      await watch.stop();
-      const messages = entries.flatMap((entry) => entry.model ?? []) as Message[];
+      const recorded = await palTrace(pal, chat.conversationId);
+      const messages = recorded.trace.conversations.flatMap((scope) =>
+        scope.entries.flatMap((entry) => entry.model ?? []),
+      ) as Message[];
       const assistant = messages.filter((message): message is AssistantMessage => message.role === "assistant");
       const results = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
-      const failed = assistant.find((message) => message.stopReason === "error");
-      if (status === "completed" && failed !== undefined) {
+      const rootMessages = (recorded.trace.conversations[0]?.entries.flatMap((entry) => entry.model ?? []) ??
+        []) as Message[];
+      const last = rootMessages.findLast((message): message is AssistantMessage => message.role === "assistant");
+      const calls = assistant.flatMap((message) => message.content.filter((block) => block.type === "toolCall"));
+      if (status === "completed" && (last?.stopReason === "error" || last?.stopReason === "aborted")) {
         status = "harness_error";
-        error = failed.errorMessage ?? "the model request failed";
+        error = last.errorMessage ?? "the model request failed";
       }
       return {
         status,
         error,
-        turns: assistant.length,
-        toolCalls: assistant.flatMap((message) => message.content.filter((block) => block.type === "toolCall")).length,
-        failedToolCalls: results.filter((result) => result.isError).length,
+        turns: await evaluationBudgetTurns(pal.harness, chat.conversationId, context),
+        toolCalls: calls.length,
+        failedToolCalls: results.length === calls.length ? results.filter((result) => result.isError).length : null,
         interventions,
         usage: sumUsage(
-          Object.values(watch.snapshot.usage.models).map((usage) => ({ usage })),
+          recorded.usage.map((usage) => ({ usage })),
           model.provider,
         ),
-        trace: entries,
+        trace: recorded.trace,
       };
     },
   };
@@ -206,10 +293,10 @@ export function baselineHarness(
 ): Harness {
   return {
     id: "baseline-loop",
-    version: 1,
+    version: 2,
     configuration: { model: choice, approvals: "full", tools: TOOLS.map((tool) => tool.name) },
     matched: true,
-    async run({ workspace, prompt, budget }) {
+    async run({ workspace, prompt, continuations = [], budget }) {
       const root = await realpath(workspace);
       const deadline = Date.now() + budget.seconds * 1000;
       const signal = AbortSignal.timeout(budget.seconds * 1000);
@@ -238,7 +325,9 @@ export function baselineHarness(
       const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
       const assistant: AssistantMessage[] = [];
       let toolCalls = 0,
-        failedToolCalls = 0;
+        failedToolCalls = 0,
+        interventions = 0,
+        stage = 0;
       try {
         for (let turn = 0; turn < budget.turns; turn++) {
           if (Date.now() >= deadline) return outcome("budget_exceeded", null);
@@ -250,10 +339,15 @@ export function baselineHarness(
           assistant.push(reply);
           messages.push(reply);
           if (signal.aborted) return outcome("budget_exceeded", null);
-          if (reply.stopReason === "error")
+          if (reply.stopReason === "error" || reply.stopReason === "aborted")
             return outcome("harness_error", reply.errorMessage ?? "the model request failed");
           const calls = reply.content.filter((block) => block.type === "toolCall");
-          if (calls.length === 0) return outcome("completed", null);
+          if (calls.length === 0) {
+            const next = continuations[stage++];
+            if (next === undefined) return outcome("completed", null);
+            if (next.owner) interventions++;
+            messages.push({ role: "user", content: next.prompt, timestamp: Date.now() });
+          }
           for (const call of calls) {
             signal.throwIfAborted();
             const result = await execute(tools, call);
@@ -276,7 +370,7 @@ export function baselineHarness(
           turns: assistant.length,
           toolCalls,
           failedToolCalls,
-          interventions: 0,
+          interventions,
           usage: sumUsage(assistant, choice.provider),
           trace: messages,
         };
@@ -313,11 +407,18 @@ async function execute(
 export function externalHarness(id: string, command: string): Harness {
   return {
     id,
-    version: 1,
-    configuration: { command, model: "uncontrolled", turns: "uncontrolled", permissions: "owner command" },
+    version: 2,
+    configuration: {
+      command,
+      model: "uncontrolled",
+      turns: "uncontrolled",
+      permissions: "owner command",
+      continuations: false,
+    },
     matched: false,
-    async run({ workspace, prompt, budget }) {
+    async run({ workspace, prompt, continuations = [], budget }) {
       try {
+        if (continuations.length !== 0) throw new Error("this external command cannot deliver continuations");
         const result = await shell(workspace, command, budget.seconds, { PAL_EVAL_PROMPT: prompt });
         let status: RunOutcome["status"] = "completed";
         let error: string | null = null;
