@@ -2773,10 +2773,22 @@ describe("Pal in a browser", () => {
     const panel = page.getByRole("complementary", { name: "Workspace panel" });
     await panel.getByRole("button", { name: "Open browser" }).click();
     await panel.getByText("You control this browser").waitFor();
-    await panel.getByLabel("Address").fill(`http://127.0.0.1:${site}/`);
+    const view = panel.getByRole("img", { name: /^Page:/ });
+    const destination = `http://127.0.0.1:${site}/`;
+    await panel.getByLabel("Address").fill(destination);
+    await panel.getByLabel("Page size").focus();
+    await panel.getByLabel("Page size").selectOption("Tablet");
+    await expect
+      .poll(() => view.evaluate((image) => (image instanceof HTMLImageElement ? image.naturalWidth : 0)))
+      .toBe(768);
+    expect(await panel.getByLabel("Address").inputValue()).toBe(destination);
+    await panel.getByLabel("Page size").selectOption("Desktop");
+    await expect
+      .poll(() => view.evaluate((image) => (image instanceof HTMLImageElement ? image.naturalWidth : 0)))
+      .toBe(1280);
+    expect(await panel.getByLabel("Address").inputValue()).toBe(destination);
     await panel.getByRole("button", { name: "Go", exact: true }).click();
     await expect.poll(() => visited.includes("/")).toBe(true);
-    const view = panel.getByRole("img", { name: /^Page:/ });
     await view.waitFor();
     await expect
       .poll(() => view.evaluate((image) => image instanceof HTMLImageElement && image.naturalWidth > 0))

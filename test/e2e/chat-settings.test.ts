@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { type Browser, chromium, type Page } from "playwright-core";
+import { type Browser, chromium, type Page, type WebSocketRoute } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
@@ -1955,6 +1955,74 @@ describe("research helper status", () => {
       } finally {
         release.resolve(undefined);
       }
+    },
+  );
+});
+
+describe("browser address drafts", () => {
+  it.each([1440, 390])(
+    "keeps an unsent address through unrelated state, but not across tabs or control at %s px",
+    async (width) => {
+      const { page, base, project, saved, provider, errors } = await setup(width);
+      await page.route(`**/api/projects/${project.id}/browser`, (route) =>
+        route.fulfill({ json: { available: true, running: false } }),
+      );
+      const connected = Promise.withResolvers<WebSocketRoute>();
+      const sent: string[] = [];
+      const state = {
+        type: "state",
+        epoch: 1,
+        control: true,
+        mode: "human",
+        busy: false,
+        agent: null,
+        viewport: { width: 1280, height: 800 },
+        tabs: [{ id: "first", url: "about:blank", active: true }],
+        dialog: null,
+      };
+      await page.routeWebSocket(`**/api/projects/${project.id}/browser/socket`, (socket) => {
+        socket.onMessage((data) => sent.push(String(data)));
+        socket.send(JSON.stringify(state));
+        connected.resolve(socket);
+      });
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      if (width < 700) await page.getByRole("button", { name: "Workspace tools" }).click();
+      await page.getByRole("button", { name: "Browser", exact: true }).click();
+      const panel = page.getByRole("complementary", { name: "Workspace panel" });
+      await panel.getByRole("button", { name: "Open browser" }).click();
+      await panel.getByText("You control this browser").waitFor();
+      const socket = await connected.promise;
+      const destination = "https://destination.example/unsent";
+      const address = panel.getByLabel("Address");
+      const size = panel.getByLabel("Page size");
+      await address.fill(destination);
+      await size.focus();
+      socket.send(JSON.stringify({ ...state, viewport: { width: 768, height: 1024 } }));
+      await expect.poll(() => size.inputValue()).toBe("Tablet");
+      expect(await address.inputValue()).toBe(destination);
+      await panel.getByRole("button", { name: "Go", exact: true }).click();
+      await expect
+        .poll(() => sent.map((value) => JSON.parse(value) as unknown))
+        .toContainEqual({
+          type: "navigate",
+          url: destination,
+          epoch: state.epoch,
+        });
+      await address.fill("https://unused.example/first-tab-draft");
+      const tabs = [
+        { id: "first", url: destination, active: false },
+        { id: "second", url: "https://second.example/", active: true },
+      ];
+      socket.send(JSON.stringify({ ...state, tabs }));
+      await panel.getByRole("tab", { name: "https://second.example/", exact: true }).waitFor();
+      expect(await address.inputValue()).toBe("https://second.example/");
+      await address.fill("https://unused.example/second-tab-draft");
+      socket.send(JSON.stringify({ ...state, tabs, control: false, mode: "paused" }));
+      await panel.getByText("Paused", { exact: true }).waitFor();
+      expect(await address.inputValue()).toBe("https://second.example/");
+      expect(await address.isDisabled()).toBe(true);
+      expect(provider.requests).toEqual([]);
+      expect(errors).toEqual([]);
     },
   );
 });
