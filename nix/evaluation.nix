@@ -29,6 +29,11 @@ let
     done
     printf 'process.exit(0);\n' > "$out/changed-test/test.mjs"
     rm "$out/missing-test/test.mjs"
+    cp -R ${source}/test/fixtures/evaluation/dependency-plan-fixed "$out/stale-policy"
+    chmod -R u+w "$out/stale-policy"
+    substituteInPlace "$out/stale-policy/src/plan.mjs" \
+      --replace-fail 'const found = ignored.has(root) ? undefined : closure(modules, root);' \
+      'const found = closure(modules, root); if (found && [...found].some(id => ignored.has(id))) { blocked.push(root); continue; }'
   '';
 in
 runCommand "pal-evaluation-controls" { nativeBuildInputs = [ nodejs_24 ]; } ''

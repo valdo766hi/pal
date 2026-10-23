@@ -403,6 +403,10 @@ Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting re
 `slug-test-repair` (held out, version 2; independent cases plus a byte-identical public test),
 `checkout-owner-correction` (development; a later owner correction must preserve the earlier rounding rules), and
 `checkout-verifier-fallback` (development; a deliberately unavailable local verifier and a working test fallback).
+`dependency-plan` adds a separate multi-module graph repair with deterministic ready ordering, shared dependencies,
+missing modules and cycles. `dependency-plan-policy-revision` adds two owner interventions: transitive exclusions
+are introduced, then explicitly superseded by root-only exclusions. Both checkpoints request compaction and an
+idle restart; independent final cases require the corrected rule without losing the original graph constraints.
 Continuations are delivered after an idle checkpoint in the same conversation/history, not concatenated into the
 initial prompt. Scripted owner corrections count as interventions and remain visible in the trace.
 
@@ -460,15 +464,16 @@ legitimately be a no-op. The baseline summarizes its whole active JSON transcrip
 the original audit history. These context policies are recorded harness differences, not identical input sequences.
 Inspect the trace for an actual summary: a requested checkpoint alone does not prove one occurred.
 
-The six-task initial corpus includes `checkout-context-checkpoint` version 2: a controlled idle restart before
+The eight-task initial corpus includes `checkout-context-checkpoint` version 2: a controlled idle restart before
 compaction and the owner correction, with the same frozen snapshot/independent cases. Pal's controller closes and
 reopens the same installation/implementation, reacquires the conversation and records a host journal witness.
 Unfinished tasks/submissions prevent that restart; the original deadline and persisted turn allowance remain.
 The baseline instead reloads its active context from a private, digest-checked JSON file (64 MiB maximum), retaining
 its counters and audit history. This is explicitly **not** a baseline process restart. Failed Pal reopen retains the
 last readable trace/usage rather than inventing recovery or retrying effects.
-These are protocol/grading fixtures, not abrupt-process-crash, representative long-horizon or compaction-quality
-benchmarks; those remain required for #26/#27. Ordinary checks use scripted fake models; those reports say so and
+The dependency-policy fixture also proves the grader rejects retaining the superseded transitive rule while
+accepting the root-only reference and preserving public tests, README and CLI bytes. These broaden protocol/grading
+coverage; they are not abrupt-process-crash, multi-hour or compaction-quality benchmarks. Those remain required for #26/#27. Ordinary checks use scripted fake models; those reports say so and
 are not model or harness quality results. Real-provider results are owner-run.
 The verifier-fallback fixture exits 69 without contacting a service; both its adapter and public test must remain
 unchanged while the checkout fix passes independent cases. Inspect actual command/tool receipts before crediting

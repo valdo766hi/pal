@@ -162,6 +162,129 @@ export const verifierCheckout = {
     checkout.prompt,
 } as const satisfies ProgramTask;
 
+export const dependencyPlan = {
+  kind: "program",
+  id: "dependency-plan",
+  version: 1,
+  split: "development",
+  categories: ["repository-understanding", "bug-fix", "multi-file"],
+  snapshot: "dependency-plan",
+  entrypoint: "src/main.mjs",
+  unchanged: ["README.md", "test.mjs", "src/main.mjs"],
+  prompt:
+    "Repair the dependency planner in src/graph.mjs and src/plan.mjs using README.md's contract. " +
+    "Validate each requested root's full closure, reject missing dependencies and cycles, and include only " +
+    "modules needed by valid roots. Choose the lexicographically smallest ready module at every step. " +
+    "Preserve the README, public tests and CLI interface. Run node test.mjs.",
+  cases: [
+    { id: "empty", input: { roots: [], modules: {} }, expected: { order: [], blocked: [] } },
+    {
+      id: "ready-order",
+      input: {
+        roots: ["worker", "app"],
+        modules: {
+          app: { requires: ["ui", "core"] },
+          worker: { requires: ["core"] },
+          core: { requires: ["base"] },
+          ui: { requires: ["base"] },
+          base: {},
+        },
+      },
+      expected: { order: ["base", "core", "ui", "app", "worker"], blocked: [] },
+    },
+    {
+      id: "shared-dependency",
+      input: { roots: ["y", "x"], modules: { x: { requires: ["z"] }, y: { requires: ["z"] }, z: {} } },
+      expected: { order: ["z", "x", "y"], blocked: [] },
+    },
+    {
+      id: "cycle-and-missing",
+      input: {
+        roots: ["ok", "job", "app"],
+        modules: {
+          app: { requires: ["a"] },
+          a: { requires: ["b"] },
+          b: { requires: ["a"] },
+          job: { requires: ["missing"] },
+          ok: { requires: ["base"] },
+          base: {},
+        },
+      },
+      expected: { order: ["base", "ok"], blocked: ["app", "job"] },
+    },
+    {
+      id: "unreachable-cycle",
+      input: { roots: ["ok"], modules: { ok: {}, loop: { requires: ["loop"] } } },
+      expected: { order: ["ok"], blocked: [] },
+    },
+    {
+      id: "duplicates",
+      input: { roots: ["app", "app"], modules: { app: { requires: ["base", "base"] }, base: {} } },
+      expected: { order: ["base", "app"], blocked: [] },
+    },
+    { id: "missing-root", input: { roots: ["missing"], modules: {} }, expected: { order: [], blocked: ["missing"] } },
+  ],
+} as const satisfies ProgramTask;
+
+export const revisedDependencyPlan = {
+  ...dependencyPlan,
+  id: "dependency-plan-policy-revision",
+  categories: [
+    ...dependencyPlan.categories,
+    "continuation",
+    "owner-intervention",
+    "superseded-constraint",
+    "compaction-checkpoint",
+    "restart-checkpoint",
+  ],
+  continuations: [
+    {
+      owner: true,
+      restart: true,
+      compact: true,
+      prompt:
+        "Owner change: input may now include excluded: string[]. A requested root is blocked if its full " +
+        "dependency closure touches an excluded ID. Retain every earlier ordering, validation and CLI rule.",
+    },
+    {
+      owner: true,
+      restart: true,
+      compact: true,
+      prompt:
+        "Owner correction supersedes my previous exclusion policy: exclude only roots explicitly listed in " +
+        "excluded. An excluded ID may still appear as another valid root's dependency; do not block that " +
+        "root or drop its dependency. Keep all original ordering, missing-module, cycle and deduplication rules. " +
+        "Do not modify the README, tests or CLI. Verify the combined behavior before finishing.",
+    },
+  ],
+  cases: [
+    ...dependencyPlan.cases,
+    {
+      id: "exclude-only-requested-root",
+      input: {
+        roots: ["app", "worker"],
+        excluded: ["app"],
+        modules: { app: { requires: ["base"] }, worker: { requires: ["base"] }, base: {} },
+      },
+      expected: { order: ["base", "worker"], blocked: ["app"] },
+    },
+    {
+      id: "superseded-transitive-policy",
+      input: { roots: ["app"], excluded: ["base"], modules: { app: { requires: ["base"] }, base: {} } },
+      expected: { order: ["base", "app"], blocked: [] },
+    },
+    {
+      id: "excluded-root-still-needed",
+      input: {
+        roots: ["app", "worker", "worker"],
+        excluded: ["app", "unrelated"],
+        modules: { app: { requires: ["base"] }, worker: { requires: ["app"] }, base: {} },
+      },
+      expected: { order: ["base", "app", "worker"], blocked: ["app"] },
+    },
+  ],
+} as const satisfies ProgramTask;
+
 export const TASKS: readonly Task[] = [
   checkout,
   inventory,
@@ -169,4 +292,6 @@ export const TASKS: readonly Task[] = [
   continuedCheckout,
   checkpointCheckout,
   verifierCheckout,
+  dependencyPlan,
+  revisedDependencyPlan,
 ];

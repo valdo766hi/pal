@@ -4,7 +4,16 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { grade } from "./grade.ts";
-import { checkout, checkpointCheckout, continuedCheckout, inventory, slug, verifierCheckout } from "./tasks.ts";
+import {
+  checkout,
+  checkpointCheckout,
+  continuedCheckout,
+  dependencyPlan,
+  inventory,
+  revisedDependencyPlan,
+  slug,
+  verifierCheckout,
+} from "./tasks.ts";
 
 const output = process.argv[2];
 const malformed = process.argv[3];
@@ -12,7 +21,12 @@ if (output === undefined || malformed === undefined) throw new Error("missing co
 const fixtures = fileURLToPath(new URL("../../test/fixtures/evaluation/", import.meta.url));
 await mkdir(output, { recursive: true });
 let checks = 0;
-for (const name of ["buggy", "fixed"]) {
+for (const [name, status] of [
+  ["buggy", 0],
+  ["fixed", 0],
+  ["dependency-plan", 1],
+  ["dependency-plan-fixed", 0],
+] as const) {
   const root = join(fixtures, name);
   const result = spawnSync(process.execPath, ["--permission", `--allow-fs-read=${root}`, join(root, "test.mjs")], {
     env: { LANG: "C" },
@@ -21,7 +35,7 @@ for (const name of ["buggy", "fixed"]) {
     killSignal: "SIGKILL",
     maxBuffer: 16 * 1024,
   });
-  assert.equal(result.status, 0, `${name} public test: ${result.stderr}`);
+  assert.equal(result.status, status, `${name} public test: ${result.stderr}`);
   checks++;
 }
 const reference = await grade(join(fixtures, "fixed"));
@@ -56,6 +70,10 @@ for (const [task, name, passed] of [
   [checkpointCheckout, "continued-fixed", true],
   [verifierCheckout, "unavailable-verifier", false],
   [verifierCheckout, "verifier-fixed", true],
+  [dependencyPlan, "dependency-plan", false],
+  [dependencyPlan, "dependency-plan-fixed", true],
+  [revisedDependencyPlan, "dependency-plan", false],
+  [revisedDependencyPlan, "dependency-plan-fixed", true],
 ] as const) {
   const result = await grade(join(fixtures, name), task);
   assert.equal(result.passed, passed, name);
@@ -68,6 +86,14 @@ for (const [task, name, passed] of [
   await writeFile(join(output, `${task.id}-${name}.json`), `${JSON.stringify(result, null, 2)}\n`);
   checks++;
 }
+const stalePolicy = await grade(join(malformed, "stale-policy"), revisedDependencyPlan);
+assert.equal(stalePolicy.passed, false);
+assert.deepEqual(
+  stalePolicy.cases.filter((test) => !test.passed).map((test) => test.id),
+  ["superseded-transitive-policy", "excluded-root-still-needed"],
+);
+await writeFile(join(output, "stale-policy.json"), `${JSON.stringify(stalePolicy, null, 2)}\n`);
+checks++;
 assert.equal(slug.split, "held-out");
 for (const name of ["changed-test", "missing-test"]) {
   const result = await grade(join(malformed, name), slug);

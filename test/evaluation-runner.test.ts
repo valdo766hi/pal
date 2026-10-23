@@ -15,7 +15,7 @@ import { openPal } from "../src/core/app.ts";
 import { baselineHarness, externalHarness, type Harness, palHarness } from "../src/evaluation/harnesses.ts";
 import { markdown, summarize, wilson } from "../src/evaluation/report.ts";
 import { evaluate } from "../src/evaluation/run.ts";
-import { TASKS } from "../src/evaluation/tasks.ts";
+import { dependencyPlan, revisedDependencyPlan, TASKS } from "../src/evaluation/tasks.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -26,6 +26,7 @@ const fixtures = new URL("fixtures/evaluation/", import.meta.url);
 const read = (path: string) => readFile(new URL(path, fixtures), "utf8");
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const ANSWER = JSON.stringify({ importers: ["src/api.mjs", "src/cli.mjs", "src/db.mjs"] });
+const initialTasks = TASKS.filter((task) => task.id !== dependencyPlan.id && task.id !== revisedDependencyPlan.id);
 
 /** Scripted model turns: these check the machinery and say nothing about any model's quality. */
 async function solutions() {
@@ -106,8 +107,65 @@ async function solutions() {
   };
 }
 
+async function dependencySolutions(kind: string, continued: boolean): Promise<AssistantMessage[]> {
+  const graph = await read("dependency-plan-fixed/src/graph.mjs");
+  const final = await read("dependency-plan-fixed/src/plan.mjs");
+  const decision = "const found = ignored.has(root) ? undefined : closure(modules, root);";
+  expect(final.split(decision)).toHaveLength(2);
+  const base = final.replace(decision, "const found = closure(modules, root);");
+  const transitive = final.replace(
+    decision,
+    "const found = closure(modules, root); " +
+      "if (found && [...found].some(id => ignored.has(id))) { blocked.push(root); continue; }",
+  );
+  let previous = await read("dependency-plan/src/plan.mjs");
+  const turns: AssistantMessage[] = [];
+  for (const [index, plan] of (continued ? [base, transitive, final] : [base]).entries()) {
+    if (index > 0 && kind === "baseline")
+      turns.push(
+        fauxAssistantMessage("Retain deterministic dependency-first ordering, validation and the latest owner policy."),
+      );
+    const changes: Record<string, { content: string; before: string }> = {
+      ...(index === 0
+        ? { "src/graph.mjs": { content: graph, before: await read("dependency-plan/src/graph.mjs") } }
+        : {}),
+      "src/plan.mjs": { content: plan, before: previous },
+    };
+    turns.push(
+      kind === "pal"
+        ? fauxAssistantMessage(
+            fauxToolCall("codemode", {
+              code:
+                Object.entries(changes)
+                  .map(
+                    ([path, file]) =>
+                      `await tools.files_write(${JSON.stringify({ path, content: file.content, expectedHash: sha256(file.before) })});`,
+                  )
+                  .join("\n") + '\nreturn await tools.shell_run({command:"node test.mjs",timeout:5});',
+            }),
+            { stopReason: "toolUse" },
+          )
+        : fauxAssistantMessage(
+            [
+              ...Object.entries(changes).map(([path, file]) =>
+                fauxToolCall("write_file", { path, content: file.content }),
+              ),
+              fauxToolCall("run", { command: "node test.mjs" }),
+            ],
+            { stopReason: "toolUse" },
+          ),
+      fauxAssistantMessage(`Completed fixture stage ${index}.`),
+    );
+    previous = plan;
+  }
+  return turns;
+}
+
 describe("evaluation runner", () => {
-  it("grades every run independently and reports matched, unmatched, failed and intervened runs", async () => {
+  it.each([0, 2, 4])("grades all harnesses and repeats for task pair %i", async (offset) => {
+    expect(initialTasks).toHaveLength(6);
+    const tasks = initialTasks.slice(offset, offset + 2);
+    expect(tasks).toHaveLength(2);
     const root = await realpath(await mkdtemp(join(tmpdir(), "pal-evaluation-test-")));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const options = { dataRoot: join(root, "data"), installRoot: join(root, "install") };
@@ -140,7 +198,7 @@ describe("evaluation runner", () => {
     );
     const output = join(root, "report");
     const report = await evaluate({
-      tasks: TASKS,
+      tasks,
       harnesses: [
         scripted(palHarness(pal, choice, "approve-all", reopen), script.pal),
         scripted(
@@ -158,11 +216,14 @@ describe("evaluation runner", () => {
     });
 
     expect(report.notice).toContain("Not a model or harness quality result");
-    expect(report.runs).toHaveLength(TASKS.length * 3 * 2);
+    expect(report.runs).toHaveLength(tasks.length * 3 * 2);
     const runs = (task: string, harness: string) =>
       report.runs.filter((run) => run.task.id === task && run.harness.id === harness);
-    expect(runs("checkout-rounding", "pal").map((run) => run.grade.passed)).toEqual([true, true]);
-    expect(runs("checkout-rounding", "baseline-loop").map((run) => run.grade.passed)).toEqual([true, true]);
+    for (const task of tasks)
+      for (const harness of ["pal", "baseline-loop", "external-cli"]) expect(runs(task.id, harness)).toHaveLength(2);
+    if (tasks.some((task) => task.id === "checkout-rounding"))
+      for (const harness of ["pal", "baseline-loop"])
+        expect(runs("checkout-rounding", harness).map((run) => run.grade.passed)).toEqual([true, true]);
     for (const task of ["checkout-owner-correction", "checkout-context-checkpoint"])
       for (const harness of ["pal", "baseline-loop"])
         for (const run of runs(task, harness)) {
@@ -254,35 +315,116 @@ describe("evaluation runner", () => {
     }
     expect(report.evaluator).toMatch(/^[a-f0-9]{64}$/);
     expect(report.implementation).toBe((await pal.extensions.view()).release);
-    expect(runs("module-inventory", "pal")[0]?.harness.configuration).toMatchObject({
-      model: choice,
-      approvals: "approve-all",
-    });
+    const bothSplits = tasks.some((task) => task.split === "held-out");
+    expect(report.summary.matched.map((row) => `${row.harness}/${row.split}`).sort()).toEqual(
+      bothSplits
+        ? ["baseline-loop/development", "baseline-loop/held-out", "pal/development", "pal/held-out"]
+        : ["baseline-loop/development", "pal/development"],
+    );
+    expect(report.summary.unmatched.map((row) => row.harness)).toEqual(
+      bothSplits ? ["external-cli", "external-cli"] : ["external-cli"],
+    );
     expect(report.summary.unmatched[0]).toMatchObject({ interventions: null, toolCalls: null, toolFailureRate: null });
-    expect(report.summary.matched.map((row) => `${row.harness}/${row.split}`).sort()).toEqual([
-      "baseline-loop/development",
-      "baseline-loop/held-out",
-      "pal/development",
-      "pal/held-out",
-    ]);
-    expect(report.summary.unmatched.map((row) => row.harness)).toEqual(["external-cli", "external-cli"]);
+    const developmentRuns = tasks.filter((task) => task.split === "development").length * 2;
+    const interventions: Record<string, number> = {
+      "checkout-rounding": 0,
+      "module-inventory": 2,
+      "slug-test-repair": 0,
+      "checkout-owner-correction": 2,
+      "checkout-context-checkpoint": 2,
+      "checkout-verifier-fallback": 4,
+    };
     expect(report.summary.matched.find((row) => row.harness === "pal" && row.split === "development")).toMatchObject({
-      runs: 10,
-      passed: 10,
-      interventions: 10,
-      interval95: wilson(10, 10),
+      runs: developmentRuns,
+      passed: developmentRuns,
+      interventions: tasks.reduce((sum, task) => sum + (interventions[task.id] ?? NaN), 0),
+      interval95: wilson(developmentRuns, developmentRuns),
     });
+    if (tasks.some((task) => task.id === "module-inventory")) {
+      const correct = runs("module-inventory", "pal")[0];
+      if (correct === undefined) throw new Error("missing control run");
+      expect(correct.harness.configuration).toMatchObject({ model: choice, approvals: "approve-all" });
+      const exceeded = { ...correct, outcome: { ...correct.outcome, status: "budget_exceeded" as const } };
+      expect(summarize([exceeded]).matched[0]).toMatchObject({ passed: 0, unsuccessful: 1 });
+    }
     expect(report.summary.bottlenecks[0]?.runs).toBeGreaterThan(0);
-    const correct = runs("module-inventory", "pal")[0];
-    if (correct === undefined) throw new Error("missing control run");
-    const exceeded = { ...correct, outcome: { ...correct.outcome, status: "budget_exceeded" as const } };
-    expect(summarize([exceeded]).matched[0]).toMatchObject({ passed: 0, unsuccessful: 1 });
     expect(report.summary.nextMilestone).toContain("Investigate");
     const text = markdown(report);
     expect(text).toContain("## Model-matched harness comparison");
     expect(text).toContain("## Unmatched product comparison");
     expect(JSON.parse(await readFile(join(output, "report.json"), "utf8"))).toMatchObject({ kind: "pal-evaluation" });
   });
+
+  it.each(["pal", "baseline"])(
+    "%s grades dependency planning across two superseded-policy checkpoints",
+    async (kind) => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), "pal-evaluation-dependencies-")));
+      cleanups.push(() => rm(root, { recursive: true, force: true }));
+      const options = { dataRoot: join(root, "data"), installRoot: join(root, "install") };
+      let pal = await openPal(options, context);
+      cleanups.push(() => pal.close());
+      const faux = fauxProvider();
+      const useFaux = () => (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+      useFaux();
+      const reopen = async () => {
+        await pal.close();
+        pal = await openPal(options, context);
+        useFaux();
+        return pal;
+      };
+      const model = faux.getModel();
+      const choice = { provider: model.provider, modelId: model.id, effort: "off" } as const;
+      const harness =
+        kind === "pal" ? palHarness(pal, choice, "full", reopen) : baselineHarness(() => pal.models, model, choice);
+      const output = join(root, "report");
+      const report = await evaluate({
+        tasks: [dependencyPlan, revisedDependencyPlan],
+        harnesses: [
+          {
+            ...harness,
+            run: async (input) => {
+              faux.setResponses(await dependencySolutions(kind, input.runId.startsWith(revisedDependencyPlan.id)));
+              return harness.run(input);
+            },
+          },
+        ],
+        model: choice,
+        implementation: (await pal.extensions.view()).release,
+        budget: { seconds: 15, turns: 10 },
+        repeats: 1,
+        output,
+        modelKind: "fixture",
+      });
+      expect(report.notice).toContain("Not a model or harness quality result");
+      expect(report.runs).toHaveLength(2);
+      for (const run of report.runs) {
+        const continued = run.task.id === revisedDependencyPlan.id;
+        expect(run.task.version).toBe(1);
+        expect(run.grade.passed).toBe(true);
+        expect(run.grade.failures).toEqual([]);
+        expect(run.outcome).toMatchObject({
+          status: "completed",
+          turns: continued ? (kind === "pal" ? 6 : 8) : 2,
+          interventions: continued ? 2 : 0,
+          failedToolCalls: 0,
+        });
+        const trace = await readFile(join(output, run.trace.path), "utf8");
+        expect(sha256(trace)).toBe(run.trace.sha256);
+        if (!continued) continue;
+        expect(trace).toContain("Owner change: input may now include excluded");
+        expect(trace).toContain("Owner correction supersedes my previous exclusion policy");
+        const journal = JSON.parse(trace);
+        if (kind === "pal")
+          expect(
+            journal.conversations.flatMap((scope: { entries: { kind: string }[] }) =>
+              scope.entries.filter((entry) => entry.kind === "pal.evaluation-checkpoint"),
+            ),
+          ).toHaveLength(2);
+        else expect(journal.checkpoints).toHaveLength(2);
+      }
+      expect(report.summary.matched[0]).toMatchObject({ runs: 2, passed: 2, interventions: 2 });
+    },
+  );
 
   it.each(["pal", "../escape", "outside/path"])(
     "rejects ambiguous or unsafe harness identity %s before creating artifacts",
