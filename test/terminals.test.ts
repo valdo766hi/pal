@@ -170,19 +170,20 @@ describe("human host terminals", () => {
     const { pal, project, create, connect } = await setup();
     const terminal = await create();
     const client = await connect(terminal.id);
-    client.send({
-      type: "input",
-      epoch: client.last("state")?.epoch,
-      data:
-        Array.from({ length: 600 }, (_, index) => `: entry-${index + 1}\r`).join("") +
-        'history > history-window.txt; printf %s "$HOME" > history-home.txt\r',
-    });
+    await expect.poll(() => `${client.last("snapshot")?.data ?? ""}${client.output()}`).toContain("$");
+    const send = (data: string) => client.send({ type: "input", epoch: client.last("state")?.epoch, data });
+    // A burst before Readline starts can overflow the native PTY input queue on macOS.
+    for (let start = 0; start < 600; start += 20) {
+      send(Array.from({ length: 20 }, (_, index) => `printf 'entry-%s\\n' ${start + index + 1}\r`).join(""));
+      await expect.poll(client.output).toContain(`entry-${start + 20}\r\n`);
+    }
+    send('history > history-window.txt; printf %s "$HOME" > history-home.txt\r');
     const window = join(project.root, "history-window.txt");
-    await expect.poll(() => readFile(window, "utf8")).toContain("entry-600");
+    await expect.poll(() => readFile(window, "utf8")).toContain("printf 'entry-%s\\n' 600");
     const entries = (await readFile(window, "utf8")).trim().split("\n");
     expect(entries).toHaveLength(500);
-    expect(entries[0]).toMatch(/entry-102$/);
-    expect(entries.at(-2)).toMatch(/entry-600$/);
+    expect(entries[0]).toMatch(/printf 'entry-%s\\n' 102$/);
+    expect(entries.at(-2)).toMatch(/printf 'entry-%s\\n' 600$/);
     expect(entries.at(-1)).toContain("history > history-window.txt");
     const homePath = join(project.root, "history-home.txt");
     await expect.poll(() => readFile(homePath, "utf8")).toContain("pal-terminal-");
