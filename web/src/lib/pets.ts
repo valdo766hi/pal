@@ -255,7 +255,7 @@ const KALONG_WRAP = at(
 const KALONG_NAP_BLUSH = at(7, "....c.....c");
 const KALONG_Z: Layer = ["......zzz", ".......z", "......zzz"];
 
-// Jelok: a little pumpkin with a leafy stem; it has two spare rows on top for hopping.
+// Jelok: a jack-o'-lantern with a carved, candlelit grin; two spare rows on top let it hop.
 const JELOK = at(
   4,
   "....ooooooo",
@@ -271,17 +271,55 @@ const JELOK = at(
   "..oorbbbbbroo",
   "....ooooooo",
 );
-const JELOK_STEM = at(2, "......ss.ll", ".......slll", ".......s");
-const JELOK_FACE = at(11, "...c.......c", "......o.o", ".......o");
-const JELOK_OPEN = at(9, "....we...we", "....ee...ee");
-const JELOK_SHUT = at(10, "....oo...oo");
-const JELOK_HAPPY = at(9, "....oo...oo", "...o..o.o..o");
+const JELOK_STEM = at(1, "........ll", ".......sl.l", "......ss..l", ".......s.ll");
+const JELOK_GLOW = at(
+  6,
+  "....d.....d",
+  "...dgd...dgd",
+  "..dgGgd.dgGgd",
+  "...ddd...ddd",
+  "..dgdddddddgd",
+  "..dggbgggbggd",
+  "...dgggbgggd",
+  "....ddddddd",
+);
+const JELOK_DIM = at(
+  6,
+  "....d.....d",
+  "...dfd...dfd",
+  "..dfffd.dfffd",
+  "...ddd...ddd",
+  "..dfdddddddfd",
+  "..dffbfffbffd",
+  "...dfffbfffd",
+  "....ddddddd",
+);
+const JELOK_JOY = at(
+  6,
+  "....d.....d",
+  "...dgd...dgd",
+  "..dgbgd.dgbgd",
+  "...ddd...ddd",
+  "..dgdddddddgd",
+  "..dggbgggbggd",
+  "...dgggbgggd",
+  "....ddddddd",
+);
 const JELOK_HOP = up(JELOK, 2);
 const JELOK_STEM_HOP = up(JELOK_STEM, 2);
-const JELOK_FACE_HOP = up(JELOK_FACE, 2);
-const JELOK_HAPPY_HOP = up(JELOK_HAPPY, 2);
+const JELOK_JOY_HOP = up(JELOK_JOY, 2);
 const JELOK_SHADOW = at(15, "...zzzzzzzzz");
-const JELOK_SHADES = at(8, "..kkkkkkkkkkk", "..kkwkk.kkwkk", "...kkk...kkk");
+const JELOK_HAT: Layer = [
+  ".........OkO",
+  "........OkkO",
+  ".......OkkkO",
+  "......OkkkKO",
+  ".....OkkkkKO",
+  "..OOOvvvyvvOO",
+  ".OkkkkkkkkkkkO",
+  "..OOOOOOOOOOO",
+];
+const JELOK_OUT = at(8, "...ddd...ddd", "", "...d.......d", "...ddbdddbdd", "....dddbddd");
 const JELOK_Z = at(2, ".zzz", "..z", ".zzz");
 
 export const PETS = {
@@ -478,44 +516,44 @@ export const PETS = {
   },
   jelok: {
     name: "Jelok",
-    kind: "Pumpkin",
-    about: "A little pumpkin. Hops while Pal works and puts on shades to rest.",
+    kind: "Jack-o'-lantern",
+    about: "A candlelit pumpkin. Hops while Pal works, wears a witch hat on breaks and naps when its candle goes out.",
     size: { width: 15, height: 16 },
     colors: {
-      o: "#8a3d12",
-      b: "#f5913e",
-      r: "#d9702a",
-      h: "#ffc07a",
-      s: "#4c7d34",
-      l: "#7fbf5a",
-      e: "#2a1a12",
-      w: "#ffffff",
-      c: "#ff9a8a",
-      k: "#1d1d22",
+      o: "#5e260b",
+      b: "#ef7a1e",
+      r: "#c4581a",
+      h: "#ffa64d",
+      s: "#4a5a22",
+      l: "#6e9a35",
+      g: "#ffd34a",
+      G: "#fff3b0",
+      f: "#f2a33a",
+      d: "#3a1606",
+      O: "#14101f",
+      k: "#2b2142",
+      K: "#40325f",
+      v: "#9b6ad8",
+      y: "#f2c94c",
       z: "#a1a1aa",
     },
     poses: {
-      sit: {
-        label: "Smiling",
-        parts: [[JELOK], [JELOK_STEM], [JELOK_FACE], [JELOK_OPEN, "open"], [JELOK_SHUT, "shut"]],
-      },
+      sit: { label: "Glowing", parts: [[JELOK], [JELOK_STEM], [JELOK_GLOW, "open"], [JELOK_DIM, "shut"]] },
       work: {
         label: "Hopping",
         beat: 0.6,
         parts: [
           [JELOK, "a"],
           [JELOK_STEM, "a"],
-          [JELOK_FACE, "a"],
-          [JELOK_HAPPY, "a"],
+          [JELOK_JOY, "a"],
           [JELOK_HOP, "b"],
           [JELOK_STEM_HOP, "b"],
-          [JELOK_FACE_HOP, "b"],
-          [JELOK_HAPPY_HOP, "b"],
+          [JELOK_JOY_HOP, "b"],
           [JELOK_SHADOW, "b"],
         ],
       },
-      rest: { label: "In shades", parts: [[JELOK], [JELOK_STEM], [JELOK_FACE], [JELOK_SHADES]] },
-      nap: { label: "Dozing", parts: [[JELOK], [JELOK_STEM], [JELOK_FACE], [JELOK_SHUT], [JELOK_Z]] },
+      rest: { label: "Witch hat", parts: [[JELOK], [JELOK_JOY], [JELOK_HAT]] },
+      nap: { label: "Candle out", parts: [[JELOK], [JELOK_STEM], [JELOK_OUT], [JELOK_Z]] },
     },
   },
 } as const satisfies Record<string, Pet>;
