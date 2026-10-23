@@ -24,379 +24,498 @@ const at = (top: number, ...rows: string[]): Layer => [...Array<string>(top).fil
 /** The same layer drawn `rows` higher, for frames that hop; the layer must start with that many empty rows. */
 const up = (layer: Layer, rows: number): Layer => layer.slice(rows);
 
-// Abuy: the original grey tabby, sitting upright.
-const ABUY_SIT: Layer = [
-  "",
-  ".s.......s",
-  ".sp.....ps",
-  ".bbbbbbbbb",
-  ".bbbbbbbbb",
-  ".bbbbbbbbb",
-  ".bbbbpbbbb",
-  "..bbbbbbb",
-  "..bbwwwbb",
-  ".bbbwwwbbb",
-  ".bbbwwwbbb",
-  ".bwbbbbbwb",
-];
-const ABUY_OPEN = at(5, "...e...e", "...e...e");
-const ABUY_SHUT = at(6, "..ss...ss");
-const ABUY_TAIL = at(9, "..........s", "..........bs", "..........bbbs");
-const ABUY_SCREEN: Layer = [
-  ".kkkkkkkkkkkkk",
-  ".kqqqqqqqqqqqk",
-  ".kqqqqqqqqqqqk",
-  ".kqqqqqqqqqqqk",
-  ".kqqqqqqqqqqqk",
-  ".kkkkkkkkkkkkk",
-  "lllllllllllllll",
-];
-const ABUY_CODE_A: Layer = ["", "...uuu.vvv", "....vvvv.u", "...u.uuuu", "...vv.uu"];
-const ABUY_CODE_B: Layer = ["", "....vvvv.u", "...u.uuuu", "...vv.uuu", "....uuu"];
-const ABUY_BACK = at(
-  4,
-  "....s.....s",
-  "....bs...sb",
-  "....bbbbbbb",
-  "....bbbsbbb",
-  "....bbbsbbb",
-  "...bsbbbbbsb",
-  "..bbbbsbsbbbb",
-  "..bbbbbbbbbbb",
+// Abuy: the original grey tabby, sitting upright with a striped tail.
+const ABUY_TAIL = at(
+  7,
+  "..............o",
+  ".............oso",
+  ".............obo",
+  "............obo",
+  "............obo",
+  "............obo",
+  "..........oobbo",
+  ".........obboo",
 );
-const ABUY_BACK_TAIL_A = at(11, ".............bs");
-const ABUY_BACK_TAIL_B = at(10, "..............s", ".............b");
-const ABUY_MUG = at(6, "..ss...ss", "...........mcm", ".........wwmmmn", "...........mmmn", "...........mmm");
-const ABUY_STEAM_A = at(3, "............z", ".............z", "............z");
-const ABUY_STEAM_B = at(4, ".............z", "............z", ".............z");
+const ABUY_HEAD: Layer = [
+  ".o.........o",
+  "obo.......obo",
+  "obpo.....opbo",
+  "obpbooooobpbo",
+  "obbbbbbbbbbbo",
+  "obbbsbsbsbbbo",
+  "obbbbbsbbbbbo",
+  "obbbbbbbbbbbo",
+  "obbbbbbbbbbbo",
+  "obcbbbbbbbcbo",
+  ".obbbbbbbbbo",
+];
+const ABUY_BODY = at(11, "..oobbbbboo", "..obwwwwwbo", "..obwwwwwbo", "..owwbwbwwo");
+const ABUY_MOUTH = at(9, "......p", ".....o.o");
+const ABUY_OPEN = at(7, "...we...we", "...ee...ee");
+const ABUY_SHUT = at(8, "...oo...oo");
+const ABUY_LID = at(11, ".kkkkkkkkkkk", ".klllllllllk", ".kllllgllllk", ".klllllllllk");
+const ABUY_TYPE_A = at(10, "..owwo", "..owwo..owwo");
+const ABUY_TYPE_B = at(10, "......owwo", "..owwo..owwo");
+const ABUY_HAPPY = at(7, "...oo...oo", "..o..o.o..o");
+const ABUY_MUG = at(
+  10,
+  "...........kkkkk",
+  "..........wknnnnk",
+  "..........wkmmmk",
+  "...........kmmmk",
+  "...........kkkkk",
+);
+const ABUY_STEAM_A = at(5, "..............z", ".............z", "..............z", ".............z");
+const ABUY_STEAM_B = at(5, ".............z", "..............z", ".............z", "..............z");
 const ABUY_NAP = at(
-  3,
-  "............zzz",
-  ".............z",
-  ".s.......s..zzz",
-  ".sp.....ps",
-  ".bbbbbbbbbbb",
-  ".bssbbbssbbbb",
-  "bbbbbpbbbbbbbs",
-  "bbwwwwwbbbbbbbs",
-  ".bbbbbbbbbbbss",
+  6,
+  "..o...o",
+  ".obo.obo",
+  "obbbobbbooooo",
+  "obbbbbbbobbbboo",
+  "obbbbbbbbbbbbbbo",
+  "obbbbbbbbbbbbbbo",
+  "obbbbbbbbbbbbbbo",
+  ".obbbbbbbbbbbbo",
+  "..oooooooooooo",
 );
+const ABUY_NAP_FACE = at(8, "..p...p", "", ".........s.s", "..oo.oo...s.s", ".c..p..c", "..ww.ww.sssss");
+const ABUY_Z = at(3, "...........zzz", "............z", "...........zzz");
 
-// Oyen: a round orange loaf with tabby stripes and a cream muzzle.
+// Oyen: a round orange loaf with tabby stripes and cream paws.
 const OYEN_LOAF: Layer = [
+  "...o.......o",
+  "..obo.....obo",
+  ".obbbooooobbbo",
+  ".obbbbbbbbbbbo",
+  ".obbbbbbbbbbbo",
+  ".obbbbbbbbbbbo",
+  ".obbbbbbbbbbbo",
+  "obbbbbbbbbbbbbo",
+  "obbbbbbbbbbbbbo",
+  "obbbbbbbbbbbbbo",
+  "obbbbbbbbbbbbbo",
+  ".obbbbbbbbbbbo",
+  "..ooooooooooo",
+];
+const OYEN_MARKS = at(
+  2,
+  "...p.......p",
+  "......s.s",
+  ".......s",
   "",
-  ".bb.....bb",
-  ".bpb...bpb",
-  ".bbbsbsbbb",
-  "bbbbbsbbbbb",
-  "bbbbbbbbbbb.sbs",
-  "bbbbbbbbbbbbsbbs",
-  "bbbbbbbbbbsbbsbb",
-  "bbbbwpwbbbbbbsbb",
-  ".bbwewewbbbbbbbb",
-  "..bwwwwwbbbbbbbb",
-  "...wbbbwbbbbbbs",
-];
-const OYEN_OPEN = at(6, "..ie...ie", "..ee...ee");
-const OYEN_SHUT = at(7, "..ss...ss");
-const OYEN_YARN_A = at(8, "............yYy", "..........wyyYy", "...........yyyy", "............yy");
-const OYEN_YARN_B = at(8, "............yyy", "...........yYyy", "..........wyyYy", "............yy");
-const OYEN_BOWL = at(7, "..ss...ss", "", "", ".yyyyyyyyy", "..YyyyyyY");
-const OYEN_BITE_A = at(9, "...k.kk");
-const OYEN_BITE_B = at(9, "....kk.k");
-const OYEN_NAP: Layer = ["............zzz", ".............z", "............zzz", "", "", "", "", "..ss...ss"];
+  "",
+  ".s.c..w.w..c.s",
+  ".s.....w.....s",
+  "",
+  "",
+  "....ww...ww",
+);
+const OYEN_NOSE = at(7, ".......p", "......o.o");
+const OYEN_OPEN = at(5, "....we...we", "....ee...ee");
+const OYEN_SHUT = at(6, "....oo...oo");
+const OYEN_YARN_A = at(
+  8,
+  "............oooo",
+  "...........oyYyyo",
+  ".........wwoyyYyo",
+  "...........oYyyo",
+  "............oooo",
+);
+const OYEN_YARN_B = at(
+  8,
+  "...........oooo",
+  "..........oyyYyo",
+  ".........wwYyyyo",
+  "..........oyyYyo",
+  "...........oooo",
+);
+const OYEN_HAPPY = at(5, "....oo...oo", "...o..o.o..o");
+const OYEN_FISH_A = at(8, "..q..qqq", ".qFqqfffqq", "..qffffffeq", ".qFqqfffqq", "..q..qqq");
+const OYEN_FISH_B = at(8, "...q.qqq", "..qFqfffqq", "..qffffffeq", "..qFqfffqq", "...q.qqq");
+const OYEN_Z: Layer = [".............zzz", "..............z", ".............zzz"];
 
-// Kuro: a slim black cat with big yellow eyes, a red collar and a question-mark tail.
-const KURO_SIT: Layer = [
-  ".l.....l",
-  ".bl...lb",
-  ".bpb.bpb",
-  "lbbbbbbbb",
-  "lbbbbbbbb",
-  "lbbbbbbbb",
-  "lbbbpbbbb",
-  ".lbbbbbb",
-  "..rrgrr",
-  "..lbbbb",
-  "..lbbbb",
-  ".lbbbbbb",
-  ".lbbbbbb",
-  ".ll.l.ll",
-];
-const KURO_OPEN = at(4, ".ee...ee", ".ei...ie");
-const KURO_SHUT = at(5, ".ll...ll");
+// Kuro: a slim black cat with yellow eyes, a red collar and a question-mark tail.
 const KURO_TAIL = at(
   4,
-  ".........ll",
-  "...........l",
-  "...........b",
-  "...........b",
-  "...........b",
-  "..........b",
-  ".........b",
-  "........bb",
+  "..........o",
+  ".........obo",
+  "..........obo",
+  "...........obo",
+  "...........obo",
+  "...........obo",
+  "...........obo",
+  "..........obo",
+  "..........obo",
+  ".........obo",
+  "........obo",
+  ".........o",
 );
-const KURO_PAW = at(7, "........l", "........bb", ".......bb");
-const KURO_ORB_A: Layer = ["", ".........v", "........vVv.V", ".........v", "", "...........V"];
-const KURO_ORB_B: Layer = ["", "............V", ".........v", "........vVv", ".........v", "..........V"];
-const KURO_LICK = at(5, ".ll...ll", "lbbl", "lbbbp", ".lbb");
+const KURO_BODY: Layer = [
+  "o.........o",
+  "oo.......oo",
+  "obo.....obo",
+  "obpo...opbo",
+  "obpbooobpbo",
+  "obbbbbbbbbo",
+  "obbbbbbbbbo",
+  "obbbbbbbbbo",
+  "obbbbbbbbbo",
+  ".obbbbbbbo",
+  "..orrgrro",
+  "..obbbbbo",
+  "..obbbbbo",
+  "..obbbbbo",
+  "..obbbbbo",
+  "..obobobo",
+];
+const KURO_NOSE = at(8, ".....p");
+const KURO_OPEN = at(6, "..ew...ew", "..ee...ee");
+const KURO_SHUT = at(7, "..hh...hh");
+const KURO_PAW = at(7, ".........o", "........obo", ".......obbo", ".......obo", "........o");
+const KURO_ORB_A = at(1, "...........V", "..........vVv", "...........v", "", "............V");
+const KURO_ORB_B = at(1, "..........V.V", "...........v", "..........vVv", "...........v", "..........V");
+const KURO_HAPPY = at(6, "..hh...hh", ".h..h.h..h");
+const KURO_LICK = at(7, "..oo", ".obbo", ".obbp", "..oo");
 const KURO_CURL = at(
-  3,
-  "..........zzz",
-  "...........z",
-  "..........zzz",
-  "",
-  "......llll",
-  ".l.l.lbbbbl",
-  "lplbllbbbbbl",
-  "lbbbbbbbbbbbl",
-  "lbllbbbbbbbbl",
-  "lbbbbblllllbl",
-  ".lllllbbbbbl",
+  7,
+  "..o...o",
+  ".obo.obo",
+  "obpbobpboooo",
+  "obbbbbbbobbboo",
+  "obhhbhhbbbbbbbo",
+  "obbbpbbbbbbbbbo",
+  "obhhhhhhhhhhhbo",
+  ".obbbbbbbbbbbo",
+  "..ooooooooooo",
 );
+const KURO_Z = at(4, "...........zzz", "............z", "...........zzz");
 
-// Kalong: a fruit bat with a russet fox face, wrapped in dark wings.
-const KALONG_FOLDED: Layer = [
-  "",
-  "....d.....d",
-  "....bd...db",
-  "....bbbbbbb",
-  "...bbbbbbbbb",
-  "...bbbnnnbbb",
-  "....bbnpnbb",
-  "..D...nnn...D",
-  "..dd.bnnnb.dd",
-  "..dddbnnnbddd",
-  "..dddddnddddd",
-  "...ddddddddd",
-  "....b.....b",
-];
-const KALONG_OPEN = at(4, "....e...e");
-const KALONG_SHUT = at(5, "....d...d");
-const KALONG_BODY = at(
+// Kalong: a round grey fruit bat with big ears, little fangs and black wings.
+const KALONG_WINGS = at(
   3,
-  ".....d....d",
-  ".....bd..db",
-  ".....bbbbbb",
-  ".....bebbeb",
-  ".....bbnnbb",
-  "......npn",
-  "......nnn",
-  "......bbb",
-  "......b.b",
+  ".o...........o",
+  "odo.........odo",
+  "oddo.......oddo",
+  "odddo.....odddo",
+  "odmddo...oddmdo",
+  "odmmdo...odmmdo",
+  "oddmdo...odmddo",
+  "ododo.....ododo",
+  ".o.o.......o.o",
 );
+const KALONG_BALL: Layer = [
+  "..obo.....obo",
+  "..obbo...obbo",
+  "..obpbooobpbo",
+  "..obpbbbbbpbo",
+  "...obbbbbbbo",
+  "...obbbbbbbo",
+  "...obbbbbbbo",
+  "...obbbbbbbo",
+  "...obbfffbbo",
+  "....obfffbo",
+  ".....obfbo",
+  "......ooo",
+];
+const KALONG_FACE = at(7, "....c..e..c", "......w.w");
+const KALONG_OPEN = at(5, ".....we.we", ".....ee.ee");
+const KALONG_SHUT = at(6, ".....oo.oo");
 const KALONG_UP: Layer = [
-  "d..............d",
-  "dd............dd",
-  "ddd..........ddd",
-  "dDdd........ddDd",
-  ".dDdd......ddDd",
-  ".ddDdd....ddDdd",
-  "..d.ddd..ddd.d",
-  ".....dd..dd",
+  "odo.........odo",
+  "oddo.......oddo",
+  "odmdo.....odmdo",
+  "oddmdo...odmddo",
+  ".oddmdo.odmddo",
+  ".oddddo.oddddo",
+  "..ododo.ododo",
+  "...o.o...o.o",
 ];
-const KALONG_DOWN = at(7, "....ddd..ddd", ".dDddd....ddddDd", "ddDdd......ddDdd", "d.dd........dd.d", "..d..........d");
-const KALONG_MANGO = at(5, "....d...d", "", "", ".....mmmg", "....mmmmM", "....mmmMM");
-const KALONG_BITE_A = at(8, ".....m");
-const KALONG_NAP: Layer = ["............zzz", ".............z", "............zzz", "", "....D...D", "...DD...DD"];
-
-// Jelok: a lantern pumpkin with a carved, glowing face.
-const JELOK = at(
-  2,
-  ".......s.ll",
-  "......ssll",
-  "....oooooo",
-  "..ohooroorooo",
-  ".ohhoorooorooo",
-  ".ohooroooorooo",
-  ".ooooroooorooo",
-  ".ooooroooorooo",
-  ".ooooroooorooo",
-  "..oooroooorooo",
-  "....oooooooo",
+const KALONG_DOWN = at(
+  5,
+  "....oo...oo",
+  "..ooddo.oddoo",
+  ".oddddo.oddddo",
+  "odmmddo.oddmmdo",
+  "odmdddo.odddmdo",
+  "odododo.odododo",
+  ".o.o.o...o.o.o",
 );
-const JELOK_FACE = at(6, "....g....g", "...ggg..ggg", "", "...g......g", "....gGgGgg", ".....g..g");
-const JELOK_DIM = at(6, "....G....G", "...GGG..GGG", "", "...G......G", "....GGGGGG", ".....G..G");
-const JELOK_SHADES = at(6, "..kkkkkkkkk", "...kkk..kkk", "", "....g....g", ".....gggg");
-const JELOK_GLINT = at(6, "...w....w");
-const JELOK_OUT: Layer = [
-  "...........zzz",
-  "............z",
-  "...........zzz",
-  "",
-  "",
-  "",
-  "",
-  "...ddd..ddd",
-  "",
-  "",
-  "....dddddd",
-];
+const KALONG_HAPPY = at(5, ".....o...o", "....o.o.o.o");
+const KALONG_MANGO = at(8, "......QgQ", ".....QyyyQ", "....QyyyyMQ", ".....QyMMQ", "......QQQ");
+const KALONG_WRAP = at(
+  6,
+  "....ooooooo",
+  "...odddddddo",
+  "..oddddmddddo",
+  "..oddmdddmddo",
+  "...odmdddmdo",
+  "....ooooooo",
+);
+const KALONG_NAP_BLUSH = at(7, "....c.....c");
+const KALONG_Z: Layer = ["......zzz", ".......z", "......zzz"];
+
+// Jelok: a little pumpkin with a leafy stem; it has two spare rows on top for hopping.
+const JELOK = at(
+  4,
+  "....ooooooo",
+  "..oobbrbrbboo",
+  ".obhbrbbbrbhbo",
+  ".ohbrbbbbbrbho",
+  "obhbrbbbbbrbhbo",
+  "obbbrbbbbbrbbbo",
+  "obbbrbbbbbrbbbo",
+  "obbbrbbbbbrbbbo",
+  "obbbrbbbbbrbbbo",
+  ".obbrbbbbbrbbo",
+  "..oorbbbbbroo",
+  "....ooooooo",
+);
+const JELOK_STEM = at(2, "......ss.ll", ".......slll", ".......s");
+const JELOK_FACE = at(11, "...c.......c", "......o.o", ".......o");
+const JELOK_OPEN = at(9, "....we...we", "....ee...ee");
+const JELOK_SHUT = at(10, "....oo...oo");
+const JELOK_HAPPY = at(9, "....oo...oo", "...o..o.o..o");
+const JELOK_HOP = up(JELOK, 2);
+const JELOK_STEM_HOP = up(JELOK_STEM, 2);
+const JELOK_FACE_HOP = up(JELOK_FACE, 2);
+const JELOK_HAPPY_HOP = up(JELOK_HAPPY, 2);
+const JELOK_SHADOW = at(15, "...zzzzzzzzz");
+const JELOK_SHADES = at(8, "..kkkkkkkkkkk", "..kkwkk.kkwkk", "...kkk...kkk");
+const JELOK_Z = at(2, ".zzz", "..z", ".zzz");
 
 export const PETS = {
   abuy: {
     name: "Abuy",
     kind: "Grey tabby cat",
     about: "Codes on a laptop while Pal works and stops for coffee when it's quiet.",
-    size: { width: 15, height: 12 },
+    size: { width: 16, height: 15 },
     colors: {
-      b: "#aab3c5",
-      s: "#6c768c",
-      w: "#eef1f6",
-      e: "#1a2236",
-      p: "#ffb3c1",
+      o: "#4f5668",
+      b: "#b8c0d0",
+      s: "#8e97ab",
+      w: "#f4f6fa",
+      e: "#1c2130",
+      p: "#ff96ab",
+      c: "#ffb3c2",
       z: "#a1a1aa",
-      k: "#3d4250",
-      q: "#1c2130",
-      l: "#7d8496",
-      u: "#9db1e6",
-      v: "#93bfa5",
-      m: "#e9dfd0",
-      n: "#c9bba6",
-      c: "#7a5236",
+      k: "#2c303b",
+      l: "#6b7388",
+      g: "#a9bdf2",
+      m: "#f1e9dd",
+      n: "#8a5a3c",
     },
     poses: {
-      sit: { label: "Sitting", parts: [[ABUY_SIT], [ABUY_TAIL], [ABUY_OPEN, "open"], [ABUY_SHUT, "shut"]] },
+      sit: {
+        label: "Sitting",
+        parts: [[ABUY_TAIL], [ABUY_HEAD], [ABUY_BODY], [ABUY_MOUTH], [ABUY_OPEN, "open"], [ABUY_SHUT, "shut"]],
+      },
       work: {
         label: "On the laptop",
-        beat: 1.2,
+        beat: 0.5,
         parts: [
-          [ABUY_SCREEN],
-          [ABUY_CODE_A, "a"],
-          [ABUY_CODE_B, "b"],
-          [ABUY_BACK],
-          [ABUY_BACK_TAIL_A, "a"],
-          [ABUY_BACK_TAIL_B, "b"],
+          [ABUY_TAIL],
+          [ABUY_HEAD],
+          [ABUY_BODY],
+          [ABUY_MOUTH],
+          [ABUY_OPEN, "open"],
+          [ABUY_SHUT, "shut"],
+          [ABUY_LID],
+          [ABUY_TYPE_A, "a"],
+          [ABUY_TYPE_B, "b"],
         ],
       },
       rest: {
         label: "Coffee break",
         beat: 1.6,
-        parts: [[ABUY_SIT], [ABUY_MUG], [ABUY_STEAM_A, "a"], [ABUY_STEAM_B, "b"]],
+        parts: [
+          [ABUY_HEAD],
+          [ABUY_BODY],
+          [ABUY_MOUTH],
+          [ABUY_HAPPY],
+          [ABUY_MUG],
+          [ABUY_STEAM_A, "a"],
+          [ABUY_STEAM_B, "b"],
+        ],
       },
-      nap: { label: "Napping", parts: [[ABUY_NAP]] },
+      nap: { label: "Napping", parts: [[ABUY_NAP], [ABUY_NAP_FACE], [ABUY_Z]] },
     },
   },
   oyen: {
     name: "Oyen",
     kind: "Orange cat",
-    about: "A round loaf who plays with yarn while Pal works and never misses a snack.",
-    size: { width: 16, height: 12 },
+    about: "A round loaf who plays with yarn while Pal works and sneaks a fish on breaks.",
+    size: { width: 16, height: 13 },
     colors: {
-      b: "#ef9a4a",
-      s: "#c4672b",
-      w: "#fde3c4",
-      e: "#2b2118",
+      o: "#9a4a1c",
+      b: "#f6a04d",
+      s: "#d9772f",
+      w: "#fff1dc",
+      e: "#2a1c14",
       p: "#ff8fa3",
+      c: "#ffb39a",
       z: "#a1a1aa",
-      i: "#fffaf2",
-      k: "#9a5b2e",
-      y: "#6f8fd6",
-      Y: "#93aee8",
+      y: "#7f9ee8",
+      Y: "#b7c9f5",
+      f: "#b9d0dd",
+      F: "#8fb0c4",
+      q: "#4d6b80",
     },
     poses: {
-      sit: { label: "Loafing", parts: [[OYEN_LOAF], [OYEN_OPEN, "open"], [OYEN_SHUT, "shut"]] },
+      sit: {
+        label: "Loafing",
+        parts: [[OYEN_LOAF], [OYEN_MARKS], [OYEN_NOSE], [OYEN_OPEN, "open"], [OYEN_SHUT, "shut"]],
+      },
       work: {
         label: "Playing with yarn",
         beat: 0.8,
-        parts: [[OYEN_LOAF], [OYEN_OPEN], [OYEN_YARN_A, "a"], [OYEN_YARN_B, "b"]],
+        parts: [
+          [OYEN_LOAF],
+          [OYEN_MARKS],
+          [OYEN_NOSE],
+          [OYEN_OPEN, "open"],
+          [OYEN_SHUT, "shut"],
+          [OYEN_YARN_A, "a"],
+          [OYEN_YARN_B, "b"],
+        ],
       },
       rest: {
-        label: "Snack time",
+        label: "Fish snack",
         beat: 0.9,
-        parts: [[OYEN_LOAF], [OYEN_BOWL], [OYEN_BITE_A, "a"], [OYEN_BITE_B, "b"]],
+        parts: [[OYEN_LOAF], [OYEN_MARKS], [OYEN_NOSE], [OYEN_HAPPY], [OYEN_FISH_A, "a"], [OYEN_FISH_B, "b"]],
       },
-      nap: { label: "Napping", parts: [[OYEN_LOAF], [OYEN_NAP]] },
+      nap: { label: "Napping", parts: [[OYEN_LOAF], [OYEN_MARKS], [OYEN_NOSE], [OYEN_SHUT], [OYEN_Z]] },
     },
   },
   kuro: {
     name: "Kuro",
     kind: "Black cat",
     about: "Slim and sharp-eyed. Conjures a little light while Pal works, grooms when it's quiet.",
-    size: { width: 13, height: 14 },
+    size: { width: 15, height: 16 },
     colors: {
-      b: "#33363f",
-      l: "#5d6273",
-      p: "#e58a9b",
-      e: "#f5c542",
-      i: "#1a1b20",
-      r: "#d9485b",
-      g: "#f5c542",
-      v: "#b49cf0",
-      V: "#efe7ff",
+      o: "#0e0f13",
+      b: "#363944",
+      h: "#6a6f80",
+      p: "#e98aa0",
+      e: "#ffd34d",
+      w: "#ffffff",
+      r: "#e04f63",
+      g: "#ffd34d",
+      v: "#c4b0ff",
+      V: "#f4efff",
       z: "#a1a1aa",
     },
     poses: {
-      sit: { label: "Sitting", parts: [[KURO_SIT], [KURO_TAIL], [KURO_OPEN, "open"], [KURO_SHUT, "shut"]] },
+      sit: {
+        label: "Sitting",
+        parts: [[KURO_TAIL], [KURO_BODY], [KURO_NOSE], [KURO_OPEN, "open"], [KURO_SHUT, "shut"]],
+      },
       work: {
         label: "Casting a spell",
         beat: 1,
-        parts: [[KURO_SIT], [KURO_PAW], [KURO_OPEN], [KURO_ORB_A, "a"], [KURO_ORB_B, "b"]],
+        parts: [
+          [KURO_TAIL],
+          [KURO_BODY],
+          [KURO_NOSE],
+          [KURO_OPEN, "open"],
+          [KURO_SHUT, "shut"],
+          [KURO_PAW],
+          [KURO_ORB_A, "a"],
+          [KURO_ORB_B, "b"],
+        ],
       },
-      rest: { label: "Grooming", parts: [[KURO_SIT], [KURO_TAIL], [KURO_LICK]] },
-      nap: { label: "Curled up", parts: [[KURO_CURL]] },
+      rest: { label: "Grooming", parts: [[KURO_TAIL], [KURO_BODY], [KURO_HAPPY], [KURO_LICK]] },
+      nap: { label: "Curled up", parts: [[KURO_CURL], [KURO_Z]] },
     },
   },
   kalong: {
     name: "Kalong",
     kind: "Fruit bat",
     about: "Flaps along while Pal works and snacks on mango between runs.",
-    size: { width: 16, height: 13 },
+    size: { width: 15, height: 13 },
     colors: {
-      b: "#8b5a3c",
-      n: "#c58f5f",
-      d: "#3d2c26",
-      D: "#64483a",
-      e: "#140f0d",
-      p: "#2a1e1a",
-      m: "#f2b33d",
+      o: "#0b0c0f",
+      b: "#7c8190",
+      f: "#a3a8b5",
+      d: "#2c2e36",
+      m: "#5d6170",
+      e: "#121318",
+      w: "#ffffff",
+      p: "#e98aa0",
+      c: "#f2a7b8",
+      y: "#f6b73c",
       M: "#e2703a",
-      g: "#6aa84f",
+      Q: "#8a4b1c",
+      g: "#6cbf6a",
       z: "#a1a1aa",
     },
     poses: {
-      sit: { label: "Perched", parts: [[KALONG_FOLDED], [KALONG_OPEN, "open"], [KALONG_SHUT, "shut"]] },
+      sit: {
+        label: "Hanging out",
+        parts: [[KALONG_WINGS], [KALONG_BALL], [KALONG_FACE], [KALONG_OPEN, "open"], [KALONG_SHUT, "shut"]],
+      },
       work: {
         label: "Flying",
         beat: 0.5,
-        parts: [[KALONG_UP, "a"], [KALONG_DOWN, "b"], [KALONG_BODY]],
+        parts: [
+          [KALONG_UP, "a"],
+          [KALONG_DOWN, "b"],
+          [KALONG_BALL],
+          [KALONG_FACE],
+          [KALONG_OPEN, "open"],
+          [KALONG_SHUT, "shut"],
+        ],
       },
-      rest: { label: "Mango snack", beat: 1.2, parts: [[KALONG_FOLDED], [KALONG_MANGO], [KALONG_BITE_A, "a"]] },
-      nap: { label: "Wrapped up", parts: [[KALONG_FOLDED], [KALONG_NAP]] },
+      rest: {
+        label: "Mango snack",
+        parts: [[KALONG_WINGS], [KALONG_BALL], [KALONG_FACE], [KALONG_HAPPY], [KALONG_MANGO]],
+      },
+      nap: {
+        label: "Wrapped up",
+        parts: [[KALONG_BALL], [KALONG_WRAP], [KALONG_SHUT], [KALONG_NAP_BLUSH], [KALONG_Z]],
+      },
     },
   },
   jelok: {
     name: "Jelok",
     kind: "Pumpkin",
-    about: "A lantern pumpkin. Hops while Pal works and puts on shades to rest.",
-    size: { width: 14, height: 13 },
+    about: "A little pumpkin. Hops while Pal works and puts on shades to rest.",
+    size: { width: 15, height: 16 },
     colors: {
-      o: "#e8833a",
-      r: "#b8571f",
-      h: "#f6a35e",
-      g: "#ffd36b",
-      G: "#f2a541",
-      s: "#4f7a35",
-      l: "#79ad57",
+      o: "#8a3d12",
+      b: "#f5913e",
+      r: "#d9702a",
+      h: "#ffc07a",
+      s: "#4c7d34",
+      l: "#7fbf5a",
+      e: "#2a1a12",
+      w: "#ffffff",
+      c: "#ff9a8a",
       k: "#1d1d22",
-      w: "#f4f4f5",
-      d: "#5a2d14",
       z: "#a1a1aa",
     },
     poses: {
-      sit: { label: "Glowing", parts: [[JELOK], [JELOK_FACE, "open"], [JELOK_DIM, "shut"]] },
+      sit: {
+        label: "Smiling",
+        parts: [[JELOK], [JELOK_STEM], [JELOK_FACE], [JELOK_OPEN, "open"], [JELOK_SHUT, "shut"]],
+      },
       work: {
         label: "Hopping",
         beat: 0.6,
         parts: [
           [JELOK, "a"],
+          [JELOK_STEM, "a"],
           [JELOK_FACE, "a"],
-          [up(JELOK, 2), "b"],
-          [up(JELOK_FACE, 2), "b"],
+          [JELOK_HAPPY, "a"],
+          [JELOK_HOP, "b"],
+          [JELOK_STEM_HOP, "b"],
+          [JELOK_FACE_HOP, "b"],
+          [JELOK_HAPPY_HOP, "b"],
+          [JELOK_SHADOW, "b"],
         ],
       },
-      rest: { label: "In shades", parts: [[JELOK], [JELOK_SHADES], [JELOK_GLINT, "shut"]] },
-      nap: { label: "Candle out", parts: [[JELOK], [JELOK_OUT]] },
+      rest: { label: "In shades", parts: [[JELOK], [JELOK_STEM], [JELOK_FACE], [JELOK_SHADES]] },
+      nap: { label: "Dozing", parts: [[JELOK], [JELOK_STEM], [JELOK_FACE], [JELOK_SHUT], [JELOK_Z]] },
     },
   },
 } as const satisfies Record<string, Pet>;
