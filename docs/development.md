@@ -210,6 +210,32 @@ This measures this runner's Pal/journal/local transport overhead, not provider/i
 CI retains seven samples on each native target. It is a baseline measurement, not evidence for connection pooling
 or an optimization claim; cache hits still perform the conservative current catalog/authority checks.
 
+### Optional capability activation measurements
+
+```sh
+nix build --out-link activation-benchmark .#activation-benchmark
+./activation-benchmark/bin/pal-benchmark-activation search 7 > activation-search.json
+./activation-benchmark/bin/pal-benchmark-activation terminal 7 > activation-terminal.json
+# On a qualified Linux host with the packaged browser protections and its user resource scope:
+./activation-benchmark/bin/pal-benchmark-activation browser 7 > activation-browser.json
+```
+
+Each sample creates a private store, guidance root and 500-file project. Setup/seeding is outside the measured
+interval. Search must return the known Unicode filename; the terminal must deliver its live control state and
+shell prompt over the real authenticated WebSocket; the browser must deliver owner control and a blank-page
+frame using its unchanged packaged sandbox, public-only egress broker and resource scope. Unavailable protection,
+failed work or a disconnected stream fails the measurement rather than becoming a fast success or a fallback.
+No model or internet request is made. Only synthetic fixture data is used and removed after its resources close.
+
+JSON retains all samples, nearest-rank p50/p95, immutable runner source and host identity, readiness latency and
+idle/active main-process RSS. Node's diagnostic report also counts worker threads, direct libuv child handles
+and loaded native addons; these are not whole-process-tree counts. RSS excludes child memory and is neither
+peak nor aggregate. Samples share one process, loaded addons and filesystem caches, with fresh data per sample;
+compare like instrumentation and do not call this cold-start or cold-install performance. The packaged wrapper
+starts with an allowlisted environment, not provider credentials or inherited Node preload options. CI records
+search/terminal measurements on both native targets; the protected browser measurement requires a qualified
+Linux host and does not establish an unavailable macOS browser implementation or full platform parity.
+
 ### Platform acceptance matrix
 
 [#30](https://github.com/valdo766hi/pal/issues/30) requires equivalent native behavior, not just a portable

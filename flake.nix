@@ -43,6 +43,7 @@
           native-check = pkgs.callPackage ./nix/native-check.nix { inherit ui pal; };
           transcript-benchmark = pkgs.callPackage ./nix/transcript-benchmark.nix { inherit ui; };
           mcp-benchmark = pkgs.callPackage ./nix/mcp-benchmark.nix { inherit ui; };
+          activation-benchmark = pkgs.callPackage ./nix/activation-benchmark.nix { inherit ui pal; };
           evaluate = pkgs.callPackage ./nix/evaluate.nix { inherit ui; };
           startup-benchmark = pkgs.writeShellApplication {
             name = "pal-benchmark-startup";

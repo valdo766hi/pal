@@ -118,6 +118,16 @@ jobs:
           nix build --max-jobs 2 --cores 2 -L --out-link mcp-benchmark \
             ".#packages.$SYSTEM.mcp-benchmark"
           ./mcp-benchmark/bin/pal-benchmark-mcp 7 > mcp-candidate.json
+      - name: Optional capability activation measurements, not provider latency
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link activation-benchmark \
+            ".#packages.$SYSTEM.activation-benchmark"
+          for capability in search terminal; do
+            ./activation-benchmark/bin/pal-benchmark-activation \
+              "$capability" 7 > "activation-$capability.json"
+          done
       # Hosted Ubuntu 24.04 disallows the user namespaces Chromium's sandbox
       # needs; Linux transcripts run in the Ubuntu 22.04 job below instead.
       - name: Long-chat transcript measurements, not model evaluations
@@ -154,6 +164,10 @@ jobs:
           printf '\n### Loopback MCP cache; scripted model\n\n' \
             >> "$GITHUB_STEP_SUMMARY"
           tee -a "$GITHUB_STEP_SUMMARY" < mcp-candidate.json
+          printf '\n### Optional capability activation; main-process RSS\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < activation-search.json
+          tee -a "$GITHUB_STEP_SUMMARY" < activation-terminal.json
           if test -f transcript-candidate.json; then
             printf '\n### Long-chat transcript; selected web bundles\n\n' \
               >> "$GITHUB_STEP_SUMMARY"
@@ -178,6 +192,8 @@ jobs:
             startup-baseline.json
             startup-candidate.json
             mcp-candidate.json
+            activation-search.json
+            activation-terminal.json
             transcript-baseline.json
             transcript-candidate.json
             native-ui/summary.json
