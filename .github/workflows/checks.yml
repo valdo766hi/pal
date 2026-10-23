@@ -142,6 +142,18 @@ jobs:
               "$PWD/$name-package/lib/pal/dist/public" 7 \
               > "transcript-$name.json"
           done
+      - name: Check measured-host performance budgets
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link performance-check \
+            ".#packages.$SYSTEM.performance-check"
+          ./performance-check/bin/pal-check-performance \
+            core "$PWD" > performance-core.json
+          if test -f transcript-candidate.json; then
+            ./performance-check/bin/pal-check-performance \
+              transcript "$PWD" > performance-transcript.json
+          fi
       - name: Publish bounded coverage summary
         run: |
           printf '### Native core checks\n\n' >> "$GITHUB_STEP_SUMMARY"
@@ -168,11 +180,15 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
           tee -a "$GITHUB_STEP_SUMMARY" < activation-search.json
           tee -a "$GITHUB_STEP_SUMMARY" < activation-terminal.json
+          printf '\n### Measured-host performance budgets\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < performance-core.json
           if test -f transcript-candidate.json; then
             printf '\n### Long-chat transcript; selected web bundles\n\n' \
               >> "$GITHUB_STEP_SUMMARY"
             tee -a "$GITHUB_STEP_SUMMARY" < transcript-baseline.json
             tee -a "$GITHUB_STEP_SUMMARY" < transcript-candidate.json
+            tee -a "$GITHUB_STEP_SUMMARY" < performance-transcript.json
           fi
           if test -f native-ui/summary.json; then
             printf '\n### Native chat UI subset\n\n' \
@@ -194,6 +210,8 @@ jobs:
             mcp-candidate.json
             activation-search.json
             activation-terminal.json
+            performance-core.json
+            performance-transcript.json
             transcript-baseline.json
             transcript-candidate.json
             native-ui/summary.json
@@ -239,6 +257,10 @@ jobs:
               "$PWD/$name-package/lib/pal/dist/public" 7 \
               > "transcript-$name.json"
           done
+          nix build --max-jobs 2 --cores 2 -L --out-link performance-check \
+            .#packages.x86_64-linux.performance-check
+          ./performance-check/bin/pal-check-performance \
+            transcript "$PWD" > performance-transcript.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
@@ -246,5 +268,6 @@ jobs:
           path: |
             transcript-baseline.json
             transcript-candidate.json
+            performance-transcript.json
           retention-days: 7
           if-no-files-found: error

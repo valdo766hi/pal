@@ -167,9 +167,9 @@ grading of untrusted code. The same process controls remain inside both native N
 CI measures the fixed pre-extraction `0ac668e` baseline and exact candidate package on the same native host after
 builds finish. These are sequential batches with fresh processes/stores, **not flushed filesystem caches**, peak or
 aggregate worker RSS, configured chat latency, model quality, or full platform acceptance. Compare like hosts and
-repeat before attributing a difference to code. No regression budget or optimization claim is established by the
-runner alone. Browser/PTY/search activation measurements and host-specific regression budgets remain required
-for #14; do not change isolation without profiling and correctness regressions.
+repeat before attributing a difference to code. The runner alone establishes neither a regression budget nor
+an optimization claim; use the checks and scoped comparison below. Do not change isolation without profiling
+and correctness regressions.
 
 Optional capabilities start nothing until the owner uses them: `test/idle-capabilities.test.ts` checks that
 startup and ordinary chat setup create no worker threads, child processes, terminal addon, browser or search index,
@@ -235,6 +235,77 @@ compare like instrumentation and do not call this cold-start or cold-install per
 starts with an allowlisted environment, not provider credentials or inherited Node preload options. CI records
 search/terminal measurements on both native targets; the protected browser measurement requires a qualified
 Linux host and does not establish an unavailable macOS browser implementation or full platform parity.
+
+### Measured-host performance budgets
+
+```sh
+nix build --out-link performance-check .#performance-check
+# Collect the reports above in one private directory, using these exact filenames:
+# startup-{baseline,candidate}.json, mcp-candidate.json, activation-{search,terminal}.json
+# Optionally include activation-browser.json from a qualified protected host.
+./performance-check/bin/pal-check-performance core "$PWD/reports" > performance-core.json
+# Paired transcript-{baseline,candidate}.json may come from a separate native host/job.
+./performance-check/bin/pal-check-performance transcript "$PWD/reports" > performance-transcript.json
+```
+
+Each mode requires 7–25 raw samples, matching native host/runtime identity and compatible instrumentation;
+transcripts also require identical workload and Chromium version. Core requires the same immutable runner source
+for MCP and activation. The checker recomputes percentiles instead of trusting summaries, rejects missing/invalid
+reports and failed readiness/cache/idle-worker controls, and retains each observation, limit and evidence identity.
+A budget regression prints its report and exits nonzero. Invalid input fails rather than producing a passing report.
+CI retains both raw measurements and checks, including failed reports. Missing protected-browser measurements are
+explicitly `unexecuted`, never macOS parity or a browser-security pass.
+
+These initial guardrails cover the measured Linux x86-64 and Darwin ARM64 fixture profiles, not universal service
+SLOs or an expanded support policy. They deliberately allow run-to-run noise; investigate raw failures on the same
+host before changing a limit. MiB/GiB below mean powers of 1024; paired limits use the fixed pre-extraction baseline.
+
+| Candidate metric | Maximum |
+| --- | --- |
+| Startup readiness p50 / p95 | baseline p50 × 1.35 + 50 ms / 1500 ms |
+| Startup main RSS p50 / p95 | baseline p50 × 1.15 + 8 MiB / 192 MiB |
+| Package NAR / closure NAR | min(160 MiB, baseline × 1.10) / min(2 GiB Linux or 3 GiB Darwin, baseline × 1.05) |
+| MCP round trip p95, first / cached / forced live | 1500 / 750 / 750 ms |
+| Search / terminal / protected-browser activation p95 | 1500 / 750 / 2500 ms |
+| MCP or activation main RSS p95 | 512 MiB |
+| Transcript task / script p50 | baseline × 0.50 / baseline × 0.25 |
+| Transcript task / script p95 | 2000 / 250 ms |
+| Transcript total frame waits / slowest frame p95 | 2000 / 100 ms |
+
+### Scoped before/after report
+
+The fixed baseline is `0ac668e4996e56a4bfc1725a37ab9a4a31c6b6f1`; the measured candidate below is
+`b7e8fbdbff30599ae62bedd1950b90d62fa3bd74`, not an unmeasured future release. Both were measured with the
+candidate's instrumentation. [Run 40016157258](https://github.com/valdo766hi/pal/actions/runs/40016157258)
+retains native raw reports and package/bundle identities (seven samples per batch, Node 24.21.0).
+
+| Linux measurement | Baseline | Candidate |
+| --- | --- | --- |
+| Startup readiness p50 / p95, ms | 473.91 / 496.91 | 481.42 / 515.65 |
+| Startup main RSS p50 / p95, bytes | 118,964,224 / 125,792,256 | 121,843,712 / 123,379,712 |
+| Package / closure NAR bytes | 113,954,312 / 1,562,299,456 | 114,517,640 / 1,563,712,624 |
+| Transcript task p50 / p95, ms | 2509.81 / 2586.74 | 351.79 / 380.22 |
+| Transcript script p50 / p95, ms | 1700.15 / 1744.99 | 40.01 / 42.97 |
+
+Startup/footprint ran on Ubuntu 24.04, Linux 6.17.0-1022-azure, Xeon Platinum 8370C, four logical CPUs,
+16,765,378,560 bytes RAM. Transcript ran on a **different** Ubuntu 22.04 host, Linux 6.8.0-1064-azure,
+Xeon 6973P-C, four logical CPUs, 16,764,379,136 bytes RAM, Chromium 147.0.7727.15. Only each host's own
+paired batches are comparable. Baseline/candidate Linux package identities are `chhd404nszcikchp913wksasljf54kwz`
+and `bs5vxig0ka18lxr2aizdr0dfwcxjrjcb`; raw reports retain full paths and bundle SHA-256s.
+
+On the startup host, candidate MCP first/cached/forced-live p95 was 197.65/118.40/108.94 ms, with the required
+1/0/1 remote tool calls. Search/terminal activation p95 was 161.71/49.56 ms. A separate qualified Linux 6.18.56
+Xeon Cascadelake host (16 logical CPUs, 47 GiB RAM) measured protected-browser activation p50/p95 at
+357.68/671.81 ms and active main RSS p95 at 210,108,416 bytes; search/terminal there was 193.56/72.83 ms p95.
+All 21 qualified-host activation idle snapshots had zero reported workers/direct children. These are candidate
+observations, **not before/after activation or MCP speedup claims**; those capabilities were not changed to pool
+connections or weaken isolation.
+
+The transcript fixture shows substantially less repeated main-thread work while preserving rendered history,
+focus, draft and scroll; its correctness suite also covers approvals and reconnect resets. Startup is not faster
+in this paired sample and installation footprint grew slightly. These bounded results justify the incremental
+transcript change and retaining lazy optional capabilities/conservative MCP isolation, not broad latency,
+cold-install, whole-process memory, internet/provider quality or full Linux/macOS parity claims.
 
 ### Platform acceptance matrix
 
