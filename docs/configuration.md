@@ -243,8 +243,13 @@ On Linux, the Nix package can run as `pal supervise`. Settings → **Releases** 
 1. You approve the exact checked digest.
 2. You confirm the activation or compatible rollback.
 
-The supervisor drains running work, starts the new child, checks its health and keeps the previous release to fall
-back to.
+The protected recipe requires all seven artifacts: package, smoke, unit/build, browser, e2e, independent grader
+controls, and fixed policy/context evaluations. These use local fixtures, not paid model-quality evaluations.
+Older six-artifact receipts remain inspectable but cannot authorize an update. Re-run `pal check-release` with
+the current trusted package; incomplete cached proofs are not reused, and their original files are retained.
+
+The supervisor drains running work, starts the new child, checks its health and keeps the previous release for
+compatible fallback. Code rollback does not restore a database or undo external effects.
 
 ## Environment variables
 

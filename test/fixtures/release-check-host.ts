@@ -1,10 +1,12 @@
 // Real Nix evaluation is a host gate, not a recursive build inside the unit-test sandbox. Uses isolated public source.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { checkedReleases, releaseManifest, verifyRelease } from "../../src/core/release-check.ts";
+import { writeReleaseJson } from "../../src/core/release-files.ts";
+import { hash } from "../../src/core/release-policy.ts";
 
 const exec = promisify(execFile);
 const [packagePath, testRoot] = process.argv.slice(2);
@@ -116,8 +118,31 @@ if (receipt === undefined) throw new Error("missing tested receipt");
 assert.equal(result.digest, receipt.digest);
 assert.equal(result.package, receipt.package);
 assert.deepEqual(receipt.changes, ["web/src/app.css"]);
-assert.equal(receipt.outputs.length, 6);
+assert.equal(receipt.outputs.length, 7);
 await verifyRelease(installRoot, data, receipt);
+// Rechecking an obsolete cached proof must create a complete proof, not keep selecting the old cache entry.
+const legacyOutputs = receipt.outputs.filter((output) => !output.endsWith("-pal-evaluation-controls"));
+assert.equal(legacyOutputs.length, 6);
+const legacy = {
+  ...receipt,
+  outputs: legacyOutputs,
+  digest: hash(
+    JSON.stringify([base.package, receipt.package, candidate, receipt.source, receipt.compatibility, legacyOutputs]),
+  ),
+};
+await rename(
+  join(data, "release-checks", `receipt-${receipt.digest}.json`),
+  join(data, "release-checks", "receipt-with-grading.kept"),
+);
+const legacyPath = join(data, "release-checks", `receipt-${legacy.digest}.json`);
+await writeReleaseJson(legacyPath, legacy);
+const legacyBytes = await readFile(legacyPath);
+await assert.rejects(verifyRelease(installRoot, data, legacy), /mandatory grading gate; check it again/);
+const rechecked = JSON.parse((await cli()).stdout) as { digest: string; package: string };
+assert.equal(rechecked.digest, receipt.digest);
+assert.equal(rechecked.package, receipt.package);
+assert.equal((await checkedReleases(data)).find((item) => item.digest === rechecked.digest)?.outputs.length, 7);
+assert.deepEqual(await readFile(legacyPath), legacyBytes);
 await writeFile(stylePath, `${css}\n/* a different candidate after testing */\n`);
 await assert.rejects(verifyRelease(installRoot, data, receipt), /candidate changed; its approval is invalid/);
 process.stdout.write(
@@ -128,7 +153,9 @@ process.stdout.write(
     digest: receipt.digest,
     protectedEditsRefused: 3,
     regressionRefused: true,
-    fixedChecks: ["package", "smoke", "tests", "browser", "e2e", "evals"],
+    fixedChecks: ["package", "smoke", "tests", "browser", "e2e", "grading", "evals"],
+    legacyProofRefused: true,
+    legacyRecheckPassed: true,
     changedCandidateRefused: true,
   }) + "\n",
 );

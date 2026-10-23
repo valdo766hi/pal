@@ -37,8 +37,17 @@ const evidence = JSON.parse(checked.stdout) as {
   candidatePackage: string;
   regressionRefused: boolean;
   changedCandidateRefused: boolean;
+  fixedChecks: string[];
+  legacyProofRefused: boolean;
+  legacyRecheckPassed: boolean;
 };
-assert(evidence.regressionRefused && evidence.changedCandidateRefused);
+assert(
+  evidence.regressionRefused &&
+    evidence.changedCandidateRefused &&
+    evidence.legacyProofRefused &&
+    evidence.legacyRecheckPassed,
+);
+assert.deepEqual(evidence.fixedChecks, ["package", "smoke", "tests", "browser", "e2e", "grading", "evals"]);
 const root = evidence.root,
   dataRoot = join(root, "data");
 const receipt = (await checkedReleases(dataRoot)).find((item) => item.digest === evidence.digest);
@@ -361,7 +370,9 @@ try {
       package: base.package,
       candidatePackage: receipt.package,
       digest: receipt.digest,
-      fixedChecks: 6,
+      fixedChecks: 7,
+      legacyProofRefused: evidence.legacyProofRefused,
+      legacyRecheckPassed: evidence.legacyRecheckPassed,
       ownerOrigin: true,
       changedApprovalRefused: true,
       busyNativeAndTerminalRefused: true,

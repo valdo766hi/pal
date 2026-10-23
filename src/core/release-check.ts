@@ -19,6 +19,7 @@ import {
 const exec = promisify(execFile);
 const Digest = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const StorePath = Type.String({ pattern: "^/nix/store/[a-z0-9]{32}-[^/\\s]+$" });
+const FIXED_CHECK_COUNT = 7;
 const Source = Type.Object(
   {
     files: Type.Array(
@@ -53,13 +54,17 @@ export const CheckedRelease = Type.Object(
     compatibility: Digest,
     snapshot: Type.String({ pattern: "^[a-f0-9-]{36}$" }),
     checkedAt: Type.Number(),
-    outputs: Type.Array(StorePath, { minItems: 6, maxItems: 6 }),
+    // Older proofs remain inspectable; verification requires the current complete gate set.
+    outputs: Type.Array(StorePath, { minItems: 6, maxItems: FIXED_CHECK_COUNT }),
     changes: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 4 }),
   },
   { additionalProperties: false },
 );
 export type CheckedRelease = import("typebox").Static<typeof CheckedRelease>;
-const NIX_OUTPUT = Type.Array(Type.Object({ outputs: Type.Object({ out: StorePath }) }), { minItems: 6, maxItems: 6 });
+const NIX_OUTPUT = Type.Array(Type.Object({ outputs: Type.Object({ out: StorePath }) }), {
+  minItems: FIXED_CHECK_COUNT,
+  maxItems: FIXED_CHECK_COUNT,
+});
 const CHECK_EXPR =
   'import ((/. + builtins.getEnv "PAL_RELEASE_BASE") + "/nix/release.nix") { candidate = /. + builtins.getEnv "PAL_RELEASE_SOURCE"; nixpkgs = /. + builtins.getEnv "PAL_RELEASE_NIXPKGS"; }';
 
@@ -194,7 +199,11 @@ export async function evaluateRelease(
     const source = await worktree(candidate, base, signal);
     if (source.digest === base.source.digest) throw new Error("candidate has no implementation changes");
     const existing = (await checkedReleases(dataRoot)).find(
-      (item) => item.base === base.package && item.candidate === candidate && item.source === source.digest,
+      (item) =>
+        item.outputs.length === FIXED_CHECK_COUNT &&
+        item.base === base.package &&
+        item.candidate === candidate &&
+        item.source === source.digest,
     );
     if (existing !== undefined) {
       await verifyRelease(installRoot, dataRoot, existing, signal);
@@ -286,6 +295,8 @@ export async function verifyRelease(
   signal = AbortSignal.timeout(15 * 60_000),
 ): Promise<void> {
   signal.throwIfAborted();
+  if (receipt.outputs.length !== FIXED_CHECK_COUNT)
+    throw new Error("release receipt predates the mandatory grading gate; check it again with this evaluator");
   const base = await releaseManifest(installRoot);
   if (receipt.base !== base.package || receipt.compatibility !== base.source.compatibility)
     throw new Error("candidate was checked under a different evaluator; check it again with this release");
