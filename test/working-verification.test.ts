@@ -1,4 +1,4 @@
-import { chmod, link, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -6,6 +6,8 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "
 import { afterEach, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { runGit } from "../src/core/git.ts";
+import { authority, grade } from "../src/evaluation/grade.ts";
+import { checkout } from "../src/evaluation/tasks.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -338,4 +340,124 @@ it("does not require a working goal or revision scan for ordinary shell commands
   ]);
   expect(await readFile(join(f.project.root, "ordinary-marker"), "utf8")).toBe("ordinary");
   expect(await f.pal.working.inspect(f.chat, context)).toMatchObject({ verification: { attempts: 0, checks: [] } });
+});
+
+it("independently grades a real two-file fix through plan, restart, checks, diff review and owner acceptance", async () => {
+  const f = await fixture();
+  const fixtures = new URL("fixtures/evaluation/", import.meta.url);
+  const read = (path: string) => readFile(new URL(path, fixtures), "utf8");
+  const paths = ["src/prices.mjs", "src/receipt.mjs", "src/main.mjs", "test.mjs"];
+  const evaluator = await authority();
+  await Promise.all(["a.txt", "b.txt"].map((path) => rm(join(f.project.root, path))));
+  await mkdir(join(f.project.root, "src"));
+  for (const path of paths) await writeFile(join(f.project.root, path), await read(`buggy/${path}`));
+  await runGit(f.project.root, ["add", "--", ...paths], { signal: AbortSignal.timeout(5000) });
+  await runGit(
+    f.project.root,
+    [
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--quiet",
+      "--no-gpg-sign",
+      "-m",
+      "fixture",
+    ],
+    { signal: AbortSignal.timeout(5000) },
+  );
+  await f.pal.changes.list(f.project.id);
+  await f.pal.working.setGoal(
+    f.chat,
+    {
+      revision: 1,
+      text: checkout.prompt,
+      constraints: ["Do not change the CLI or public test"],
+      acceptance: ["Independent decimal rounding cases pass", "Patch whitespace checks pass"],
+    },
+    context,
+  );
+  const artifact = async (name: string) => {
+    const root = join(f.root, name);
+    await mkdir(root);
+    await mkdir(join(root, "src"));
+    cleanups.push(async () => {
+      await chmod(root, 0o700);
+      await chmod(join(root, "src"), 0o700);
+    });
+    for (const path of paths)
+      await writeFile(join(root, path), await readFile(join(f.project.root, path)), { mode: 0o444 });
+    await chmod(join(root, "src"), 0o555);
+    await chmod(root, 0o555);
+    return realpath(root);
+  };
+  await f.run([
+    call('return await tools.shell_run({command:"node test.mjs",timeout:5});'),
+    fauxAssistantMessage("Public smoke test alone is insufficient"),
+  ]);
+  const baseline = await grade(await artifact("before-fix"), checkout);
+  expect(baseline.passed).toBe(false);
+  expect(baseline.cases.filter((test) => !test.passed)).toHaveLength(3);
+  expect((await f.pal.working.inspect(f.chat, context)).verification.checks).toEqual([]);
+  const patch = await Promise.all(
+    ["src/prices.mjs", "src/receipt.mjs"].map(async (path) => [path, await read(`fixed/${path}`)]),
+  );
+  await f.run([
+    call(
+      'return await tools.working_checkpoint({revision:0,goalRevision:2,summary:"Fix unit rounding before multiplying quantities",plan:["Preserve the JSON CLI and public test","Edit prices and receipt calculation","Run independent cases and inspect the two-file diff"],next:"Verify the changed calculation",questions:[]});',
+    ),
+    call(
+      `for (const [path, content] of ${JSON.stringify(patch)}) { const read = await tools.files_read({path}); const match = /\\[sha256: ([a-f0-9]{64})\\]/.exec(read); if (!match) throw new Error("missing file revision"); await tools.files_write({path, expectedHash:match[1], content}); }`,
+    ),
+    fauxAssistantMessage("Edits retained for verification"),
+  ]);
+  await f.reopen();
+  expect((await f.pal.working.inspect(f.chat, context)).checkpoint).toMatchObject({
+    goalRevision: 2,
+    next: "Verify the changed calculation",
+  });
+  const script =
+    'import assert from "node:assert/strict"; import {receipt} from "./src/receipt.mjs"; for (const test of ' +
+    JSON.stringify(checkout.cases) +
+    ") assert.deepEqual(receipt(test.input), test.expected);";
+  const command = `node --permission --allow-fs-read=. --input-type=module -e '${script}'`;
+  await f.run([
+    call(
+      'const state = await tools.working_read({}); if (state.goal.revision !== 2 || state.checkpoint.next !== "Verify the changed calculation") throw new Error("lost working state"); return state;',
+    ),
+    verify(command, 0, 2),
+    verify("git diff --check", 1, 2),
+    fauxAssistantMessage("Checks ready for owner review"),
+  ]);
+  const checked = (await f.pal.working.inspect(f.chat, context)).verification;
+  expect(checked).toMatchObject({ state: "ready-for-review", attempts: 2, remaining: [], review: null });
+  expect(checked.checks).toHaveLength(2);
+  expect(
+    checked.checks.every((check) => check.outcome === "passed" && !check.stale && check.before === check.after),
+  ).toBe(true);
+  const result = await grade(await artifact("after-fix"), checkout);
+  expect(result.passed).toBe(true);
+  expect(result.cases).toHaveLength(4);
+  expect(result.cases.every((test) => test.passed && test.exitCode === 0)).toBe(true);
+  expect(await authority()).toBe(evaluator);
+  for (const path of ["src/main.mjs", "test.mjs"])
+    expect(await readFile(join(f.project.root, path), "utf8")).toBe(await read(`buggy/${path}`));
+  const changes = await f.pal.changes.list(f.project.id);
+  expect(changes.truncated).toBe(false);
+  expect(changes.files.map((file) => file.path)).toEqual(["src/prices.mjs", "src/receipt.mjs"]);
+  for (const file of changes.files) {
+    expect(file.status).toBe("M");
+    expect(file.patch).toContain(`+++ b/${file.path}`);
+    await f.pal.changes.review(f.project.id, file.path, file.revision, true);
+  }
+  expect((await f.pal.working.inspect(f.chat, context)).verification.reviewDigest).toBe(checked.reviewDigest);
+  expect((await f.pal.working.acceptChecks(f.chat, { digest: checked.reviewDigest }, context)).verification.state).toBe(
+    "completed",
+  );
+  await writeFile(join(f.project.root, "src/prices.mjs"), await read("buggy/src/prices.mjs"));
+  expect((await f.pal.working.inspect(f.chat, context)).verification).toMatchObject({
+    state: "needs-checks",
+    review: { stale: true },
+  });
 });
