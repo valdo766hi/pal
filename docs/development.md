@@ -268,9 +268,15 @@ files and submodules), private Pal file aliases, non-UTF-8 paths and over-limit 
 state are outside the fingerprint. Before/after observations over a mutable workspace are not atomic or hermetic.
 
 `ready-for-review` means each criterion has a passing command receipt at the currently observed source revision,
-not that the commands adequately tested the criteria or that the owner reviewed/completed the task. No completion,
-commit, activation or automatic plan/act loop follows. The Context panel shows failures, stale evidence, outstanding
-checks and exhausted verification allowance; broader task completion and whole-run budget controls remain future work.
+not that the commands adequately tested the criteria or that the owner reviewed/completed the task. The Context panel
+lets the owner explicitly accept the checked revision after reviewing the diff and test adequacy. Owner-authenticated
+`POST /api/chats/:id/context/working-review` accepts `{ digest }` from the current verification response. The digest
+binds the goal revision, workspace/source and exact check receipts; missing, failed, unknown or stale checks cannot
+be accepted. Replaced evidence requires fresh consent even when source bytes are unchanged. An identical retry
+preserves the original acceptance timestamp. Saving rechecks under the shared workspace mutation lock and Pi
+transaction; external edits remain outside that lock. Later reads label changed/unavailable source or evidence
+as stale, not completed. Goal correction clears current acceptance. No model tool can accept on the owner's behalf,
+and acceptance never commits, activates, cancels work or starts another run. Whole-run budgets remain future work.
 
 ### Evaluations
 

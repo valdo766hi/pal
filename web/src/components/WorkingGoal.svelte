@@ -68,23 +68,26 @@
     stale = false;
     error = undefined;
   }
-  async function save(value: WorkingStateInfo["goal"]) {
+  function save(value: WorkingStateInfo["goal"]) {
+    return change((id) => api.saveWorkingGoal(id, value), true);
+  }
+  async function change(send: (id: string) => Promise<WorkingStateInfo>, clearDraft = false) {
     if (saving || loading || stale) return;
     const current = ++generation,
       id = chatId;
     saving = true;
     error = undefined;
     try {
-      const saved = await api.saveWorkingGoal(id, value);
+      const saved = await send(id);
       if (current === generation && id === chatId) {
         info = saved;
-        draft = undefined;
+        if (clearDraft) draft = undefined;
       }
     } catch (failure) {
       if (current === generation && id === chatId) {
         error = String(failure);
         if (failure instanceof ApiError && failure.status === 409) {
-          stale = true;
+          stale = draft !== undefined;
           try {
             const latest = await api.workingState(id);
             if (current === generation && id === chatId) info = latest;
@@ -238,6 +241,27 @@
           {#if info.verification.remaining.length > 0}<p class="sub">
               Checks still needed: {info.verification.remaining.map((index) => index + 1).join(", ")}
             </p>{/if}
+        {/if}
+        {#if info.verification.review}
+          <p class:wa={info.verification.review.stale} class="sub">
+            Owner accepted {new Date(info.verification.review.at).toLocaleString()}{info.verification.review.stale
+              ? " · stale: source, goal or check evidence changed. This goal is no longer complete."
+              : " · current checked revision complete."}
+          </p>
+        {/if}
+        {#if info.verification.state === "ready-for-review" && info.verification.goalRevision === info.goal.revision && info.verification.reviewDigest}
+          <p class="sub">
+            Review the Changes diff and whether these commands adequately test every criterion before accepting. This
+            does not commit, deploy or stop running work. Later changes invalidate completion.
+          </p>
+          <button
+            class="b sm q"
+            disabled={loading || saving || draft !== undefined}
+            onclick={() => {
+              const digest = info?.verification.reviewDigest;
+              if (digest) void change((id) => api.acceptWorkingChecks(id, digest));
+            }}>Accept checks and complete goal</button
+          >
         {/if}
         <details>
           <summary>Verification scope and limits</summary>

@@ -10,8 +10,9 @@ import {
   type Tx,
 } from "@earendil-works/pi-durable";
 import { Type, type Static } from "typebox";
-import type { ShellResult } from "./execution.ts";
+import type { ShellResult, WorkspaceLocks } from "./execution.ts";
 import { HttpError } from "./http.ts";
+import { validate } from "./requests.ts";
 import type { Working } from "./working-state.ts";
 import { REVISION_SCOPE } from "./workspace-revision.ts";
 
@@ -45,11 +46,21 @@ const Checks = defineDoc({
   fork: "initial",
   initial,
 });
+const Review = defineDoc({
+  kind: "pal.working-review",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: (): { accepted: { digest: string; at: number } | null } => ({ accepted: null }),
+});
 const View = Type.Object({
   goalRevision: Type.Integer(),
   attempts: Type.Integer(),
   limit: Type.Integer(),
-  state: Type.Enum(["not-started", "needs-checks", "blocked", "budget-exhausted", "ready-for-review"]),
+  state: Type.Enum(["not-started", "needs-checks", "blocked", "budget-exhausted", "ready-for-review", "completed"]),
+  reviewDigest: Type.Union([Digest, Type.Null()]),
+  review: Type.Union([Type.Object({ digest: Digest, at: Type.Number(), stale: Type.Boolean() }), Type.Null()]),
   checks: Type.Array(
     Type.Object({
       ...Receipt.properties,
@@ -64,10 +75,39 @@ const View = Type.Object({
 type Snapshot = { workspace: string; root: string; revision: string };
 type Host = {
   working: typeof Working;
+  locks: WorkspaceLocks;
   harness(): Harness;
   ready(conversation: ConversationId): Promise<void>;
   revision(conversation: ConversationId, context: Context): Promise<Snapshot>;
 };
+
+function reviewDigest(
+  goal: { revision: number; text: string; acceptance: readonly string[] } | undefined,
+  records: readonly Record[],
+  current: Snapshot | undefined,
+) {
+  if (!goal?.text || goal.acceptance.length === 0 || current === undefined) return null;
+  if (
+    !goal.acceptance.every((_criterion, index) =>
+      records.some(
+        (record) =>
+          record.criterion === index &&
+          record.goalRevision === goal.revision &&
+          record.outcome === "passed" &&
+          record.workspace === current.workspace &&
+          record.before === current.revision &&
+          record.after === current.revision,
+      ),
+    )
+  )
+    return null;
+  const evidence = [...records]
+    .sort((a, b) => a.criterion - b.criterion)
+    .map((record) => [record.criterion, record.task, record.commandDigest, record.finishedAt]);
+  return createHash("sha256")
+    .update(JSON.stringify([1, goal.revision, current.workspace, current.revision, evidence]))
+    .digest("hex");
+}
 
 /** Receipts come only from the host shell executor, never from an agent checkpoint or supplied result. */
 export class WorkingChecks {
@@ -95,6 +135,33 @@ export class WorkingChecks {
 
   async clear(tx: Tx, conversation: ConversationId, goalRevision: number) {
     Object.assign(await tx.doc(Checks, conversation), { goalRevision, attempts: 0, records: [] });
+    (await tx.doc(Review, conversation)).accepted = null;
+  }
+
+  async accept(conversation: ConversationId, input: unknown, context: Context) {
+    const { digest } = validate(Type.Object({ digest: Digest }, { additionalProperties: false }), input);
+    await this.#host.ready(conversation);
+    const before = await this.#host.revision(conversation, context);
+    await this.#host.locks.run(before.root, async () => {
+      const current = await this.#host.revision(conversation, context);
+      if (current.root !== before.root || current.workspace !== before.workspace) throw this.#reviewStale();
+      await this.#host.harness().commit(async (tx) => {
+        await this.#host.ready(conversation);
+        const working = await tx.doc(this.#host.working, conversation);
+        const checks = await tx.doc(Checks, conversation);
+        if (reviewDigest(working.goal, checks.records, current) !== digest) throw this.#reviewStale();
+        const review = await tx.doc(Review, conversation);
+        if (review.accepted?.digest !== digest) review.accepted = { digest, at: Date.now() };
+      }, context);
+    });
+  }
+
+  #reviewStale() {
+    return new HttpError(
+      409,
+      "working_review_stale",
+      "The goal, source or check evidence changed. Refresh and review the current diff and checks before accepting.",
+    );
   }
 
   async start(
@@ -182,6 +249,7 @@ export class WorkingChecks {
     const harness = this.#host.harness();
     const goal = (await harness.snapshot(this.#host.working, conversation, context))?.goal;
     const saved = await harness.snapshot(Checks, conversation, context);
+    const review = (await harness.snapshot(Review, conversation, context))?.accepted ?? null;
     const state = saved !== undefined && saved.goalRevision === goal?.revision ? saved : initial();
     let current: Snapshot | undefined;
     if (state.records.length > 0) {
@@ -209,8 +277,10 @@ export class WorkingChecks {
     const remaining = (goal?.acceptance ?? []).flatMap((_criterion, index) =>
       checks.some((check) => check.criterion === index && check.outcome === "passed" && !check.stale) ? [] : [index],
     );
+    const digest = reviewDigest(goal, state.records, current);
     let status: Static<typeof View>["state"] = "needs-checks";
-    if ((goal?.acceptance.length ?? 0) > 0 && remaining.length === 0) status = "ready-for-review";
+    if (digest !== null && review?.digest === digest) status = "completed";
+    else if ((goal?.acceptance.length ?? 0) > 0 && remaining.length === 0) status = "ready-for-review";
     else if (state.attempts >= ATTEMPTS) status = "budget-exhausted";
     else if (checks.some((check) => check.outcome !== "passed" && check.outcome !== "started")) status = "blocked";
     else if (checks.length === 0) status = "not-started";
@@ -222,6 +292,8 @@ export class WorkingChecks {
       checks,
       remaining,
       state: status,
+      reviewDigest: digest,
+      review: review === null ? null : { ...review, stale: review.digest !== digest },
       scope: REVISION_SCOPE,
       notice:
         "Receipts prove command outcomes and observed source freshness, not test adequacy, owner review or completion. Command and bounded output remain in the shell task/transcript. Inspect unknown effects before a new attempt; no command is automatically retried.",

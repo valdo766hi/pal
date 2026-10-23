@@ -5,6 +5,7 @@ import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { type Static, Type } from "typebox";
 import type { Chat } from "./chats.ts";
+import type { WorkspaceLocks } from "./execution.ts";
 import { HttpError } from "./http.ts";
 import { validate } from "./requests.ts";
 import { WorkingChecks } from "./working-checks.ts";
@@ -96,10 +97,11 @@ export class WorkingState {
     database: SqliteDatabase,
     harness: () => Harness,
     revision: ConstructorParameters<typeof WorkingChecks>[0]["revision"],
+    locks: WorkspaceLocks,
   ) {
     this.#database = database;
     this.#harness = harness;
-    this.checks = new WorkingChecks({ working: Working, harness, ready: (id) => this.#ready(id), revision });
+    this.checks = new WorkingChecks({ working: Working, harness, ready: (id) => this.#ready(id), revision, locks });
     this.extension = defineExtension({
       name: "pal.working-state",
       sections: [
@@ -204,6 +206,11 @@ export class WorkingState {
     const verification = await this.checks.inspect(chat.conversationId, context);
     await this.#ready(chat.conversationId);
     return { ...view(state), verification };
+  }
+
+  async acceptChecks(chat: Chat, input: unknown, context: Context) {
+    await this.checks.accept(chat.conversationId, input, context);
+    return this.inspect(chat, context);
   }
 
   async setGoal(chat: Chat, input: unknown, context: Context) {

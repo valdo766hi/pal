@@ -848,6 +848,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           if (method === "PUT") return send(200, await pal.working.setGoal(chat, await readJson(request), context));
           return send(200, await pal.working.inspect(chat, context));
         }
+        if (path[3] === "working-review" && method === "POST")
+          return send(200, await pal.working.acceptChecks(chat, await readJson(request), context));
         if (path[3] === "instructions" && method === "PUT") {
           await pal.context.pin(chat, await readJson(request), context);
           return send(200, { saved: true });

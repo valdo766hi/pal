@@ -207,6 +207,8 @@ export const api = {
     call<WorkingStateInfo>("GET", `chats/${id}/context/working-state`, undefined, signal),
   saveWorkingGoal: (id: string, goal: WorkingStateInfo["goal"]) =>
     call<WorkingStateInfo>("PUT", `chats/${id}/context/working-state`, goal),
+  acceptWorkingChecks: (id: string, digest: string) =>
+    call<WorkingStateInfo>("POST", `chats/${id}/context/working-review`, { digest }),
   pinInstructions: (id: string, revision: number, text: string) =>
     call<{ saved: boolean }>("PUT", `chats/${id}/context/instructions`, { revision, text }),
   contextPrompt: (id: string, offset = 0, request?: string) =>

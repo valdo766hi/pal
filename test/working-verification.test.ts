@@ -244,6 +244,91 @@ it("keeps exact command approval and rechecks an owner correction before dispatc
   }
 });
 
+it("requires owner acceptance of the exact checked revision and stales it after new source or check evidence", async () => {
+  const f = await fixture();
+  await f.run([verify("true", 0), verify("true", 1), fauxAssistantMessage("ready for owner review")]);
+  const ready = (await f.pal.working.inspect(f.chat, context)).verification;
+  expect(ready.reviewDigest).toMatch(/^[a-f0-9]{64}$/);
+  expect(ready.review).toBeNull();
+  const accepted = await f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest }, context);
+  expect(accepted.verification).toMatchObject({
+    state: "completed",
+    review: { digest: ready.reviewDigest, stale: false },
+  });
+  const repeated = await f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest }, context);
+  expect(repeated.verification.review).toEqual(accepted.verification.review);
+  await f.reopen();
+  expect((await f.pal.working.inspect(f.chat, context)).verification).toEqual(accepted.verification);
+  await f.run([verify("true", 0), fauxAssistantMessage("new receipt, same source")]);
+  const replaced = (await f.pal.working.inspect(f.chat, context)).verification;
+  expect(replaced).toMatchObject({ state: "ready-for-review", review: { stale: true } });
+  expect(replaced.reviewDigest).not.toBe(ready.reviewDigest);
+  await expect(f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest }, context)).rejects.toMatchObject({
+    status: 409,
+  });
+  await f.pal.working.acceptChecks(f.chat, { digest: replaced.reviewDigest }, context);
+  await writeFile(join(f.project.root, "a.txt"), "later edit\n");
+  expect((await f.pal.working.inspect(f.chat, context)).verification).toMatchObject({
+    state: "needs-checks",
+    reviewDigest: null,
+    review: { stale: true },
+  });
+  await expect(f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest }, context)).rejects.toMatchObject({
+    status: 409,
+  });
+  await f.run([verify("true", 0), verify("true", 1), fauxAssistantMessage("new checks")]);
+  const updated = (await f.pal.working.inspect(f.chat, context)).verification;
+  expect(updated.state).toBe("ready-for-review");
+  expect(updated.reviewDigest).not.toBe(ready.reviewDigest);
+  expect(updated.review?.stale).toBe(true);
+  await expect(f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest }, context)).rejects.toMatchObject({
+    status: 409,
+  });
+  await f.pal.working.acceptChecks(f.chat, { digest: updated.reviewDigest }, context);
+  await f.pal.working.setGoal(f.chat, { ...goal, revision: 1, text: "New owner goal" }, context);
+  expect((await f.pal.working.inspect(f.chat, context)).verification.review).toBeNull();
+});
+
+it("refuses missing checks, forged acceptance and owner-corrected review bindings", async () => {
+  const f = await fixture();
+  await expect(f.pal.working.acceptChecks(f.chat, { digest: "a".repeat(64) }, context)).rejects.toMatchObject({
+    status: 409,
+  });
+  await f.run([verify("true", 0), fauxAssistantMessage("one criterion remains")]);
+  expect((await f.pal.working.inspect(f.chat, context)).verification.reviewDigest).toBeNull();
+  await f.run([verify("true", 1), fauxAssistantMessage("both criteria")]);
+  const ready = (await f.pal.working.inspect(f.chat, context)).verification;
+  await expect(
+    f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest, completed: true }, context),
+  ).rejects.toThrow(/completed.*schema is false/);
+  await f.pal.working.setGoal(f.chat, { ...goal, revision: 1, text: "Owner corrected the goal" }, context);
+  await expect(f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest }, context)).rejects.toMatchObject({
+    status: 409,
+  });
+});
+
+it("never accepts a workspace while a native shell mutation owns its lock", async () => {
+  const f = await fixture();
+  await writeFile(join(f.project.root, ".gitignore"), "busy-marker\n");
+  await f.run([verify("true", 0), verify("true", 1), fauxAssistantMessage("checked")]);
+  const ready = (await f.pal.working.inspect(f.chat, context)).verification;
+  const running = f.run([
+    call('return await tools.shell_run({command:"printf busy > busy-marker; sleep 30",timeout:120});'),
+    fauxAssistantMessage("stopped"),
+  ]);
+  try {
+    await vi.waitFor(async () => expect(await readFile(join(f.project.root, "busy-marker"), "utf8")).toBe("busy"), {
+      timeout: 5000,
+      interval: 20,
+    });
+    await expect(f.pal.working.acceptChecks(f.chat, { digest: ready.reviewDigest }, context)).rejects.toThrow(/busy/i);
+    expect((await f.pal.working.inspect(f.chat, context)).verification.review).toBeNull();
+  } finally {
+    await (await f.pal.harness.conversation(f.chat.conversationId, context))?.abort(context);
+    await running;
+  }
+});
+
 it("does not require a working goal or revision scan for ordinary shell commands", async () => {
   const f = await fixture();
   await f.pal.working.setGoal(f.chat, { revision: 1, text: "", constraints: [], acceptance: [] }, context);

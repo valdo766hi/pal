@@ -562,10 +562,20 @@ describe("MCP connections", () => {
       .find((entry) => entry.tool.name === `mcp__${server.id}__search`)?.tool;
     if (tool === undefined) throw new Error("missing tool");
     const release = Promise.withResolvers<undefined>();
+    let active = 0,
+      peak = 0;
     fixture.state.beforeCall = async () => {
-      await release.promise;
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        await release.promise;
+      } finally {
+        active--;
+      }
     };
     let rejected = 0;
+    const catalog = Promise.withResolvers<undefined>();
+    fixture.state.beforeList = () => catalog.promise;
     // This fixture isolates queue admission; API integration checks the real durable receipt commits.
     const executorApi = { conversationId: 2 as ConversationId } as ToolExecutionApi;
     executorApi.commit = vi.fn();
@@ -580,12 +590,17 @@ describe("MCP connections", () => {
         ),
       );
       await expect.poll(() => rejected).toBe(2);
-      expect(fixture.calls).toHaveLength(2);
+      expect(fixture.calls).toHaveLength(0);
+      catalog.resolve(undefined);
+      await expect.poll(() => fixture.calls.length).toBe(2);
       release.resolve(undefined);
       const results = await Promise.all(pending);
       expect(results.filter(Boolean)).toHaveLength(10);
       expect(fixture.calls).toHaveLength(10);
+      expect(peak).toBe(2);
+      expect(active).toBe(0);
     } finally {
+      catalog.resolve(undefined);
       release.resolve(undefined);
     }
   });

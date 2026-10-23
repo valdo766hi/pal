@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { type Browser, chromium, type Page, type WebSocketRoute } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApi } from "../../src/core/api.ts";
@@ -2085,6 +2085,83 @@ describe("browser address drafts", () => {
 });
 
 describe("saved working goals", () => {
+  it.each([1440, 390])(
+    "accepts only reviewed current checks and recovers a stale review without starting work at %s px",
+    async (width) => {
+      const { pal, page, base, project, saved, provider, errors, mutations, restart } = await setup(width);
+      await runGit(project.root, ["init", "--quiet", "--template=", "--initial-branch=fixture"], {
+        signal: AbortSignal.timeout(5000),
+      });
+      await writeFile(join(project.root, "result.txt"), "checked source\n");
+      await pal.working.setGoal(
+        saved,
+        {
+          revision: 0,
+          text: "Review this checked source",
+          constraints: [],
+          acceptance: ["Review the independent check"],
+        },
+        context,
+      );
+      await pal.approvals.setMode(saved.id, "full");
+      const faux = fauxProvider();
+      (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+      const model = faux.getModel();
+      const conversation = await pal.harness.conversation(saved.conversationId, context);
+      if (conversation === undefined) throw new Error("missing review fixture conversation");
+      await conversation.configure({ model: { provider: model.provider, modelId: model.id } }, context);
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("codemode", {
+            code: 'return await tools.shell_run({command:"test -s result.txt",check:{goalRevision:1,criterion:0}});',
+          }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("Ready for owner review"),
+      ]);
+      await pal.chats.submit(saved.id, "review-fixture", { text: "Check the fixture" }, context);
+      await conversation.waitForIdle(context);
+      await conversation.configure({ model: { provider: "anthropic", modelId: "claude-haiku-4-5" } }, context);
+      const digest = (await pal.working.inspect(saved, context)).verification.reviewDigest;
+      expect(digest).toMatch(/^[a-f0-9]{64}$/);
+      mutations.length = 0;
+      let working = await panel(page, base, saved.id, width);
+      const accept = working.getByRole("button", { name: "Accept checks and complete goal", exact: true });
+      await accept.waitFor();
+      await writeFile(join(project.root, "result.txt"), "changed while reviewing\n");
+      await accept.click();
+      await working.getByRole("alert").waitFor();
+      expect(await working.innerText()).toContain("Refresh and review");
+      await expect.poll(() => accept.count()).toBe(0);
+      expect((await pal.working.inspect(saved, context)).verification.review).toBeNull();
+      await writeFile(join(project.root, "result.txt"), "checked source\n");
+      await working.getByRole("button", { name: "Refresh working state", exact: true }).click();
+      await accept.click();
+      await working.getByText(/current checked revision complete/).waitFor();
+      expect((await pal.working.inspect(saved, context)).verification).toMatchObject({
+        state: "completed",
+        review: { digest, stale: false },
+      });
+      const reopened = await restart();
+      await page.reload();
+      if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+      await page.getByRole("button", { name: "Context", exact: true }).click();
+      working = page.getByRole("region", { name: "Working goal", exact: true });
+      await working.getByText(/current checked revision complete/).waitFor();
+      await writeFile(join(project.root, "result.txt"), "later edit\n");
+      await working.getByRole("button", { name: "Refresh working state", exact: true }).click();
+      await working.getByText(/This goal is no longer complete/).waitFor();
+      expect((await reopened.working.inspect(saved, context)).verification.review?.stale).toBe(true);
+      await screenshot(page, `working-review-${width}`);
+      expect(mutations).toEqual([
+        `POST /api/chats/${saved.id}/context/working-review`,
+        `POST /api/chats/${saved.id}/context/working-review`,
+      ]);
+      expect(provider.requests).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+
   it.each([1440, 390])(
     "renders failed, stale and unknown check receipts without executing work at %s px",
     async (width) => {

@@ -178,6 +178,19 @@ describe("API", () => {
     const chat = await pal.chats.createChat("working-chat", { projectId: project.id }, context);
     const path = `chats/${chat.id}/context/working-state`;
     expect((await fetch(`${base}/api/${path}`)).status).toBe(401);
+    const reviewPath = `chats/${chat.id}/context/working-review`;
+    expect((await fetch(`${base}/api/${reviewPath}`, { method: "POST", headers: { origin: base } })).status).toBe(401);
+    expect(
+      (
+        await fetch(`${base}/api/${reviewPath}`, {
+          method: "POST",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify({ digest: "a".repeat(64) }),
+        })
+      ).status,
+    ).toBe(403);
+    expect((await api("POST", reviewPath, { digest: "not-a-digest" })).status).toBe(400);
+    expect((await api("POST", reviewPath, { digest: "a".repeat(64), completed: true })).status).toBe(400);
     const initial = await api("GET", path);
     expect(initial.status).toBe(200);
     expect(initial.body.goal).toEqual({ revision: 0, text: "", constraints: [], acceptance: [] });

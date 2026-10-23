@@ -314,6 +314,7 @@ export async function openPal(
         );
         return { workspace: workspace.id, root: lease.root, revision };
       },
+      locks,
     );
 
     // Host writes/commands are the owner's explicit high-trust mode; every nested call rechecks the live project grant.
