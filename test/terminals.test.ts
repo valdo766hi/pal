@@ -171,8 +171,10 @@ describe("human host terminals", () => {
     const terminal = await create();
     const client = await connect(terminal.id);
     await expect.poll(() => `${client.last("snapshot")?.data ?? ""}${client.output()}`).toContain("$");
-    const send = (data: string) => client.send({ type: "input", epoch: client.last("state")?.epoch, data });
-    // A burst before Readline starts can overflow the native PTY input queue on macOS.
+    const epoch = client.last("state")?.epoch;
+    const send = (data: string) => client.send({ type: "input", epoch, data });
+    // Observer-log eviction must not discard the live controller's epoch.
+    client.messages.length = 0;
     for (let start = 0; start < 600; start += 20) {
       send(Array.from({ length: 20 }, (_, index) => `printf 'entry-%s\\n' ${start + index + 1}\r`).join(""));
       await expect.poll(client.output).toContain(`entry-${start + 20}\r\n`);
