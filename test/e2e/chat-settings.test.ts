@@ -142,6 +142,51 @@ async function screenshot(page: Page, name: string) {
   await page.screenshot({ path: join(root, `${name}.png`), animations: "disabled" });
 }
 
+describe("file preview refresh", () => {
+  it.each([1440, 390])(
+    "does not reopen a file closed while its refresh response is pending at %s px",
+    async (width) => {
+      const { page, base, project, saved, errors } = await setup(width);
+      await writeFile(join(project.root, "refresh-race.txt"), "Owner-controlled preview");
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      if (width < 700) await page.getByRole("button", { name: "Workspace tools" }).click();
+      await page.getByRole("button", { name: "Files", exact: true }).click();
+      const panel = page.getByRole("complementary", { name: "Workspace panel" });
+      await panel.getByRole("button", { name: /^refresh-race\.txt/ }).click();
+      await panel.getByText("Owner-controlled preview").waitFor();
+      const seen = Promise.withResolvers<undefined>();
+      const release = Promise.withResolvers<undefined>();
+      const done = Promise.withResolvers<undefined>();
+      let started = false;
+      await page.route(`**/api/projects/${project.id}/file?**`, async (route) => {
+        started = true;
+        try {
+          const response = await route.fetch({ timeout: 5000 });
+          seen.resolve(undefined);
+          await release.promise;
+          await route.fulfill({ response });
+        } finally {
+          done.resolve(undefined);
+        }
+      });
+      cleanups.push(async () => {
+        release.resolve(undefined);
+        if (started) await done.promise;
+      });
+      await panel.getByRole("button", { name: "Refresh", exact: true }).click();
+      await seen.promise;
+      await panel.getByRole("button", { name: "Back to files" }).click();
+      expect(await panel.getByRole("button", { name: "Back to files" }).count()).toBe(0);
+      release.resolve(undefined);
+      await done.promise;
+      await expect.poll(() => panel.getByRole("button", { name: "Refresh", exact: true }).isEnabled()).toBe(true);
+      expect(await panel.getByRole("button", { name: "Back to files" }).count()).toBe(0);
+      expect(await panel.getByRole("button", { name: /^refresh-race\.txt/ }).isVisible()).toBe(true);
+      expect(errors).toEqual([]);
+    },
+  );
+});
+
 describe("terminal command history", () => {
   it.each([1440, 390])(
     "recalls editable commands with Page Up/Down and reconnects without running them at %s px",

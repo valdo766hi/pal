@@ -373,8 +373,8 @@ describe("research helpers", () => {
           timer = setTimeout(() => resolve("still-running"), 5000);
         }),
       ]);
-      expect(outcome).toBe("ended");
       const [helper] = await f.helpers(chat);
+      expect(outcome, JSON.stringify({ helper, modelCalls: f.faux.state.callCount })).toBe("ended");
       expect(helper).toMatchObject({ status: "unanswered", unknownEffects: [{ tool: `mcp__${server.id}__search` }] });
       expect(helper?.reason).toContain("0.05-minute limit");
     } finally {
