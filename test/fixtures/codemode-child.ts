@@ -1,11 +1,18 @@
 // Child process for code mode recovery tests: Pal's store and code mode policy over a parent-owned HTTP fixture.
 // `start` admits one input whose script reads, writes and reads again, and runs until the parent kills it;
 // `resume` reopens the same store, lets the Harness finish, and prints the tool results.
+import assert from "node:assert/strict";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, Type } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
 import { createPalCodemode, DEFAULT_CODEMODE_CAPS } from "../../src/pi/codemode.ts";
 import { openStore } from "../../src/storage/store.ts";
+import {
+  evaluationBudget,
+  evaluationBudgetExceeded,
+  evaluationBudgetTurns,
+  setEvaluationBudget,
+} from "../../src/pi/evaluation-budget.ts";
 
 export const SCRIPT = `
 const a = await tools.fx_read({ key: "a" });
@@ -17,6 +24,7 @@ return { a, b, c };
 
 const [mode, dataRoot, service, heap, budget] = process.argv.slice(2);
 const limited = heap === "budget" || heap === "budget-journal";
+const evaluating = heap === "evaluation";
 let script = SCRIPT;
 if (heap === "budget-journal") {
   script = `
@@ -50,6 +58,7 @@ async function call(path: string, key: string, method: string): Promise<string> 
 }
 
 const registry = createRegistry();
+if (evaluating) registry.install(evaluationBudget(() => harness));
 registry.install(
   defineExtension({
     name: "fixture",
@@ -76,7 +85,8 @@ const { extensions, sandbox } = createPalCodemode({
   allows: () => true,
   caps: {
     ...DEFAULT_CODEMODE_CAPS,
-    memoryLimitBytes: heap === undefined || limited ? DEFAULT_CODEMODE_CAPS.memoryLimitBytes : Number(heap),
+    memoryLimitBytes:
+      heap === undefined || limited || evaluating ? DEFAULT_CODEMODE_CAPS.memoryLimitBytes : Number(heap),
     maxCalls: limited ? Number(budget ?? 3) : DEFAULT_CODEMODE_CAPS.maxCalls,
   },
 });
@@ -113,6 +123,14 @@ const harness = await Harness.open(store.storage, { models, registry }, context)
 const model = faux.getModel();
 const root = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
 
+if (evaluating) {
+  await setEvaluationBudget(harness, root.id, 1, Number(budget), context);
+  await assert.rejects(
+    setEvaluationBudget(harness, root.id, 1, Number(budget) + 1, context),
+    /cannot be changed after assignment/,
+  );
+}
+
 if (mode === "start") {
   await root.submit({ type: "input", content: "go", requestId: "recovery-1" }, context);
   harness.resume();
@@ -133,7 +151,19 @@ if (mode === "start") {
         ? [{ answer: message.content.map((block) => (block.type === "text" ? block.text : "")).join("") }]
         : [],
   );
-  console.log(JSON.stringify(results));
+  console.log(
+    JSON.stringify(
+      evaluating
+        ? {
+            results,
+            turns: await evaluationBudgetTurns(harness, root.id, context),
+            exceeded: await evaluationBudgetExceeded(harness, root.id, context),
+            modelCallsAfterRestart: faux.state.callCount,
+            budgetChangeRefused: true,
+          }
+        : results,
+    ),
+  );
   await harness.close(context);
   await sandbox.close();
   await store.close();

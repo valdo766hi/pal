@@ -101,6 +101,38 @@ describe("code mode recovery", () => {
     expect(results.at(-1)).toEqual({ answer: "Done." });
   });
 
+  it("retains the evaluation turn allowance and deadline across SIGKILL without refilling or replaying effects", async () => {
+    const service = await startService();
+    const dataRoot = await mkdtemp(join(tmpdir(), "pal-evaluation-crash-budget-"));
+    cleanups.push(() => rm(dataRoot, { recursive: true, force: true }));
+    const args = [dataRoot, service.url, "evaluation", String(Date.now() + 60_000)];
+    const first = runChild(["start", ...args]);
+    await service.writeInFlight;
+    first.process.kill("SIGKILL");
+    await once(first.process, "exit");
+    expect(service.requests).toEqual(["GET /read?key=a", "POST /write?key=b"]);
+    const resumed = runChild(["resume", ...args]);
+    const report = JSON.parse((await resumed.output()).trim()) as {
+      results: { isError?: boolean; text?: string; answer?: string }[];
+      turns: number;
+      exceeded: boolean;
+      modelCallsAfterRestart: number;
+      budgetChangeRefused: boolean;
+    };
+    expect(report).toMatchObject({
+      turns: 1,
+      exceeded: true,
+      modelCallsAfterRestart: 0,
+      budgetChangeRefused: true,
+    });
+    expect(service.requests).toEqual(["GET /read?key=a", "POST /write?key=b", "GET /read?key=c"]);
+    const script = report.results.find((result) => result.text !== undefined);
+    expect(script?.isError).toBe(false);
+    expect(script?.text).toMatch(/"b":"unknown: [^"]*interrupted/i);
+    expect(script?.text).toContain('"c":"value of c"');
+    expect(report.results.some((result) => result.answer === "Done.")).toBe(false);
+  });
+
   it("keeps the shared discovery/tool budget across SIGKILL without charging replayed calls twice", async () => {
     const { requests, beforeResume, results } = await crashDuringWrite([], "budget");
     expect(beforeResume).toEqual(["GET /read?key=a", "POST /write?key=b"]);
