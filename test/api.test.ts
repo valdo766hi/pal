@@ -221,7 +221,43 @@ describe("API", () => {
     expect((await api("PUT", path, { ...goal, revision: 1, provider: "openai" })).status).toBe(400);
     expect((await api("PUT", path, { ...goal, revision: 1, text: "界".repeat(2000) })).status).toBe(400);
     expect((await api("GET", path)).body).toEqual(saved.body);
-    expect((await api("PUT", path, { revision: 1, text: "", constraints: [], acceptance: [] })).body.goal).toEqual({
+    const allowancePath = `chats/${chat.id}/context/working-allowance`;
+    const allowance = { revision: 0, goalRevision: 1, limits: { steps: 2, calls: 8 } };
+    expect((await fetch(`${base}/api/${allowancePath}`, { method: "PUT", headers: { origin: base } })).status).toBe(
+      401,
+    );
+    expect(
+      (
+        await fetch(`${base}/api/${allowancePath}`, {
+          method: "PUT",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify(allowance),
+        })
+      ).status,
+    ).toBe(403);
+    for (const limits of [
+      { steps: 0, calls: 8 },
+      { steps: 65, calls: 8 },
+      { steps: 2, calls: 257 },
+      { steps: 1.5, calls: 8 },
+    ])
+      expect((await api("PUT", allowancePath, { ...allowance, limits })).status).toBe(400);
+    expect((await api("PUT", allowancePath, { ...allowance, used: { steps: 0, calls: 0 } })).status).toBe(400);
+    const configured = await api("PUT", allowancePath, allowance);
+    expect(configured.status).toBe(200);
+    expect(configured.body.allowance).toMatchObject({
+      revision: 1,
+      goalRevision: 1,
+      limits: allowance.limits,
+      used: { steps: 0, calls: 0 },
+    });
+    expect((await api("PUT", allowancePath, allowance)).body.allowance).toEqual(configured.body.allowance);
+    const cleared = await api("PUT", path, { revision: 1, text: "", constraints: [], acceptance: [] });
+    expect(cleared.body.allowance.state).toBe("goal-changed");
+    expect((await api("PUT", allowancePath, { revision: 1, goalRevision: 2, limits: null })).body.allowance.state).toBe(
+      "disabled",
+    );
+    expect(cleared.body.goal).toEqual({
       revision: 2,
       text: "",
       constraints: [],

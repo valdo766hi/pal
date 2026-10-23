@@ -302,19 +302,22 @@ export async function openPal(
         if (harness === undefined) throw new Error("the harness is not open");
         return harness;
       },
-      async (conversation, ctx) => {
-        const workspace = await openedWorkspaces.forConversation(conversation);
-        if (workspace?.state !== "ready") throw new Error("verification requires a ready workspace");
-        const lease = await openedWorkspaces.lease(workspace.projectId, workspace.id);
-        const revision = await workspaceRevision(
-          lease,
-          privateFiles,
-          [options.dataRoot, options.installRoot, "/nix/store"],
-          ctx,
-        );
-        return { workspace: workspace.id, root: lease.root, revision };
+      {
+        revision: async (conversation, ctx) => {
+          const workspace = await openedWorkspaces.forConversation(conversation);
+          if (workspace?.state !== "ready") throw new Error("verification requires a ready workspace");
+          const lease = await openedWorkspaces.lease(workspace.projectId, workspace.id);
+          const revision = await workspaceRevision(
+            lease,
+            privateFiles,
+            [options.dataRoot, options.installRoot, "/nix/store"],
+            ctx,
+          );
+          return { workspace: workspace.id, root: lease.root, revision };
+        },
+        locks,
+        root: (conversation) => links.chat(conversation),
       },
-      locks,
     );
 
     // Host writes/commands are the owner's explicit high-trust mode; every nested call rechecks the live project grant.
@@ -350,6 +353,7 @@ export async function openPal(
           name === "skills_read" ||
           name === "working_read" ||
           name === "working_checks" ||
+          name === "working_allowance" ||
           name === "working_checkpoint" ||
           name === "agents_delegate" ||
           (name.startsWith(BROWSER_NAMESPACE.prefix) && browsers?.allows(conversation) === true) ||
@@ -470,6 +474,7 @@ export async function openPal(
       hooks: [
         ...(chatContext.extension.hooks ?? []),
         ...(instructions.extension.hooks ?? []),
+        ...(working.extension.hooks ?? []),
         ...(budget.hooks ?? []),
         ...(helperBudgets.hooks ?? []),
       ],

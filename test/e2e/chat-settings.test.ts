@@ -2086,6 +2086,120 @@ describe("browser address drafts", () => {
 
 describe("saved working goals", () => {
   it.each([1440, 390])(
+    "saves passive execution allowances, retains conflicting drafts and disables only explicitly at %s px",
+    async (width) => {
+      const { pal, page, base, saved, provider, errors, mutations, restart } = await setup(width);
+      await pal.working.setGoal(
+        saved,
+        { revision: 0, text: "Bounded workflow fixture", constraints: [], acceptance: [] },
+        context,
+      );
+      const permissions = (await pal.approvals.view(saved.id)).mode;
+      let working = await panel(page, base, saved.id, width);
+      await working.getByText("Bounded workflow fixture", { exact: true }).waitFor();
+      expect(await working.getByRole("button", { name: "Set execution allowance", exact: true }).count()).toBe(1);
+      let allowance = working.getByRole("region", { name: "Execution allowance", exact: true });
+      await allowance.getByRole("button", { name: "Set execution allowance", exact: true }).click();
+      await allowance.getByLabel("Model steps", { exact: true }).fill("3");
+      await allowance.getByLabel("Tool attempts", { exact: true }).fill("12");
+      await allowance.getByRole("button", { name: "Start or renew execution allowance", exact: true }).click();
+      await expect.poll(() => allowance.innerText()).toContain("model steps 0 / 3 · tool attempts 0 / 12");
+      expect((await pal.working.inspect(saved, context)).allowance).toMatchObject({
+        revision: 1,
+        limits: { steps: 3, calls: 12 },
+      });
+      const reopened = await restart();
+      await page.reload();
+      if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+      await page.getByRole("button", { name: "Context", exact: true }).click();
+      working = page.getByRole("region", { name: "Working goal", exact: true });
+      allowance = working.getByRole("region", { name: "Execution allowance", exact: true });
+      await expect.poll(() => allowance.innerText()).toContain("model steps 0 / 3 · tool attempts 0 / 12");
+      await allowance.getByRole("button", { name: "Set execution allowance", exact: true }).click();
+      await allowance.getByLabel("Model steps", { exact: true }).fill("5");
+      await allowance.getByLabel("Tool attempts", { exact: true }).fill("10");
+      await reopened.working.configureAllowance(
+        saved,
+        { revision: 1, goalRevision: 1, limits: { steps: 4, calls: 16 } },
+        context,
+      );
+      await allowance.getByRole("button", { name: "Start or renew execution allowance", exact: true }).click();
+      await allowance.getByText(/Your allowance draft is retained/).waitFor();
+      expect(await allowance.getByLabel("Model steps", { exact: true }).inputValue()).toBe("5");
+      expect(
+        await allowance.getByRole("button", { name: "Start or renew execution allowance", exact: true }).isDisabled(),
+      ).toBe(true);
+      await allowance.getByRole("button", { name: "Use current allowance revision for my draft", exact: true }).click();
+      await allowance.getByRole("button", { name: "Start or renew execution allowance", exact: true }).click();
+      await expect.poll(() => allowance.innerText()).toContain("model steps 0 / 5 · tool attempts 0 / 10");
+      await reopened.working.setGoal(
+        saved,
+        { revision: 1, text: "Corrected bounded fixture", constraints: [], acceptance: [] },
+        context,
+      );
+      await working.getByRole("button", { name: "Refresh working state", exact: true }).click();
+      await allowance.getByText(/existing allowance was not silently removed/).waitFor();
+      await allowance.scrollIntoViewIfNeeded();
+      await screenshot(page, `working-allowance-${width}`);
+      await allowance.getByRole("button", { name: "Disable execution allowance", exact: true }).click();
+      await expect.poll(() => allowance.innerText()).toContain("disabled · revision 4");
+      expect((await reopened.working.inspect(saved, context)).allowance.limits).toBeNull();
+      expect((await reopened.approvals.view(saved.id)).mode).toBe(permissions);
+      expect(mutations).toEqual(Array(4).fill(`PUT /api/chats/${saved.id}/context/working-allowance`));
+      expect(provider.requests).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+
+  it.each([1440, 390])(
+    "retries a lost allowance acknowledgement without resetting already spent steps at %s px",
+    async (width) => {
+      const { pal, page, base, saved, provider, errors } = await setup(width);
+      await pal.working.setGoal(
+        saved,
+        { revision: 0, text: "Lost acknowledgement fixture", constraints: [], acceptance: [] },
+        context,
+      );
+      const bodies: unknown[] = [];
+      let first = true;
+      await page.route(`**/api/chats/${saved.id}/context/working-allowance`, async (route) => {
+        bodies.push(route.request().postDataJSON());
+        if (!first) return route.continue();
+        first = false;
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        await route.abort("failed");
+      });
+      const working = await panel(page, base, saved.id, width);
+      const allowance = working.getByRole("region", { name: "Execution allowance", exact: true });
+      await allowance.getByRole("button", { name: "Set execution allowance", exact: true }).click();
+      await allowance.getByLabel("Model steps", { exact: true }).fill("3");
+      await allowance.getByLabel("Tool attempts", { exact: true }).fill("12");
+      await allowance.getByRole("button", { name: "Start or renew execution allowance", exact: true }).click();
+      await working.getByRole("alert").waitFor();
+      expect((await pal.working.inspect(saved, context)).allowance.revision).toBe(1);
+      await pal.chats.submit(
+        saved.id,
+        "allowance-spent-before-retry",
+        { text: "Consume one local fixture step" },
+        context,
+      );
+      await (await pal.harness.conversation(saved.conversationId, context))?.waitForIdle(context);
+      expect((await pal.working.inspect(saved, context)).allowance.used.steps).toBe(1);
+      await allowance.getByRole("button", { name: "Start or renew execution allowance", exact: true }).click();
+      await expect.poll(() => allowance.innerText()).toContain("model steps 1 / 3 · tool attempts 0 / 12");
+      expect(bodies).toEqual(Array(2).fill({ revision: 0, goalRevision: 1, limits: { steps: 3, calls: 12 } }));
+      expect((await pal.working.inspect(saved, context)).allowance).toMatchObject({
+        revision: 1,
+        used: { steps: 1, calls: 0 },
+      });
+      expect(provider.requests).toHaveLength(1);
+      expect(provider.requests[0]?.path).toBe("/v1/messages");
+      expect(errors).toEqual([]);
+    },
+  );
+
+  it.each([1440, 390])(
     "accepts only reviewed current checks and recovers a stale review without starting work at %s px",
     async (width) => {
       const { pal, page, base, project, saved, provider, errors, mutations, restart } = await setup(width);
@@ -2152,6 +2266,7 @@ describe("saved working goals", () => {
       await working.getByRole("button", { name: "Refresh working state", exact: true }).click();
       await working.getByText(/This goal is no longer complete/).waitFor();
       expect((await reopened.working.inspect(saved, context)).verification.review?.stale).toBe(true);
+      await working.getByText(/This goal is no longer complete/).scrollIntoViewIfNeeded();
       await screenshot(page, `working-review-${width}`);
       expect(mutations).toEqual([
         `POST /api/chats/${saved.id}/context/working-review`,

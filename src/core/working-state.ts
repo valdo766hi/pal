@@ -9,6 +9,7 @@ import type { WorkspaceLocks } from "./execution.ts";
 import { HttpError } from "./http.ts";
 import { validate } from "./requests.ts";
 import { WorkingChecks } from "./working-checks.ts";
+import { type AllowanceChange, workingAllowance } from "./working-allowance.ts";
 
 const LIMITS = { goalBytes: 4096, goalTokens: 1500, checkpointBytes: 4096 };
 const ShortList = Type.Array(Type.String({ minLength: 1, maxLength: 200 }), { maxItems: 8 });
@@ -73,7 +74,7 @@ function ownerSection(goal: Data["goal"]) {
   return (
     `Owner's current working goal (revision ${goal.revision}); this does not grant permissions or prove completion.\n` +
     JSON.stringify({ goal: goal.text, constraints: goal.constraints, acceptance: goal.acceptance }) +
-    "\nUse working_read for unverified notes and working_checks for host-run command receipts. " +
+    "\nUse working_read for unverified notes, working_checks for host-run command receipts and working_allowance for owner-set execution limits. " +
     "Record a criterion with shell_run's check: {goalRevision, criterion} (zero-based index); receipts do not certify test adequacy or completion."
   );
 }
@@ -90,20 +91,30 @@ export const WORKING_NAMESPACE: CodemodeNamespace = {
 export class WorkingState {
   readonly extension;
   readonly checks: WorkingChecks;
+  readonly allowance: ReturnType<typeof workingAllowance>;
   readonly #database: SqliteDatabase;
   readonly #harness: () => Harness;
 
   constructor(
     database: SqliteDatabase,
     harness: () => Harness,
-    revision: ConstructorParameters<typeof WorkingChecks>[0]["revision"],
-    locks: WorkspaceLocks,
+    {
+      revision,
+      locks,
+      root,
+    }: {
+      revision: ConstructorParameters<typeof WorkingChecks>[0]["revision"];
+      locks: WorkspaceLocks;
+      root: (conversation: ConversationId) => Promise<ConversationId>;
+    },
   ) {
     this.#database = database;
     this.#harness = harness;
     this.checks = new WorkingChecks({ working: Working, harness, ready: (id) => this.#ready(id), revision, locks });
+    this.allowance = workingAllowance({ working: Working, harness, ready: (id) => this.#ready(id), root });
     this.extension = defineExtension({
       name: "pal.working-state",
+      hooks: this.allowance.extension.hooks ?? [],
       sections: [
         {
           key: "working-state",
@@ -116,6 +127,7 @@ export class WorkingState {
       ],
       tools: [
         ...this.checks.tools,
+        ...(this.allowance.extension.tools ?? []),
         defineTool({
           name: "working_read",
           description:
@@ -204,8 +216,14 @@ export class WorkingState {
     await this.#ready(chat.conversationId);
     const state = await this.#harness().snapshot(Working, chat.conversationId, context);
     const verification = await this.checks.inspect(chat.conversationId, context);
+    const allowance = await this.allowance.inspect(chat.conversationId, context);
     await this.#ready(chat.conversationId);
-    return { ...view(state), verification };
+    return { ...view(state), verification, allowance };
+  }
+
+  async configureAllowance(chat: Chat, input: Static<typeof AllowanceChange>, context: Context) {
+    await this.allowance.configure(chat.conversationId, input, context);
+    return this.inspect(chat, context);
   }
 
   async acceptChecks(chat: Chat, input: unknown, context: Context) {

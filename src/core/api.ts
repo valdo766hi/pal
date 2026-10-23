@@ -30,6 +30,7 @@ import {
 import { cookie, HttpError, isOwnOrigin, readJson, sendJson } from "./http.ts";
 import { OwnerError, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS } from "./owner.ts";
 import { WorkspaceBusy } from "./execution.ts";
+import { AllowanceChange } from "./working-allowance.ts";
 import { FileAccessError, searchFolder } from "./files.ts";
 import { SearchError } from "./search.ts";
 import { FolderError } from "./projects.ts";
@@ -848,6 +849,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           if (method === "PUT") return send(200, await pal.working.setGoal(chat, await readJson(request), context));
           return send(200, await pal.working.inspect(chat, context));
         }
+        if (path[3] === "working-allowance" && method === "PUT")
+          return send(
+            200,
+            await pal.working.configureAllowance(chat, validate(AllowanceChange, await readJson(request)), context),
+          );
         if (path[3] === "working-review" && method === "POST")
           return send(200, await pal.working.acceptChecks(chat, await readJson(request), context));
         if (path[3] === "instructions" && method === "PUT") {

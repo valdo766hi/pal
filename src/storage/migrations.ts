@@ -346,6 +346,14 @@ export const MIGRATIONS: readonly Migration[] = [
       await transaction.exec("ALTER TABLE pal_change_comments ADD COLUMN submission_id INTEGER");
     },
   },
+  {
+    version: 22,
+    name: "working_execution_allowance_compatibility",
+    // Older builds must refuse the store rather than silently ignore its durable execution limits.
+    up: async (transaction) => {
+      await transaction.exec("SELECT 1");
+    },
+  },
 ];
 
 /**

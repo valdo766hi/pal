@@ -275,8 +275,28 @@ binds the goal revision, workspace/source and exact check receipts; missing, fai
 be accepted. Replaced evidence requires fresh consent even when source bytes are unchanged. An identical retry
 preserves the original acceptance timestamp. Saving rechecks under the shared workspace mutation lock and Pi
 transaction; external edits remain outside that lock. Later reads label changed/unavailable source or evidence
-as stale, not completed. Goal correction clears current acceptance. No model tool can accept on the owner's behalf,
-and acceptance never commits, activates, cancels work or starts another run. Whole-run budgets remain future work.
+as stale, not completed. Goal correction clears current acceptance. No acceptance tool is exposed to the model,
+and acceptance never commits, activates, cancels work or starts another run.
+
+Execution allowances are a separate owner opt-in in Context. Owner-authenticated
+`PUT /api/chats/:id/context/working-allowance` accepts `{ revision, goalRevision, limits: { steps, calls } | null }`.
+Steps are logical native model tasks, including summaries and helpers; calls are native tool attempts, including
+Code Mode and its nested calls. Limits are 1–64 steps and 1–256 calls. They are **not provider retry, discovery-global,
+token, wall-time or spending caps**; existing per-call deadlines, Code Mode discovery limits and grants still apply.
+Reservations and first-block evidence live in bounded Pi documents and survive restart/compaction. Native hooks
+abort before another model step, decline over-limit summaries and refuse tool dispatch. Unreadable policy fails
+closed. `working_allowance` reads the state but cannot change it; the owner can inspect it even when tools are blocked.
+
+Saving/renewing resets that allowance, not verification-attempt receipts or permissions, and never submits input or
+resumes stopped work. An identical retry with the preceding revision preserves already-spent counters; renewing
+uses the current revision. Conflicting revisions return 409 and the UI retains the draft for explicit review.
+Goal correction/clearing leaves an enabled policy bound to its old goal and blocks new work until explicitly
+renewed or disabled; it never silently removes a limit. Already-admitted effects are not undone.
+
+Store format 22 is a compatibility barrier: older builds must refuse a store instead of ignoring its execution
+allowances, even when no task is active. The migration changes no table layout or user content. A failed upgrade
+may use old code only while the stopped store remains compatible; after migration, preserve data and hold for a
+forward fix rather than attempting an old-code start or automatic database restore/rollback.
 
 ### Evaluations
 
