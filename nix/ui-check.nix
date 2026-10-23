@@ -1,4 +1,6 @@
 {
+  lib,
+  bashInteractive,
   nodejs_24,
   git,
   coreutils,
@@ -27,6 +29,7 @@ writeShellApplication {
     cd "$work"
     export PLAYWRIGHT_BROWSERS_PATH=${ui.browsers}
     export FONTCONFIG_FILE=${ui.fonts}
+    export PAL_BASH=${lib.getExe bashInteractive}
     export PAL_E2E_SCREENSHOTS="$output/screenshots"
     status=0
     node node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts \

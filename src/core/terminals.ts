@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -125,6 +125,8 @@ export class Terminals {
       const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
       const { SerializeAddon } = require("@xterm/addon-serialize") as typeof import("@xterm/addon-serialize");
       home = await mkdtemp(join(tmpdir(), "pal-terminal-"));
+      const inputrc = join(home, "inputrc");
+      await writeFile(inputrc, '"\\e[5~": previous-history\n"\\e[6~": next-history\n', { mode: 0o600, flag: "wx" });
       await this.#project(projectId);
       await lease?.check();
       if (this.#closed) throw new HttpError(503, "closing", "Pal is closing");
@@ -145,8 +147,8 @@ export class Terminals {
             TERM: "xterm-256color",
             COLORTERM: "truecolor",
             HISTFILE: "/dev/null",
-            HISTSIZE: "0",
-            INPUTRC: "/dev/null",
+            HISTSIZE: "500",
+            INPUTRC: inputrc,
             // A dim "pal" marks Pal's clean host shell; the last two folders keep long workspace paths readable.
             PS1: `${sgr("2")}pal${sgr("0")} ${sgr("36")}\\w${sgr("0")} ${sgr("1;34")}\\$${sgr("0")} `,
             PROMPT_DIRTRIM: "2",

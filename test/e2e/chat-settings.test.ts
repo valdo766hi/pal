@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,6 +47,7 @@ async function setup(width: number, definitions?: readonly CompiledCapability[])
       version: "test",
       webRoot: join(import.meta.dirname, "../../dist/public"),
       api: createApi(pal),
+      upgrade: (request, socket, head) => pal.upgrade(request, socket, head),
     });
   let server = await serve(0);
   cleanups.push(async () => {
@@ -140,6 +141,62 @@ async function screenshot(page: Page, name: string) {
   await mkdir(root, { recursive: true });
   await page.screenshot({ path: join(root, `${name}.png`), animations: "disabled" });
 }
+
+describe("terminal command history", () => {
+  it.each([1440, 390])(
+    "recalls editable commands with Page Up/Down and reconnects without running them at %s px",
+    async (width) => {
+      const { pal, page, base, project, saved, provider, errors } = await setup(width);
+      const open = async () => {
+        if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+        await page.getByRole("button", { name: "Terminal", exact: true }).click();
+      };
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      await open();
+      await page.getByRole("checkbox", { name: /I understand this shell/ }).check();
+      await page.getByRole("button", { name: "New host terminal", exact: true }).click();
+      await page.getByRole("status").filter({ hasText: "You control this shell" }).waitFor();
+      const terminal = (await pal.terminals.list(project.id))[0];
+      if (terminal === undefined) throw new Error("missing history terminal");
+      const input = page.getByLabel("Terminal input", { exact: true });
+      const command = "echo x >> h";
+      await input.focus();
+      await page.keyboard.insertText(command);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => readFile(join(terminal.cwd, "h"), "utf8")).toBe("x\n");
+      const occurrences = async () =>
+        ((await page.locator(".xterm-rows").textContent()) ?? "").replaceAll("\u00a0", " ").split(command).length - 1;
+      await expect.poll(occurrences).toBe(1);
+      const before = await occurrences();
+      await page.keyboard.press("PageUp");
+      await expect.poll(occurrences).toBe(before + 1);
+      expect(await readFile(join(terminal.cwd, "h"), "utf8")).toBe("x\n");
+      await screenshot(page, `terminal-history-${width}`);
+      await page.keyboard.press("PageDown");
+      await expect.poll(occurrences).toBe(before);
+      await page.keyboard.press("PageUp");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => readFile(join(terminal.cwd, "h"), "utf8")).toBe("x\nx\n");
+      await page.keyboard.insertText("echo draft >> d");
+      await page.keyboard.press("PageUp");
+      await page.keyboard.press("PageDown");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => readFile(join(terminal.cwd, "d"), "utf8")).toBe("draft\n");
+      expect(await readFile(join(terminal.cwd, "h"), "utf8")).toBe("x\nx\n");
+      await page.reload();
+      await open();
+      await page.getByRole("status").filter({ hasText: "You control this shell" }).waitFor();
+      expect((await pal.terminals.list(project.id)).map((value) => value.id)).toEqual([terminal.id]);
+      expect(await readFile(join(terminal.cwd, "d"), "utf8")).toBe("draft\n");
+      await input.focus();
+      await page.keyboard.press("PageUp");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => readFile(join(terminal.cwd, "d"), "utf8")).toBe("draft\ndraft\n");
+      expect(provider.requests).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+});
 
 describe("saved chat settings", () => {
   it.each([

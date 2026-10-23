@@ -221,6 +221,13 @@ message once, every day or on chosen weekdays, at a time in a time zone you pick
   once instead of sending it again. The attempt count includes claims whose admission was blocked or interrupted;
   history distinguishes actual admissions. Backup restoration pauses automation as described above.
 
+## Terminal
+
+The host terminal keeps up to 500 commands in memory per live shell. Up/Page Up recalls earlier commands;
+Down/Page Down moves forward and restores an unfinished line. Recalled commands remain editable and run only
+when you press Enter. Reconnecting to the same live shell retains its history; closing it or restarting Pal discards
+it. History is not saved to disk. The Nix package supplies a Readline-enabled Bash for interactive terminals.
+
 ## Browser
 
 The Browser panel needs the browser runtime: Chromium, bubblewrap, socat and coreutils, plus `systemd-run --user`

@@ -56,6 +56,7 @@ stdenv.mkDerivation {
   __darwinAllowLocalNetworking = true;
   env = pal.releaseEnv // {
     PAL_TEST_PROCESS = lib.getExe processProbe;
+    PAL_BASH = lib.getExe bashInteractive;
   };
   passthru = { inherit processProbe; };
 
@@ -90,7 +91,7 @@ stdenv.mkDerivation {
       else
         "pnpm test"
     }
-    # Nix's default Bash has no readline; exercise its bracketed-paste behavior separately.
+    # Repeat terminal regressions with an explicit Readline-enabled shell.
     PAL_BASH=${lib.getExe bashInteractive} pnpm exec vitest run test/terminals.test.ts
     pnpm build
     runHook postBuild

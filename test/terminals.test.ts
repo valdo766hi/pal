@@ -129,6 +129,75 @@ describe("human host terminals", () => {
     expect((await pal.terminals.list(project.id))[0]?.id).toBe(terminal.id);
   });
 
+  it("recalls commands with Page Up/Down without executing them and retains history through reconnect", async () => {
+    const { project, create, connect } = await setup();
+    const terminal = await create();
+    const client = await connect(terminal.id);
+    const epoch = client.last("state")?.epoch;
+    await expect.poll(() => `${client.last("snapshot")?.data ?? ""}${client.output()}`).toContain("$");
+    const send = (data: string) => client.send({ type: "input", epoch, data });
+    const run = async (command: string) => {
+      const start = client.output().length;
+      send(command + "\r");
+      await expect.poll(() => client.output().slice(start)).toContain("$");
+    };
+    await run("printf older > older.txt");
+    const command = "printf once >> recalled.txt";
+    await run(command);
+    let start = client.output().length;
+    send("\x1b[5~");
+    await expect.poll(() => client.output().slice(start)).toContain(command);
+    expect(await readFile(join(project.root, "recalled.txt"), "utf8")).toBe("once");
+    start = client.output().length;
+    send("\x1b[5~");
+    await expect.poll(() => client.output().slice(start)).toContain("older.txt");
+    start = client.output().length;
+    send("\x1b[6~");
+    await expect.poll(() => client.output().slice(start)).toContain("recalled.txt");
+    await run("");
+    expect(await readFile(join(project.root, "recalled.txt"), "utf8")).toBe("onceonce");
+    client.ws.close();
+    await once(client.ws, "close");
+    const next = await connect(terminal.id);
+    next.send({ type: "input", epoch: next.last("state")?.epoch, data: "\x1b[5~" });
+    await expect.poll(next.output).toContain(command);
+    expect(await readFile(join(project.root, "recalled.txt"), "utf8")).toBe("onceonce");
+    next.send({ type: "input", epoch: next.last("state")?.epoch, data: "\r" });
+    await expect.poll(() => readFile(join(project.root, "recalled.txt"), "utf8")).toBe("onceonceonce");
+  });
+
+  it("bounds memory-only history per shell and discards it with the private terminal home", async () => {
+    const { pal, project, create, connect } = await setup();
+    const terminal = await create();
+    const client = await connect(terminal.id);
+    client.send({
+      type: "input",
+      epoch: client.last("state")?.epoch,
+      data:
+        Array.from({ length: 600 }, (_, index) => `: entry-${index + 1}\r`).join("") +
+        'history > history-window.txt; printf %s "$HOME" > history-home.txt\r',
+    });
+    const window = join(project.root, "history-window.txt");
+    await expect.poll(() => readFile(window, "utf8")).toContain("entry-600");
+    const entries = (await readFile(window, "utf8")).trim().split("\n");
+    expect(entries).toHaveLength(500);
+    expect(entries[0]).toMatch(/entry-102$/);
+    expect(entries.at(-2)).toMatch(/entry-600$/);
+    expect(entries.at(-1)).toContain("history > history-window.txt");
+    const homePath = join(project.root, "history-home.txt");
+    await expect.poll(() => readFile(homePath, "utf8")).toContain("pal-terminal-");
+    const home = await readFile(homePath, "utf8");
+    await expect(access(join(home, ".bash_history"))).rejects.toThrow();
+    const other = await create();
+    const isolated = await connect(other.id);
+    isolated.send({ type: "input", epoch: isolated.last("state")?.epoch, data: "history > isolated-history.txt\r" });
+    const history = join(project.root, "isolated-history.txt");
+    await expect.poll(() => readFile(history, "utf8")).toContain("isolated-history.txt");
+    expect(await readFile(history, "utf8")).not.toContain("entry-");
+    await pal.terminals.remove(project.id, terminal.id);
+    await expect(access(home)).rejects.toThrow();
+  });
+
   it("rejects unauthenticated, wrong Host/Origin and missing-Origin upgrades", async () => {
     const { create, socket } = await setup();
     const terminal = await create();
