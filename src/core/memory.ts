@@ -456,7 +456,11 @@ export class ProjectMemory {
           terms.map((term) => `"${term}"`).join(" OR "),
           scope.project,
         );
-        rows = await this.#live(scope, candidates);
+        const live = new Map((await this.#live(scope, candidates)).map((row) => [row.id, row]));
+        rows = candidates.flatMap(({ id }) => {
+          const row = live.get(id);
+          return row === undefined ? [] : [row];
+        });
       }
       const items: MemoryItem[] = [];
       for (const row of rows) {
