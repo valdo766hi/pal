@@ -185,8 +185,8 @@
       </form>
     {/if}
     <p class="sub">
-      Correction or clearing invalidates the current agent checkpoint, not old transcript entries or backups. It does
-      not cancel running work.
+      Correction or clearing invalidates the current checkpoint and check receipts, not old transcript entries or
+      backups. It does not cancel running work.
     </p>
     {#if info.checkpoint !== null}
       <h4 class="h3">Unverified agent checkpoint</h4>
@@ -206,6 +206,46 @@
         <pre>{info.checkpoint.questions.join("\n") || "None recorded."}</pre>
       </details>
     {:else}<p class="sub">No agent checkpoint.</p>{/if}
+    {#if info.verification}
+      <div class="fl" role="region" aria-label="Recorded acceptance checks">
+        <h4 class="h3">Recorded acceptance checks</h4>
+        <p class="sub">
+          {info.verification.state.replaceAll("-", " ")} · {info.verification.attempts} / {info.verification.limit} verification
+          attempts
+        </p>
+        {#if info.verification.goalRevision !== info.goal.revision}
+          <p class="callout wa">Goal changed during inspection. Refresh before reviewing these receipts.</p>
+        {:else}
+          {#each info.verification.checks as check (check.task)}
+            <details>
+              <summary>Check {check.criterion + 1} · {check.outcome}{check.stale ? " · stale source" : ""}</summary>
+              <p class="sub">
+                {info.goal.acceptance[check.criterion]} · goal {check.goalRevision} · shell task {check.task}
+              </p>
+              <pre>{check.command}{check.commandTruncated
+                  ? "\n[Preview truncated; full command is in the shell task.]"
+                  : ""}</pre>
+              <p class="sub">
+                Exit {check.exitCode ?? "not recorded"}{check.timedOut
+                  ? " · command timed out"
+                  : ""}{check.outputTruncated ? " · output truncated" : ""}. {check.stale
+                  ? "Recheck the changed or unavailable source."
+                  : "Refresh to recheck source freshness."}
+              </p>
+              <pre aria-label="Tested source revision">{check.after ?? "No completed source observation."}</pre>
+            </details>
+          {:else}<p class="sub">No host-run acceptance checks recorded.</p>{/each}
+          {#if info.verification.remaining.length > 0}<p class="sub">
+              Checks still needed: {info.verification.remaining.map((index) => index + 1).join(", ")}
+            </p>{/if}
+        {/if}
+        <details>
+          <summary>Verification scope and limits</summary>
+          <p class="sub">{info.verification.scope}</p>
+          <p class="sub">{info.verification.notice}</p>
+        </details>
+      </div>
+    {/if}
     <p class="sub">{info.notice}</p>
   {/if}
 </section>

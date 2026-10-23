@@ -247,8 +247,30 @@ Owner correction or clearing the goal invalidates them. Agent notes may be stale
 source checks, durable effect receipts or tested-revision evidence. Clearing removes current state, not old
 transcript entries or backups, and does not cancel running work. The prepared-context inspector shows the
 owner section actually prepared for a request, not unsent edits. The Context panel lets the owner edit/clear
-the goal, explicitly rebase a retained conflicting draft, and refresh unverified checkpoint notes. There is
-no automated completion/budget workflow yet.
+the goal, explicitly rebase a retained conflicting draft, and refresh unverified checkpoint notes and host-run
+check receipts.
+
+`shell_run` accepts optional `check: { goalRevision, criterion }`, where `criterion` is a zero-based acceptance
+index. Normal shell permissions, exact command approval and unsafe replay policy still apply. Ordinary commands
+need no goal or verification scan. A checked execution requires a current goal/criterion and a bounded Git source
+fingerprint before dispatch. Sixteen verification attempts are allowed per goal revision; identical goal retries
+do not reset that counter. This is a check-attempt allowance, not a whole-run model/token/CPU budget.
+
+`working_checks` and the passive owner's working-state response expose the latest host receipt per criterion:
+shell task ID, actual-command digest and bounded preview, before/after source revisions, exit/timeout/output-truncation
+status and current freshness. Failed, interrupted/unknown, changed-source or unverifiable checks cannot become
+passing receipts through agent notes. Inspect unknown effects before another attempt; commands are not automatically
+retried. An owner goal correction clears current receipts and their allowance, not the original shell journal.
+
+Fingerprints cover Git HEAD, tracked files and non-ignored untracked file bytes/modes, with 2,048 files, 1 MiB per
+file, 16 MiB total and a ten-second budget checked between reads. Non-regular source entries (including symlink
+files and submodules), private Pal file aliases, non-UTF-8 paths and over-limit scans refuse checked dispatch. Ignored files, other Git metadata, dependency installations and external
+state are outside the fingerprint. Before/after observations over a mutable workspace are not atomic or hermetic.
+
+`ready-for-review` means each criterion has a passing command receipt at the currently observed source revision,
+not that the commands adequately tested the criteria or that the owner reviewed/completed the task. No completion,
+commit, activation or automatic plan/act loop follows. The Context panel shows failures, stale evidence, outstanding
+checks and exhausted verification allowance; broader task completion and whole-run budget controls remain future work.
 
 ### Evaluations
 

@@ -33,6 +33,7 @@ import { AGENTS_NAMESPACE, helperBudget, HelperLinks, type HelperLimits, helperT
 import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { WORKING_NAMESPACE, WorkingState } from "./working-state.ts";
+import { workspaceRevision } from "./workspace-revision.ts";
 import { INSTRUCTIONS_NAMESPACE, ProjectInstructions } from "./instructions.ts";
 import { GuidanceFiles } from "./guidance-files.ts";
 import { PrivateFiles } from "./file-policy.ts";
@@ -295,10 +296,25 @@ export async function openPal(
       ...(options.guidanceHome === undefined ? {} : { home: options.guidanceHome }),
     });
 
-    const working = new WorkingState(database, () => {
-      if (harness === undefined) throw new Error("the harness is not open");
-      return harness;
-    });
+    const working = new WorkingState(
+      database,
+      () => {
+        if (harness === undefined) throw new Error("the harness is not open");
+        return harness;
+      },
+      async (conversation, ctx) => {
+        const workspace = await openedWorkspaces.forConversation(conversation);
+        if (workspace?.state !== "ready") throw new Error("verification requires a ready workspace");
+        const lease = await openedWorkspaces.lease(workspace.projectId, workspace.id);
+        const revision = await workspaceRevision(
+          lease,
+          privateFiles,
+          [options.dataRoot, options.installRoot, "/nix/store"],
+          ctx,
+        );
+        return { workspace: workspace.id, root: lease.root, revision };
+      },
+    );
 
     // Host writes/commands are the owner's explicit high-trust mode; every nested call rechecks the live project grant.
     const projectFor = async (conversation: ConversationId) =>
@@ -332,6 +348,7 @@ export async function openPal(
           name === "skills_search" ||
           name === "skills_read" ||
           name === "working_read" ||
+          name === "working_checks" ||
           name === "working_checkpoint" ||
           name === "agents_delegate" ||
           (name.startsWith(BROWSER_NAMESPACE.prefix) && browsers?.allows(conversation) === true) ||
@@ -370,6 +387,7 @@ export async function openPal(
         root: (conversation) => workspaceRoot(conversation, true),
         commands,
         locks,
+        verification: working.checks,
         // Only calls that ran without an approval: Ask mode binds the owner's decision to the shown command.
         compact: async (conversation, task, ctx) => {
           if (approvals === undefined || (await approvals.asked(task))) return false;

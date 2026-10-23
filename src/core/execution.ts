@@ -8,6 +8,7 @@ import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
 import type { Context } from "@earendil-works/chord";
 import { Type } from "typebox";
 import { gnuTimeout } from "./timeout.ts";
+import type { WorkingChecks } from "./working-checks.ts";
 
 const MAX_OUTPUT = 64 * 1024;
 export const SHELL_NAMESPACE: CodemodeNamespace = {
@@ -287,6 +288,7 @@ export function shellTools(options: {
   locks: WorkspaceLocks;
   /** Approved calls must stay exact, even if the chat later switches to Full access. */
   compact?: (id: ConversationId, task: TaskId, context: Context) => Promise<boolean>;
+  verification?: Pick<WorkingChecks, "start" | "finish">;
 }) {
   return defineExtension({
     name: "pal.shell",
@@ -294,10 +296,16 @@ export function shellTools(options: {
       defineTool({
         name: "shell_run",
         description:
-          "Run a trusted host command in the project folder. Not sandboxed; clean environment, bounded output, 120-second maximum. Never access Pal secrets. An interrupted command must not be blindly retried. When `executed` is present, the command ran as that rtk equivalent and its output is condensed; if the result is unusable, run `rtk bypass <command>` for the unfiltered output. Output sent to files or other programs is never condensed.",
+          "Run a trusted host command in the project folder. Not sandboxed; clean environment, bounded output, 120-second maximum. Never access Pal secrets. An interrupted command must not be blindly retried. When `executed` is present, the command ran as that rtk equivalent and its output is condensed; if the result is unusable, run `rtk bypass <command>` for the unfiltered output. Output sent to files or other programs is never condensed. Optional check binds this execution to an owner goalRevision and zero-based acceptance criterion; working_checks shows its host receipt and source freshness.",
         parameters: Type.Object({
           command: Type.String({ minLength: 1, maxLength: 16_384 }),
           timeout: Type.Optional(Type.Number({ minimum: 0.01, maximum: 120 })),
+          check: Type.Optional(
+            Type.Object(
+              { goalRevision: Type.Integer({ minimum: 1 }), criterion: Type.Integer({ minimum: 0, maximum: 7 }) },
+              { additionalProperties: false },
+            ),
+          ),
         }),
         callers: ["tools"],
         replay: "unsafe",
@@ -319,6 +327,10 @@ export function shellTools(options: {
               (await options.compact?.(api.conversationId, api.taskId, context)) === true
                 ? await options.commands.rewrite(cwd, args.command, context.abortSignal)
                 : undefined;
+            if (args.check !== undefined) {
+              if (options.verification === undefined) throw new Error("working verification is unavailable");
+              await options.verification.start(api, args.check, cwd, executed ?? args.command, context);
+            }
             const shell = {
               callId: String(api.taskId),
               command: args.command,
@@ -340,6 +352,7 @@ export function shellTools(options: {
               (text) => api.output(text),
             );
             const result = executed === undefined ? ran : { ...ran, executed };
+            if (args.check !== undefined) await options.verification?.finish(api, result, context);
             await api.commit(
               (tx) =>
                 tx.appendEntry(api.conversationId, {

@@ -13,6 +13,7 @@ import { exampleCapability } from "../../src/capabilities/example.ts";
 import { startServer } from "../../src/core/server.ts";
 import { runGit } from "../../src/core/git.ts";
 import { GOOD_KEY, startProviderFixture } from "../fixtures/provider-server.ts";
+import type { WorkingStateInfo } from "../../web/src/lib/api.ts";
 import { startMcpFixture } from "../fixtures/mcp-server.ts";
 
 let browser: Browser;
@@ -2084,6 +2085,75 @@ describe("browser address drafts", () => {
 });
 
 describe("saved working goals", () => {
+  it.each([1440, 390])(
+    "renders failed, stale and unknown check receipts without executing work at %s px",
+    async (width) => {
+      const { pal, page, base, saved, provider, errors, mutations } = await setup(width);
+      await pal.working.setGoal(
+        saved,
+        { revision: 0, text: "Review recorded checks", constraints: [], acceptance: ["Independent calculation cases"] },
+        context,
+      );
+      let phase: "failed" | "stale" | "unknown" = "failed";
+      const command = '<img src=x onerror="document.documentElement.dataset.checkReceipt=1">';
+      await page.route(`**/api/chats/${saved.id}/context/working-state`, async (route) => {
+        const mode = phase;
+        const response = await route.fetch();
+        const body = await response.json();
+        const verification: WorkingStateInfo["verification"] = {
+          ...body.verification,
+          goalRevision: 1,
+          attempts: mode === "unknown" ? 16 : 1,
+          state: mode === "unknown" ? "budget-exhausted" : mode === "failed" ? "blocked" : "needs-checks",
+          remaining: [0],
+          checks: [
+            {
+              task: 42,
+              goalRevision: 1,
+              criterion: 0,
+              command,
+              commandDigest: "a".repeat(64),
+              commandTruncated: true,
+              workspace: "rendering-fixture",
+              before: "b".repeat(64),
+              after: mode === "unknown" ? null : "b".repeat(64),
+              startedAt: 1,
+              finishedAt: mode === "unknown" ? null : 2,
+              outcome: mode === "stale" ? "passed" : mode,
+              exitCode: mode === "unknown" ? null : mode === "failed" ? 7 : 0,
+              timedOut: false,
+              outputTruncated: true,
+              stale: mode !== "failed",
+            },
+          ],
+        };
+        await route.fulfill({ response, json: { ...body, verification } });
+      });
+      const working = await panel(page, base, saved.id, width);
+      const checks = working.getByRole("region", { name: "Recorded acceptance checks", exact: true });
+      await checks.getByText("Check 1 · failed", { exact: true }).click();
+      expect(await checks.innerText()).toContain("Exit 7");
+      expect(await checks.innerText()).toContain("output truncated");
+      expect(await checks.innerText()).toContain(command);
+      expect(await checks.locator("img").count()).toBe(0);
+      expect(await page.locator("html").getAttribute("data-check-receipt")).toBeNull();
+      phase = "stale";
+      await working.getByRole("button", { name: "Refresh working state", exact: true }).click();
+      await checks.getByText("Check 1 · passed · stale source", { exact: true }).waitFor();
+      phase = "unknown";
+      await working.getByRole("button", { name: "Refresh working state", exact: true }).click();
+      await checks.getByText("Check 1 · unknown · stale source", { exact: true }).waitFor();
+      expect(await checks.innerText()).toContain("budget exhausted · 16 / 16 verification attempts");
+      expect(await checks.innerText()).toContain("No completed source observation.");
+      await checks.getByText("Verification scope and limits", { exact: true }).click();
+      expect(await checks.innerText()).toContain("not test adequacy, owner review or completion");
+      await screenshot(page, `working-checks-${width}`);
+      expect(mutations).toEqual([]);
+      expect(provider.requests).toEqual([]);
+      expect(errors).toEqual([]);
+    },
+  );
+
   async function panel(page: Page, base: string, id: string, width: number) {
     await page.goto(`${base}/#/chat/${id}`);
     if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
