@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { type Browser, chromium, type Page, type WebSocketRoute } from "playwright-core";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
 import type { CompiledCapability } from "../../src/capabilities/contract.ts";
@@ -19,9 +19,16 @@ import { startMcpFixture } from "../fixtures/mcp-server.ts";
 let browser: Browser;
 const cleanups: (() => Promise<unknown>)[] = [];
 beforeAll(async () => {
+  vi.stubEnv("SHELL", process.env.PAL_BASH ?? "/bin/bash");
   browser = await chromium.launch({ headless: true, chromiumSandbox: true });
 });
-afterAll(async () => browser.close());
+afterAll(async () => {
+  try {
+    await browser.close();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
@@ -185,6 +192,39 @@ describe("file preview refresh", () => {
       expect(errors).toEqual([]);
     },
   );
+});
+
+describe("browser availability", () => {
+  it.each([
+    { width: 1440, available: false },
+    { width: 390, available: false },
+    { width: 1440, available: true },
+    { width: 390, available: true },
+  ])("explains host browser availability=$available at $width px", async ({ width, available }) => {
+    const { page, base, project, saved, provider, errors } = await setup(width);
+    let connections = 0;
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname === `/api/projects/${project.id}/browser/socket`) connections++;
+    });
+    await page.route(`**/api/projects/${project.id}/browser`, (route) =>
+      route.fulfill({ json: { available, running: false } }),
+    );
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+    await page.getByRole("button", { name: "Browser", exact: true }).click();
+    const note = page.getByText("The project browser is not supported on macOS yet", { exact: false });
+    const open = page.getByRole("button", { name: "Open browser", exact: true });
+    if (available) {
+      await expect.poll(() => open.isEnabled()).toBe(true);
+      expect(await note.count()).toBe(0);
+    } else {
+      await expect.poll(() => note.isVisible()).toBe(true);
+      expect(await open.count()).toBe(0);
+    }
+    expect(connections).toBe(0);
+    expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
 });
 
 describe("terminal command history", () => {

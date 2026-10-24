@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -15,10 +15,7 @@ import { Owner, SESSION_COOKIE } from "./owner.ts";
 import type { Projects } from "./projects.ts";
 import { validate } from "./requests.ts";
 import type { Workspaces } from "./workspaces.ts";
-
-/** A color code inside readline's non-printing markers, so line editing measures the prompt correctly; a bash
- * without readline passes the markers through and terminals ignore them. */
-const sgr = (code: string) => `\x01\x1b[${code}m\x02`;
+import { terminalShell } from "./terminal-shell.ts";
 
 const Cols = Type.Integer({ minimum: 20, maximum: 240 });
 const Rows = Type.Integer({ minimum: 5, maximum: 80 });
@@ -125,8 +122,7 @@ export class Terminals {
       const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
       const { SerializeAddon } = require("@xterm/addon-serialize") as typeof import("@xterm/addon-serialize");
       home = await mkdtemp(join(tmpdir(), "pal-terminal-"));
-      const inputrc = join(home, "inputrc");
-      await writeFile(inputrc, '"\\e[5~": previous-history\n"\\e[6~": next-history\n', { mode: 0o600, flag: "wx" });
+      const shell = await terminalShell(home);
       await this.#project(projectId);
       await lease?.check();
       if (this.#closed) throw new HttpError(503, "closing", "Pal is closing");
@@ -135,23 +131,17 @@ export class Terminals {
       screen.loadAddon(serializer);
       let pty: IPty;
       try {
-        pty = spawn(process.env.PAL_BASH ?? "bash", ["--noprofile", "--norc", "-i"], {
+        pty = spawn(shell.file, shell.args, {
           cwd,
           ...size,
           name: "xterm-256color",
           env: {
-            PATH: process.env.PATH ?? "/run/current-system/sw/bin:/usr/bin:/bin",
+            ...shell.env,
             HOME: home,
             TMPDIR: home,
             LANG: "C.UTF-8",
             TERM: "xterm-256color",
             COLORTERM: "truecolor",
-            HISTFILE: "/dev/null",
-            HISTSIZE: "500",
-            INPUTRC: inputrc,
-            // A dim "pal" marks Pal's clean host shell; the last two folders keep long workspace paths readable.
-            PS1: `${sgr("2")}pal${sgr("0")} ${sgr("36")}\\w${sgr("0")} ${sgr("1;34")}\\$${sgr("0")} `,
-            PROMPT_DIRTRIM: "2",
           },
         });
       } catch (error) {
@@ -187,6 +177,7 @@ export class Terminals {
         },
       };
       this.#sessions.set(info.id, session);
+      screen.onData((data) => this.#write(session, data));
       pty.onData((data) => {
         if (session.disposed) return;
         if (Date.now() - session.outputWindow > 1000) {
@@ -400,6 +391,17 @@ export class Terminals {
       this.#upgrades--;
     }
   }
+  #write(session: Session, data: string) {
+    if (session.disposed || session.info.ended) return;
+    const bytes = Buffer.byteLength(data);
+    session.inputBytes += bytes;
+    // Include emulator replies: node-pty exposes no write-queue size, including for children that never read.
+    if (bytes > 16 * 1024 || session.inputBytes > 1024 * 1024) {
+      this.#end(session, "Session input limit reached (1 MiB); start a new terminal.");
+      return;
+    }
+    session.pty.write(data);
+  }
   async #drain(session: Session, client: Client): Promise<void> {
     client.draining = true;
     try {
@@ -439,14 +441,7 @@ export class Terminals {
           for (const observer of session.clients)
             if (observer.ready) this.#send(observer, { type: "resize", cols: message.cols, rows: message.rows });
         } else {
-          const bytes = Buffer.byteLength(message.data);
-          session.inputBytes += bytes;
-          // node-pty exposes no write-queue size: a lifetime cap also bounds a child that never reads stdin.
-          if (bytes > 16 * 1024 || session.inputBytes > 1024 * 1024) {
-            this.#end(session, "Session input limit reached (1 MiB); start a new terminal.");
-            return;
-          }
-          session.pty.write(message.data);
+          this.#write(session, message.data);
         }
       }
     } catch {

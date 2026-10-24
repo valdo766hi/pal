@@ -9,6 +9,8 @@
   python3,
   git,
   bashInteractive,
+  fish,
+  zsh,
   pal,
   sourceRoot ? ../.,
   portable ? false,
@@ -57,6 +59,8 @@ stdenv.mkDerivation {
   env = pal.releaseEnv // {
     PAL_TEST_PROCESS = lib.getExe processProbe;
     PAL_BASH = lib.getExe bashInteractive;
+    PAL_TEST_FISH = lib.getExe fish;
+    PAL_TEST_ZSH = lib.getExe zsh;
   };
   passthru = { inherit processProbe; };
 
@@ -71,6 +75,7 @@ stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
+    export SHELL=${lib.getExe bashInteractive}
     pnpm check
     ${
       if portable then

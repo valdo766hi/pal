@@ -263,7 +263,9 @@
 
 <div class="browser">
   {#if status === "unavailable"}
-    <p class="note">This Pal build has no browser runtime.</p>
+    <p class="note">
+      This Pal build has no browser runtime. The project browser is not supported on macOS yet; use a Linux Pal host.
+    </p>
   {:else if status === "closed" || status === "checking"}
     <div class="note">
       <p>

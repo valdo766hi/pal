@@ -16,6 +16,9 @@
   env.npm_config_build_from_source = "true";
   env.PAL_RELEASE_LOCK = pkgs.lib.getExe (pkgs.callPackage ./nix/release-lock.nix { });
   env.PAL_TEST_PROCESS = pkgs.lib.getExe (pkgs.callPackage ./nix/process-probe.nix { });
+  env.PAL_BASH = pkgs.lib.getExe pkgs.bashInteractive;
+  env.PAL_TEST_FISH = pkgs.lib.getExe pkgs.fish;
+  env.PAL_TEST_ZSH = pkgs.lib.getExe pkgs.zsh;
   packages = [
     pkgs.git
     pkgs.python3

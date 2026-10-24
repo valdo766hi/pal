@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import type { IPty } from "node-pty";
 import { createApi } from "../src/core/api.ts";
@@ -15,8 +15,13 @@ import { openPal } from "../src/core/app.ts";
 import { startServer } from "../src/core/server.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
+beforeEach(() => vi.stubEnv("SHELL", process.env.PAL_BASH ?? "/bin/bash"));
 afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  try {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 async function setup(publicOrigin?: string) {
   const dataRoot = await realpath(await mkdtemp(join(tmpdir(), "pal-terminal-test-")));
@@ -84,6 +89,80 @@ async function setup(publicOrigin?: string) {
 }
 
 describe("human host terminals", () => {
+  it.each(["zsh", "fish"] as const)(
+    "uses the configured %s shell with private history and working recall",
+    async (name) => {
+      const shell = process.env[`PAL_TEST_${name.toUpperCase()}`];
+      if (shell === undefined) throw new Error(`missing native ${name} fixture`);
+      const { pal, project, create, connect } = await setup();
+      const previous = process.env.SHELL;
+      let terminal;
+      try {
+        process.env.SHELL = shell;
+        terminal = await create();
+      } finally {
+        if (previous === undefined) delete process.env.SHELL;
+        else process.env.SHELL = previous;
+      }
+      const client = await connect(terminal.id);
+      const epoch = client.last("state")?.epoch;
+      while (!`${client.last("snapshot")?.data ?? ""}${client.output()}`.includes("$")) {
+        expect(client.last("state")).toMatchObject({ ended: false });
+        await once(client.ws, "message");
+      }
+      const send = (data: string) => client.send({ type: "input", epoch, data });
+      const version = name === "zsh" ? "$ZSH_VERSION" : "$version";
+      send(`printf '%s\\n' "${version}" > shell-version; printf '%s' "$HOME" > shell-home\r`);
+      await expect.poll(() => readFile(join(project.root, "shell-version"), "utf8")).toMatch(/^\d+\./);
+      const home = await readFile(join(project.root, "shell-home"), "utf8");
+      expect(home).toContain("pal-terminal-");
+      send("echo x >> native-history\r");
+      const result = join(project.root, "native-history");
+      await expect.poll(() => readFile(result, "utf8")).toBe("x\n");
+      const start = client.output().length;
+      send("\x1b[5~");
+      await expect.poll(() => client.output().length).toBeGreaterThan(start);
+      expect(await readFile(result, "utf8")).toBe("x\n");
+      send("\r");
+      await expect.poll(() => readFile(result, "utf8")).toBe("x\nx\n");
+      client.ws.close();
+      await once(client.ws, "close");
+      const next = await connect(terminal.id);
+      next.send({ type: "input", epoch: next.last("state")?.epoch, data: "\x1b[5~\r" });
+      await expect.poll(() => readFile(result, "utf8")).toBe("x\nx\nx\n");
+      const nextEpoch = next.last("state")?.epoch;
+      const sendNext = (data: string) => next.send({ type: "input", epoch: nextEpoch, data });
+      for (let start = 0; start < 600; start += 10) {
+        sendNext(
+          Array.from({ length: 10 }, (_, i) => {
+            const n = start + i + 1;
+            return `printf 'entry-%s\\n' ${n}; printf %s ${n} > native-progress\r`;
+          }).join(""),
+        );
+        await expect.poll(() => readFile(join(project.root, "native-progress"), "utf8")).toBe(String(start + 10));
+      }
+      sendNext(
+        name === "fish"
+          ? "builtin history search --null > native-window\r"
+          : 'fc -ln -500 "$HISTCMD" > native-window\r',
+      );
+      const window = join(project.root, "native-window");
+      await expect.poll(() => readFile(window, "utf8")).toContain("600");
+      const entries = (await readFile(window, "utf8"))
+        .trim()
+        .split(name === "fish" ? "\0" : "\n")
+        .filter(Boolean);
+      if (name === "fish") entries.reverse();
+      expect(entries).toHaveLength(500);
+      expect(entries[0]).toContain(`entry-%s\\n' ${name === "fish" ? 101 : 102}`);
+      expect(entries.some((entry) => entry.includes("entry-%s\\n' 600;"))).toBe(true);
+      for (const file of [".bash_history", ".zsh_history", ".local/share/fish/fish_history"])
+        await expect(access(join(home, file))).rejects.toThrow();
+      await pal.terminals.remove(project.id, terminal.id);
+      await expect(access(home)).rejects.toThrow();
+    },
+  );
+
   it.each(["on", "off"])("runs a clean real PTY and restores its screen with bracketed paste %s", async (paste) => {
     const { pal, project, request, create, connect } = await setup();
     expect(await pal.terminals.list(project.id)).toEqual([]);

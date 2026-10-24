@@ -226,12 +226,17 @@ message once, every day or on chosen weekdays, at a time in a time zone you pick
 The host terminal keeps up to 500 commands in memory per live shell. Up/Page Up recalls earlier commands;
 Down/Page Down moves forward and restores an unfinished line. Recalled commands remain editable and run only
 when you press Enter. Reconnecting to the same live shell retains its history; closing it or restarting Pal discards
-it. History is not saved to disk. The Nix package supplies a Readline-enabled Bash for interactive terminals.
+it. History is not saved to disk. Terminals use the host's `SHELL`, or its OS login shell when `SHELL` is unset.
+Bash, Zsh and Fish are supported; an unsupported shell produces an error rather than silently switching shells.
+Pal preserves its launcher's `PATH` so host tools remain available. Launch Pal from your normal host shell to
+include tools installed in user/Nix profiles. Terminal homes are private; user startup files and Pal's secrets
+are not inherited. Agent commands still use the package's Bash, independently of the human terminal.
 
 ## Browser
 
 The Browser panel needs the browser runtime: Chromium, bubblewrap, socat and coreutils, plus `systemd-run --user`
-for resource limits. The Linux Nix package provides it. Without it the panel says the runtime is unavailable.
+for resource limits. The Linux Nix package provides it. The project browser is not supported on macOS yet;
+the unavailable panel explains this and recommends a Linux Pal host.
 Browsing is limited to public addresses on ports 80 and 443. **Clear browser data…** deletes the project's profile,
 and removing a project deletes it too.
 
@@ -258,7 +263,7 @@ The Nix package sets these, and most users never need them.
 | Variable           | Purpose                                                                                  |
 | ------------------ | ---------------------------------------------------------------------------------------- |
 | `PAL_TIMEOUT`      | GNU `timeout` used to bound shell and Git commands. Defaults to `timeout`, then `gtimeout`, on `PATH`. |
-| `PAL_BASH`         | Bash for agent commands and terminals (default `bash`)                                    |
+| `PAL_BASH`         | Bash for agent commands (default `bash`), and terminal fallback if no host shell is available |
 | `PAL_CHROMIUM`, `PAL_BWRAP`, `PAL_SOCAT`, `PAL_COREUTILS`, `PAL_FONTCONFIG` | Browser runtime programs. The browser is available only when the first four are set. |
 | `PAL_SYSTEMD_RUN`  | `systemd-run` for the browser's resource scope (default `systemd-run`)                    |
 | `PAL_NIX`, `PAL_FLOCK`, `PAL_RELEASE_*` | Programs and pinned sources for release checks and the supervisor            |
