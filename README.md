@@ -100,8 +100,10 @@ To check your host, run `node dist/main.js probe`. It tests SQLite FTS5, fff, Co
 
 ### With Nix
 
-The flake provides the package, a development shell and the full test suite for `x86_64-linux` and
-`aarch64-darwin`:
+The flake targets `x86_64-linux` and `aarch64-darwin`, matching the current Linux host and Apple Silicon Mac.
+Linux has the full packaged checks; macOS has portable, native-process and rendered UI subsets, not yet the
+protected project browser or full release lifecycle. Other architectures are outside the current validation
+scope. See the [platform acceptance matrix](docs/development.md#platform-scope-and-acceptance).
 
 ```sh
 nix run github:valdo766hi/pal            # run Pal

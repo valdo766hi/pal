@@ -166,6 +166,36 @@ describe("human host terminals", () => {
     await expect.poll(() => readFile(join(project.root, "recalled.txt"), "utf8")).toBe("onceonceonce");
   });
 
+  it("preserves Unicode input, output and files through resize and reconnect", async () => {
+    const { pal, project, create, connect } = await setup();
+    const terminal = await create();
+    const client = await connect(terminal.id);
+    await expect.poll(() => `${client.last("snapshot")?.data ?? ""}${client.output()}`).toContain("$");
+    const value = "猫 café e\u0301 🌍";
+    const path = join(project.root, "résumé-猫.txt");
+    const epoch = client.last("state")?.epoch;
+    client.send({
+      type: "input",
+      epoch,
+      data: `printf '%s' '${value}' > 'résumé-猫.txt'; printf '\\033[2J\\033[H%s\\n' '${value}'\r`,
+    });
+    await expect.poll(() => readFile(path, "utf8")).toBe(value);
+    await expect.poll(client.output).toContain(`\x1b[2J\x1b[H${value}`);
+    client.send({ type: "resize", epoch, cols: 60, rows: 10 });
+    await expect.poll(async () => (await pal.terminals.list(project.id))[0]).toMatchObject({ cols: 60, rows: 10 });
+    client.ws.close();
+    await once(client.ws, "close");
+    const next = await connect(terminal.id);
+    expect(next.last("snapshot")?.data).toContain(value);
+    expect(next.last("snapshot")?.data).not.toContain("\uFFFD");
+    next.send({
+      type: "input",
+      epoch: next.last("state")?.epoch,
+      data: `printf '%s' '${value}' >> 'résumé-猫.txt'\r`,
+    });
+    await expect.poll(() => readFile(path, "utf8")).toBe(value + value);
+  });
+
   it("bounds memory-only history per shell and discards it with the private terminal home", async () => {
     const { pal, project, create, connect } = await setup();
     const terminal = await create();

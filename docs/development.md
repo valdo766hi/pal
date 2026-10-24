@@ -72,13 +72,35 @@ nix build .#checks.x86_64-linux.e2e       # UI and browser-runtime tests; keeps 
 The e2e output contains screenshots at 1440, 768 and 390 px widths for review. Any change to `package.json` or
 `pnpm-lock.yaml` may change the pnpm dependency hash in `nix/package.nix`; the build reports the new value.
 
+### Platform scope and acceptance
+
+The current targets are the existing NixOS x86-64 host (`x86_64-linux`) and Apple Silicon Mac
+(`aarch64-darwin`). Intel macOS, ARM64 Linux and Windows are outside the current validation scope, not silently
+supported. This selects architectures, not minimum OS versions: record the actual OS in native acceptance
+artifacts, and do not infer compatibility with an older OS from packaging metadata or a newer host.
+
+The boundaries below describe implemented code and outstanding native acceptance, not completed parity.
+All rows must pass on the same released artifact before full Linux/macOS support is claimed.
+
+| Surface | Linux boundary | macOS boundary | Native acceptance / remaining gap |
+| --- | --- | --- | --- |
+| Owner, providers, chat and web UI | Shared server, authorization and Svelte UI | Same shared code | Portable and independent UI subsets; neither substitutes for outstanding session/stream regressions or real-provider outcomes |
+| Projects, uploads, files, review and search | Shared path/revision policy, Git and lazy fff worker | Same policy and native fff | File/alias, instructions/skills and real watcher fixtures; each filesystem's case/Unicode behavior needs its own evidence |
+| Durable work, Code Mode, memory and capabilities | Pi, SQLite and immutable implementation pins | Same core; SQLite fullfsync | Native crash/replay, budget, compaction and immutable-grading controls; model-quality outcomes remain separate |
+| Shell, terminal and local MCP | Approved GNU tools, PTY, process groups and `/proc` test probe | Same tools/PTY, process groups and `libproc` test probe | `native-check` plus the real PTY suite, including Unicode input/output, resize and reconnect; no host-shell sandbox claim |
+| Project browser | Chromium sandbox inside bubblewrap, broker-only egress and user resource scope | No qualified adapter; fails closed | Linux protected browser suite; Mac DOM-policy/UI fixtures are not confinement proof; see [adapter gate](security.md#macos-adapter-gate) |
+| Controlled releases | Protected seven-artifact evaluator, inherited lock, exact approval and supervisor | Portable lock/descriptor primitives only; full lifecycle still gated off | Packaged `supervisor-host` fixture on Linux; protected Mac evaluator/activation/rollback remains unverified |
+| Schedules, helpers and coding workflow | Shared durable records, grants and allowances | Same shared code | Deterministic admission, cancellation/recovery and tested-revision fixtures; real effectiveness is owner-run |
+| Package, doctor and backup | Pinned Nix artifact and stopped-state data operations | Native Nix artifact and the same data rules | Packaged smoke/restore checks; published versioned distribution and clean-machine full-feature installs remain pending |
+| Opt-in services and sleep/wake | No verified service lifecycle supplied by this checkout | No qualified launchd/sleep-wake lifecycle | Separate reviewed OS/service plan and approval, preserving data and release authority; not implied by a manual preview handoff |
+
 ### CI and coverage boundaries
 
 `.github/workflows/checks.yml` checks pushes and pull requests targeting `development`, using the exact
 pushed or PR-head commit, not an implicit merge commit. Dependencies come from the frozen lockfiles through
-Nix. The native targets are Ubuntu 24.04 x86-64 and macOS 15 Apple Silicon; these are test targets, not a
-full-feature support claim or established minimum OS versions. Intel macOS and ARM64 Linux support remain
-undecided. Required branch-protection checks must be configured by the repository owner.
+Nix. Hosted portable jobs currently use Ubuntu 24.04 x86-64 and macOS 15 Apple Silicon; the packaged Linux job
+uses Ubuntu 22.04. These are CI profiles, not minimum OS versions or acceptance of the owner's current Mac.
+Required branch-protection checks must be configured by the repository owner.
 
 Both targets run static checks, a portable subset and the build:
 
