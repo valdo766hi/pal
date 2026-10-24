@@ -1,11 +1,15 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
+import type { BigIntStats } from "node:fs";
 import {
+  appendFile,
   cp,
+  type FileHandle,
   link,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rm,
@@ -21,7 +25,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { releaseIdentity } from "../src/core/extensions.ts";
 import { openStore } from "../src/storage/store.ts";
 
@@ -51,6 +55,61 @@ async function installation() {
 }
 
 describe("mutable implementation identity", () => {
+  it("hashes partial reads exactly without redundant EOF reads", async () => {
+    const { root, install } = await installation();
+    await writeFile(join(install, "src/empty.mjs"), "");
+    await writeFile(join(install, "src/large.mjs"), "x".repeat(128 * 1024 + 17));
+    const expected = await releaseIdentity(install);
+    const copy = join(root, "copy");
+    await cp(install, copy, { recursive: true });
+    const handle = await open(join(copy, "src/tool.mjs"), "r");
+    const prototype = Object.getPrototypeOf(handle) as FileHandle;
+    await handle.close();
+    const read = prototype.read;
+    let reads = 0,
+      empty = 0;
+    const spy = vi.spyOn(prototype, "read").mockImplementation(async function (this: FileHandle, ...args: unknown[]) {
+      if (typeof args[2] === "number") args[2] = Math.min(args[2], 1024);
+      const part = (await Reflect.apply(read, this, args)) as Awaited<ReturnType<FileHandle["read"]>>;
+      reads++;
+      if (part.bytesRead === 0) empty++;
+      return part;
+    });
+    try {
+      expect(await releaseIdentity(copy)).toBe(expected);
+      expect(reads).toBeGreaterThan(128);
+      expect(empty).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.each(["grow", "shrink"] as const)("refuses files that %s after the descriptor size check", async (change) => {
+    const { install } = await installation();
+    const path = join(install, "src/tool.mjs");
+    const inode = (await stat(path, { bigint: true })).ino;
+    const handle = await open(path, "r");
+    const prototype = Object.getPrototypeOf(handle) as FileHandle;
+    await handle.close();
+    const inspect = prototype.stat;
+    let changed = false;
+    const spy = vi.spyOn(prototype, "stat").mockImplementation(async function (this: FileHandle, ...args: unknown[]) {
+      const info = (await Reflect.apply(inspect, this, args)) as BigIntStats;
+      if (String(info.ino) === String(inode) && !changed) {
+        changed = true;
+        if (change === "grow") await appendFile(path, "changed during hashing");
+        else await truncate(path, 0);
+      }
+      return info;
+    });
+    try {
+      await expect(releaseIdentity(install)).rejects.toThrow(/implementation/);
+      expect(changed).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("hashes actual implementation bytes, even when length and mtime are restored", async () => {
     const { install } = await installation();
     const first = await releaseIdentity(install);

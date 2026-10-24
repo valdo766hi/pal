@@ -53,13 +53,13 @@ async function read(
   try {
     const before = await handle.stat({ bigint: true });
     if (!before.isFile() || before.size > BigInt(limit)) throw new Error("implementation file is special or too large");
-    const buffer = Buffer.alloc(Math.min(64 * 1024, Number(before.size) + 1));
+    const size = Number(before.size),
+      buffer = Buffer.alloc(Math.min(64 * 1024, size));
     let length = 0;
-    while (true) {
-      const part = await handle.read(buffer, 0, Math.min(buffer.length, limit + 1 - length), length);
+    while (length < size) {
+      const part = await handle.read(buffer, 0, Math.min(buffer.length, size - length), length);
       if (part.bytesRead === 0) break;
       length += part.bytesRead;
-      if (length > limit) throw new Error("implementation exceeds its read limit");
       consume(buffer.subarray(0, part.bytesRead));
     }
     if (BigInt(length) !== before.size || stamp(before) !== stamp(await handle.stat({ bigint: true })))
