@@ -204,6 +204,8 @@ describe("terminal command history", () => {
       const terminal = (await pal.terminals.list(project.id))[0];
       if (terminal === undefined) throw new Error("missing history terminal");
       const input = page.getByLabel("Terminal input", { exact: true });
+      // Control can arrive before Bash has left the PTY's startup echo mode.
+      await expect.poll(() => page.locator(".xterm-rows").textContent()).toContain("$");
       const command = "echo x >> h";
       await input.focus();
       await page.keyboard.insertText(command);

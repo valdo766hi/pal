@@ -210,7 +210,7 @@ export class Terminals {
           session.pending -= bytes;
           if (session.disposed) return;
           for (const client of session.clients) if (client.ready) this.#send(client, { type: "output", data });
-          if (!info.ended) pty.resume();
+          pty.resume();
         });
       });
       pty.onExit(({ exitCode, signal }) => {
@@ -230,6 +230,8 @@ export class Terminals {
     }
   }
   #end(session: Session, reason: string) {
+    // macOS can wait for the PTY reader while exiting, even after SIGKILL.
+    session.pty.resume();
     if (session.info.ended) return;
     session.info.ended = true;
     session.info.reason = reason;

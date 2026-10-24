@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { access, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
+import type { IPty } from "node-pty";
 import { createApi } from "../src/core/api.ts";
 import { openPal } from "../src/core/app.ts";
 import { startServer } from "../src/core/server.ts";
@@ -419,6 +421,52 @@ describe("human host terminals", () => {
       expect(hangups).toBe(1);
     } finally {
       signal.mockRestore();
+    }
+  });
+
+  it("drains a paused real PTY during shutdown before its screen callback completes", async () => {
+    const { pal, project, create } = await setup();
+    const require = createRequire(import.meta.url);
+    const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
+    const { UnixTerminal } = require("node-pty/lib/unixTerminal") as { UnixTerminal: { prototype: IPty } };
+    const resumeScreen = Promise.withResolvers<undefined>();
+    const write = Terminal.prototype.write;
+    let held = false;
+    const paused = vi.spyOn(UnixTerminal.prototype, "pause");
+    const screen = vi.spyOn(Terminal.prototype, "write").mockImplementation(function (
+      this: import("@xterm/headless").Terminal,
+      data,
+      callback,
+    ) {
+      write.call(this, data, () => {
+        if (!held && typeof data === "string" && data.includes("$") && callback !== undefined) {
+          held = true;
+          void resumeScreen.promise.then(callback);
+        } else callback?.();
+      });
+    });
+    let closing: Promise<void> | undefined;
+    let pty: IPty | undefined;
+    try {
+      const terminal = await create();
+      await expect.poll(() => held).toBe(true);
+      pty = paused.mock.contexts[0] as IPty | undefined;
+      if (pty === undefined) throw new Error("missing paused native PTY");
+      let exited = false;
+      pty.onExit(() => (exited = true));
+      let closed = false;
+      closing = pal.terminals.remove(project.id, terminal.id).then(() => {
+        closed = true;
+      });
+      await expect.poll(() => closed).toBe(true);
+      expect(exited).toBe(true);
+      expect(pal.terminals.releaseBusy).toBe(false);
+    } finally {
+      resumeScreen.resolve(undefined);
+      pty?.resume();
+      await closing;
+      screen.mockRestore();
+      paused.mockRestore();
     }
   });
 
