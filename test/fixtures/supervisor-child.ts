@@ -6,10 +6,12 @@ if (!packagePath || !dataRoot || !shownPort || !process.send)
   throw new Error("pass package, isolated data and port through the host fixture");
 let selected = false,
   failedHealth = false,
+  futureSchema = false,
   busyProject: string | undefined;
 process.on("message", (message: { arm?: string; project?: string }) => {
   if (message.arm === "selected") selected = true;
   else if (message.arm === "health") failedHealth = true;
+  else if (message.arm === "schema") futureSchema = true;
   else if (message.arm === "busy") busyProject = message.project;
   process.send?.({ armed: message.arm });
 });
@@ -34,6 +36,19 @@ process.exitCode = await supervise(
       }
     },
     stopped: async () => {
+      if (futureSchema) {
+        futureSchema = false;
+        const database = await openDatabase(`${dataRoot}/pal.sqlite`);
+        try {
+          await database.run(
+            "INSERT INTO pal_migrations (version, name, applied_at) SELECT max(version) + 1, 'fixture-future', ? FROM pal_migrations",
+            Date.now(),
+          );
+        } finally {
+          await database.close();
+        }
+        return;
+      }
       if (busyProject === undefined) return;
       const project = busyProject;
       busyProject = undefined;
