@@ -13,6 +13,7 @@ import type { IPty } from "node-pty";
 import { createApi } from "../src/core/api.ts";
 import { openPal } from "../src/core/app.ts";
 import { startServer } from "../src/core/server.ts";
+import { terminalHome } from "./fixtures/terminal-home.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 beforeEach(() => vi.stubEnv("SHELL", process.env.PAL_BASH ?? "/bin/bash"));
@@ -26,6 +27,7 @@ afterEach(async () => {
 async function setup(publicOrigin?: string) {
   const dataRoot = await realpath(await mkdtemp(join(tmpdir(), "pal-terminal-test-")));
   cleanups.push(() => rm(dataRoot, { recursive: true, force: true }));
+  for (const [key, value] of Object.entries(await terminalHome(join(dataRoot, "host-home")))) vi.stubEnv(key, value);
   const pal = await openPal({ dataRoot, installRoot: "/nonexistent" }, context);
   cleanups.push(() => pal.close());
   const project = await pal.projects.create("terminal-project", { name: "Terminal" });
@@ -54,9 +56,17 @@ async function setup(publicOrigin?: string) {
     const ws = new WebSocket(`${base.replace("http:", "ws:")}/api/terminals/${id}/socket`, {
       headers: { origin: base, cookie: `pal_session=${token}`, ...headers },
     });
+    const { Terminal } = createRequire(import.meta.url)("@xterm/headless") as typeof import("@xterm/headless");
+    const screen = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+    cleanups.push(async () => screen.dispose());
     const messages: Record<string, unknown>[] = [];
     ws.on("message", (raw) => {
-      messages.push(JSON.parse(raw.toString()) as Record<string, unknown>);
+      const message = JSON.parse(raw.toString()) as Record<string, unknown>;
+      if ((message.type === "snapshot" || message.type === "output") && typeof message.data === "string") {
+        if (message.type === "snapshot") screen.reset();
+        screen.write(message.data);
+      }
+      messages.push(message);
       if (messages.length > 512) messages.shift();
     });
     ws.on("error", () => {});
@@ -72,6 +82,10 @@ async function setup(publicOrigin?: string) {
       messages,
       send: (message: unknown) => ws.send(JSON.stringify(message)),
       last: (type: string) => messages.findLast((message) => message.type === type),
+      line: () =>
+        screen.buffer.active
+          .getLine(screen.buffer.active.baseY + screen.buffer.active.cursorY)
+          ?.translateToString(true),
       output: () =>
         messages
           .filter((message) => message.type === "output")
@@ -90,11 +104,15 @@ async function setup(publicOrigin?: string) {
 
 describe("human host terminals", () => {
   it.each(["zsh", "fish"] as const)(
-    "uses the configured %s shell with private history and working recall",
+    "loads the host's %s startup files, prompt and persistent history without modifying them",
     async (name) => {
       const shell = process.env[`PAL_TEST_${name.toUpperCase()}`];
       if (shell === undefined) throw new Error(`missing native ${name} fixture`);
       const { pal, project, create, connect } = await setup();
+      const hostHome = process.env.HOME;
+      if (hostHome === undefined) throw new Error("missing terminal home fixture");
+      const config = join(hostHome, name === "zsh" ? ".zshrc" : ".config/fish/config.fish");
+      const original = await readFile(config, "utf8");
       const previous = process.env.SHELL;
       let terminal;
       try {
@@ -112,10 +130,14 @@ describe("human host terminals", () => {
       }
       const send = (data: string) => client.send({ type: "input", epoch, data });
       const version = name === "zsh" ? "$ZSH_VERSION" : "$version";
-      send(`printf '%s\\n' "${version}" > shell-version; printf '%s' "$HOME" > shell-home\r`);
+      send(
+        `printf '%s\\n' "${version}" > shell-version; printf '%s' "$HOME" > shell-home; printf %s "$PAL_TEST_PROFILE" > shell-profile\r`,
+      );
       await expect.poll(() => readFile(join(project.root, "shell-version"), "utf8")).toMatch(/^\d+\./);
       const home = await readFile(join(project.root, "shell-home"), "utf8");
-      expect(home).toContain("pal-terminal-");
+      expect(home).toBe(hostHome);
+      expect(await readFile(join(project.root, "shell-profile"), "utf8")).toBe("loaded");
+      expect(`${client.last("snapshot")?.data ?? ""}${client.output()}`).toContain("fixture");
       send("echo x >> native-history\r");
       const result = join(project.root, "native-history");
       await expect.poll(() => readFile(result, "utf8")).toBe("x\n");
@@ -141,25 +163,21 @@ describe("human host terminals", () => {
         );
         await expect.poll(() => readFile(join(project.root, "native-progress"), "utf8")).toBe(String(start + 10));
       }
-      sendNext(
-        name === "fish"
-          ? "builtin history search --null > native-window\r"
-          : 'fc -ln -500 "$HISTCMD" > native-window\r',
-      );
+      sendNext(name === "fish" ? "builtin history search --null > native-window\r" : "fc -ln 1 > native-window\r");
       const window = join(project.root, "native-window");
       await expect.poll(() => readFile(window, "utf8")).toContain("600");
       const entries = (await readFile(window, "utf8"))
         .trim()
         .split(name === "fish" ? "\0" : "\n")
         .filter(Boolean);
-      if (name === "fish") entries.reverse();
-      expect(entries).toHaveLength(500);
-      expect(entries[0]).toContain(`entry-%s\\n' ${name === "fish" ? 101 : 102}`);
+      expect(entries.length).toBeGreaterThan(600);
+      expect(entries.some((entry) => entry.includes("entry-%s\\n' 1;"))).toBe(true);
       expect(entries.some((entry) => entry.includes("entry-%s\\n' 600;"))).toBe(true);
-      for (const file of [".bash_history", ".zsh_history", ".local/share/fish/fish_history"])
-        await expect(access(join(home, file))).rejects.toThrow();
       await pal.terminals.remove(project.id, terminal.id);
-      await expect(access(home)).rejects.toThrow();
+      expect(await readFile(config, "utf8")).toBe(original);
+      const history = join(home, name === "zsh" ? ".zsh_history" : ".local/share/fish/fish_history");
+      await expect.poll(() => readFile(history, "utf8")).toContain("600");
+      await access(home);
     },
   );
 
@@ -193,12 +211,10 @@ describe("human host terminals", () => {
     await expect.poll(client.output).toContain("PTY-OK\r\n");
     const environment = await readFile(join(project.root, "environment.txt"), "utf8");
     expect(environment).not.toMatch(/OPENAI|CHATGPT|MCP|BASH_ENV|ambient-key/);
-    expect(environment).toContain("HISTFILE=/dev/null");
-    // The prompt is colored by the shell itself, not by sourcing any profile or rc file.
-    await expect
-      .poll(() => client.output().replaceAll("\x01", "").replaceAll("\x02", ""))
-      .toContain("\x1b[2mpal\x1b[0m \x1b[36m");
-    expect(environment).toContain("PROMPT_DIRTRIM=2");
+    expect(environment).toContain(`HOME=${process.env.HOME}\n`);
+    expect(environment).toContain(`HISTFILE=${process.env.HOME}/.bash_history`);
+    expect(environment).toContain("PAL_TEST_PROFILE=loaded");
+    await expect.poll(client.output).toContain("\x1b[35mfixture\x1b[0m");
     expect((await readFile(join(project.root, "cwd.txt"), "utf8")).trim()).toBe(project.root);
     client.send({ type: "input", epoch, data: "printf '\\033[2J\\033[HOLD\\rNEW\\r\\n'\r" });
     await expect.poll(client.output).toContain("\x1b[2J\x1b[HOLD\rNEW");
@@ -225,16 +241,14 @@ describe("human host terminals", () => {
     await run("printf older > older.txt");
     const command = "printf once >> recalled.txt";
     await run(command);
-    let start = client.output().length;
+    const start = client.output().length;
     send("\x1b[5~");
     await expect.poll(() => client.output().slice(start)).toContain(command);
     expect(await readFile(join(project.root, "recalled.txt"), "utf8")).toBe("once");
-    start = client.output().length;
     send("\x1b[5~");
-    await expect.poll(() => client.output().slice(start)).toContain("older.txt");
-    start = client.output().length;
+    await expect.poll(client.line).toContain("printf older > older.txt");
     send("\x1b[6~");
-    await expect.poll(() => client.output().slice(start)).toContain("recalled.txt");
+    await expect.poll(client.line).toContain("printf once >> recalled.txt");
     await run("");
     expect(await readFile(join(project.root, "recalled.txt"), "utf8")).toBe("onceonce");
     client.ws.close();
@@ -277,7 +291,7 @@ describe("human host terminals", () => {
     await expect.poll(() => readFile(path, "utf8")).toBe(value + value);
   });
 
-  it("bounds memory-only history per shell and discards it with the private terminal home", async () => {
+  it("uses the host's history policy and preserves its home when closing a terminal", async () => {
     const { pal, project, create, connect } = await setup();
     const terminal = await create();
     const client = await connect(terminal.id);
@@ -294,22 +308,23 @@ describe("human host terminals", () => {
     const window = join(project.root, "history-window.txt");
     await expect.poll(() => readFile(window, "utf8")).toContain("printf 'entry-%s\\n' 600");
     const entries = (await readFile(window, "utf8")).trim().split("\n");
-    expect(entries).toHaveLength(500);
-    expect(entries[0]).toMatch(/printf 'entry-%s\\n' 102$/);
+    expect(entries).toHaveLength(601);
+    expect(entries[0]).toMatch(/printf 'entry-%s\\n' 1$/);
     expect(entries.at(-2)).toMatch(/printf 'entry-%s\\n' 600$/);
     expect(entries.at(-1)).toContain("history > history-window.txt");
     const homePath = join(project.root, "history-home.txt");
-    await expect.poll(() => readFile(homePath, "utf8")).toContain("pal-terminal-");
+    await expect.poll(() => readFile(homePath, "utf8")).toBe(process.env.HOME);
     const home = await readFile(homePath, "utf8");
-    await expect(access(join(home, ".bash_history"))).rejects.toThrow();
-    const other = await create();
-    const isolated = await connect(other.id);
-    isolated.send({ type: "input", epoch: isolated.last("state")?.epoch, data: "history > isolated-history.txt\r" });
-    const history = join(project.root, "isolated-history.txt");
-    await expect.poll(() => readFile(history, "utf8")).toContain("isolated-history.txt");
-    expect(await readFile(history, "utf8")).not.toContain("entry-");
+    const config = await readFile(join(home, ".bashrc"), "utf8");
     await pal.terminals.remove(project.id, terminal.id);
-    await expect(access(home)).rejects.toThrow();
+    expect(await readFile(join(home, ".bashrc"), "utf8")).toBe(config);
+    expect(await readFile(join(home, ".bash_history"), "utf8")).toContain("entry-");
+    const other = await create();
+    const resumed = await connect(other.id);
+    resumed.send({ type: "input", epoch: resumed.last("state")?.epoch, data: "history > resumed-history.txt\r" });
+    const history = join(project.root, "resumed-history.txt");
+    await expect.poll(() => readFile(history, "utf8")).toContain("resumed-history.txt");
+    expect(await readFile(history, "utf8")).toContain("entry-");
   });
 
   it("rejects unauthenticated, wrong Host/Origin and missing-Origin upgrades", async () => {

@@ -2,12 +2,17 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
+import { terminalHome } from "./fixtures/terminal-home.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  try {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 
 /** This process's worker threads, libuv child processes and loaded native addons, as Node reports them. */
@@ -28,6 +33,8 @@ describe("optional capability workers", () => {
   it("starts no worker, child process, terminal, browser or search index until one is used", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "pal-idle-test-")));
     cleanups.push(() => rm(root, { recursive: true, force: true }));
+    for (const [key, value] of Object.entries(await terminalHome(join(root, "host-home")))) vi.stubEnv(key, value);
+    vi.stubEnv("SHELL", process.env.PAL_BASH ?? "/bin/bash");
     const before = workers();
     const pal = await openPal({ dataRoot: join(root, "data"), installRoot: join(root, "install") }, context);
     cleanups.push(() => pal.close());

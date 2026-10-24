@@ -14,6 +14,7 @@ import { fileTools, searchFolder } from "../src/core/files.ts";
 import { PrivateFiles } from "../src/core/file-policy.ts";
 import { WorktreeFiles } from "../src/core/worktree-files.ts";
 import type { WorkspaceMode } from "../src/core/workspaces.ts";
+import { terminalHome } from "./fixtures/terminal-home.ts";
 
 const exec = promisify(execFile);
 const git = (cwd: string, ...args: string[]) =>
@@ -26,11 +27,14 @@ const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 async function setup() {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pal-workspaces-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
+  for (const [key, value] of Object.entries(await terminalHome(join(root, "host-home")))) vi.stubEnv(key, value);
+  vi.stubEnv("SHELL", process.env.PAL_BASH ?? "/bin/bash");
   const dataRoot = join(root, "data");
   const source = join(root, "source");
   await mkdir(source);

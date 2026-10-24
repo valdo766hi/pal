@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { terminalShell } from "../src/core/terminal-shell.ts";
@@ -15,52 +15,61 @@ async function home() {
 }
 
 describe("host terminal shell configuration", () => {
-  it("honors SHELL before the OS default without copying ambient credentials", async () => {
+  it.each(["bash", "zsh", "fish", "sh"])("starts %s with normal login/interactive configuration", async (name) => {
+    const root = await home();
     const shell = await terminalShell(
-      await home(),
-      { SHELL: "/profile/bin/fish", PATH: "/trusted/bin", OPENAI_API_KEY: "not-for-the-terminal" },
+      root,
+      {
+        SHELL: `/profile/bin/${name}`,
+        USER: "not-the-host-user",
+        LOGNAME: "not-the-host-user",
+        PATH: "/trusted/bin",
+        XDG_CONFIG_HOME: "/host/config",
+        ZDOTDIR: "/host/zsh",
+        STARSHIP_CONFIG: "/host/starship.toml",
+        OPENAI_API_KEY: "not-for-the-terminal",
+        PAL_SECRET: "not-for-the-terminal",
+        BASH_ENV: "/untrusted/script",
+        PS1: "not-a-host-prompt",
+      },
       "/bin/zsh",
     );
-    expect(shell.file).toBe("/profile/bin/fish");
-    expect(shell.args).toContain("--no-config");
-    expect(shell.args).toContain("--private");
+    expect(shell.file).toBe(`/profile/bin/${name}`);
+    expect(shell.args).toEqual(["-l", "-i"]);
     expect(shell.env).toEqual({
-      SHELL: "/profile/bin/fish",
-      PATH: "/profile/bin:/trusted/bin",
-      HISTFILE: "/dev/null",
-      HISTSIZE: "500",
+      HOME: root,
+      USER: userInfo().username,
+      LOGNAME: userInfo().username,
+      SHELL: `/profile/bin/${name}`,
+      PATH: "/trusted/bin",
+      LANG: "C.UTF-8",
+      XDG_CONFIG_HOME: "/host/config",
+      ZDOTDIR: "/host/zsh",
+      STARSHIP_CONFIG: "/host/starship.toml",
     });
-    expect(shell.args.at(-1)).toContain("$entries[501..-1]");
+    expect(await readdir(root)).toEqual([]);
   });
 
   it("uses the OS login shell when the launcher has no SHELL", async () => {
     const root = await home();
-    const shell = await terminalShell(root, { PATH: "/trusted/bin" }, "/bin/zsh");
+    const shell = await terminalShell(root, { PATH: "/trusted/bin", LANG: "en_US.UTF-8" }, "/bin/zsh");
     expect(shell.file).toBe("/bin/zsh");
-    expect(shell.args).toEqual(["-d", "-i"]);
-    expect(shell.env.ZDOTDIR).toBe(root);
-    const config = join(root, ".zshrc");
-    expect((await stat(config)).mode & 0o777).toBe(0o600);
-    expect(await readFile(config, "utf8")).toContain("SAVEHIST=0");
-    expect(await readFile(config, "utf8")).toContain("up-history");
+    expect(shell.env.HOME).toBe(root);
+    expect(shell.env.LANG).toBe("en_US.UTF-8");
+    expect(shell.env).not.toHaveProperty("ZDOTDIR");
   });
 
-  it("retains Bash's private Readline history and pinned fallback", async () => {
-    const root = await home();
-    const shell = await terminalShell(root, { PAL_BASH: "/tools/bin/bash" }, null);
-    expect(shell.file).toBe("/tools/bin/bash");
-    expect(shell.args).toEqual(["--noprofile", "--norc", "-i"]);
-    const inputrc = join(root, "inputrc");
-    expect(shell.env.INPUTRC).toBe(inputrc);
-    expect((await stat(inputrc)).mode & 0o777).toBe(0o600);
-    expect(await readFile(inputrc, "utf8")).toContain("previous-history");
-    expect(shell.env.PS1).toContain("pal");
+  it("refuses an undetectable host shell instead of substituting Pal's Bash", async () => {
+    await expect(async () => terminalShell(await home(), { PAL_BASH: "/tools/bin/bash" }, null)).rejects.toMatchObject({
+      status: 503,
+      code: "terminal_shell",
+    });
   });
 
   it.each(["fish", "/bin/nologin"])(
     "refuses unsupported or nonabsolute shell %s without silently changing it",
     async (SHELL) => {
-      await expect(terminalShell(await home(), { SHELL }, "/bin/zsh")).rejects.toMatchObject({
+      await expect(async () => terminalShell(await home(), { SHELL }, "/bin/zsh")).rejects.toMatchObject({
         status: 503,
         code: "terminal_shell",
       });

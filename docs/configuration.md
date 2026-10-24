@@ -223,14 +223,17 @@ message once, every day or on chosen weekdays, at a time in a time zone you pick
 
 ## Terminal
 
-The host terminal keeps up to 500 commands in memory per live shell. Up/Page Up recalls earlier commands;
-Down/Page Down moves forward and restores an unfinished line. Recalled commands remain editable and run only
-when you press Enter. Reconnecting to the same live shell retains its history; closing it or restarting Pal discards
-it. History is not saved to disk. Terminals use the host's `SHELL`, or its OS login shell when `SHELL` is unset.
-Bash, Zsh and Fish are supported; an unsupported shell produces an error rather than silently switching shells.
-Pal preserves its launcher's `PATH` so host tools remain available. Launch Pal from your normal host shell to
-include tools installed in user/Nix profiles. Terminal homes are private; user startup files and Pal's secrets
-are not inherited. Agent commands still use the package's Bash, independently of the human terminal.
+Terminals use the host's `SHELL`, or its OS login shell when `SHELL` is unset. Bash, Zsh, Fish and sh are
+supported; a missing or unsupported shell produces an error rather than substituting Pal's Bash. Pal starts a normal
+interactive login shell with the host home and startup files, so your prompt (including Starship), aliases,
+keybindings and saved history follow your own configuration. Pal does not write shell configuration or replace
+your prompt. Reconnecting observes the same live shell; it does not replay commands.
+
+Pal preserves its launcher's `HOME`, `PATH` and shell-configuration paths. Launch it from your normal host shell
+to include user/Nix tools. Human terminals have the host user's authority: trusted startup files run normally
+and can load credentials or execute project hooks such as direnv. Pal does not copy its server secrets into the
+terminal environment. Temporary files and screen/input/output quotas remain session-scoped. Agent commands
+remain separate, using the package's Bash and a private home without your startup files.
 
 ## Browser
 
@@ -263,7 +266,7 @@ The Nix package sets these, and most users never need them.
 | Variable           | Purpose                                                                                  |
 | ------------------ | ---------------------------------------------------------------------------------------- |
 | `PAL_TIMEOUT`      | GNU `timeout` used to bound shell and Git commands. Defaults to `timeout`, then `gtimeout`, on `PATH`. |
-| `PAL_BASH`         | Bash for agent commands (default `bash`), and terminal fallback if no host shell is available |
+| `PAL_BASH`         | Bash for agent commands (default `bash`), independent of human terminals |
 | `PAL_CHROMIUM`, `PAL_BWRAP`, `PAL_SOCAT`, `PAL_COREUTILS`, `PAL_FONTCONFIG` | Browser runtime programs. The browser is available only when the first four are set. |
 | `PAL_SYSTEMD_RUN`  | `systemd-run` for the browser's resource scope (default `systemd-run`)                    |
 | `PAL_NIX`, `PAL_FLOCK`, `PAL_RELEASE_*` | Programs and pinned sources for release checks and the supervisor            |

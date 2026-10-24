@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
 import type { Terminal as Screen } from "@xterm/headless";
@@ -56,7 +56,7 @@ type Session = {
   pty: IPty;
   screen: Screen;
   serializer: SerializeAddon;
-  home: string;
+  temp: string;
   clients: Set<Client>;
   controller: Client | undefined;
   epoch: number;
@@ -110,7 +110,7 @@ export class Terminals {
     if (this.#closed || this.#sessions.size + this.#creating >= 4)
       throw new HttpError(409, "terminal_limit", "close an existing terminal first (at most four sessions)");
     this.#creating++;
-    let home: string | undefined;
+    let temp: string | undefined;
     try {
       const project = await this.#project(projectId);
       const lease = workspaceId === undefined ? undefined : await this.#workspaces?.lease(projectId, workspaceId);
@@ -121,8 +121,8 @@ export class Terminals {
       const require = createRequire(import.meta.url);
       const { Terminal } = require("@xterm/headless") as typeof import("@xterm/headless");
       const { SerializeAddon } = require("@xterm/addon-serialize") as typeof import("@xterm/addon-serialize");
-      home = await mkdtemp(join(tmpdir(), "pal-terminal-"));
-      const shell = await terminalShell(home);
+      temp = await mkdtemp(join(tmpdir(), "pal-terminal-"));
+      const shell = terminalShell(homedir());
       await this.#project(projectId);
       await lease?.check();
       if (this.#closed) throw new HttpError(503, "closing", "Pal is closing");
@@ -137,9 +137,7 @@ export class Terminals {
           name: "xterm-256color",
           env: {
             ...shell.env,
-            HOME: home,
-            TMPDIR: home,
-            LANG: "C.UTF-8",
+            TMPDIR: temp,
             TERM: "xterm-256color",
             COLORTERM: "truecolor",
           },
@@ -155,7 +153,7 @@ export class Terminals {
         pty,
         screen,
         serializer,
-        home,
+        temp,
         clients: new Set(),
         controller: undefined,
         epoch: 0,
@@ -214,7 +212,7 @@ export class Terminals {
       });
       return { ...info };
     } catch (error) {
-      if (home !== undefined) await rm(home, { recursive: true, force: true });
+      if (temp !== undefined) await rm(temp, { recursive: true, force: true });
       throw error;
     } finally {
       this.#creating--;
@@ -266,7 +264,7 @@ export class Terminals {
       this.#end(session, "Closed");
       await session.exited;
       session.screen.dispose();
-      await rm(session.home, { recursive: true, force: true });
+      await rm(session.temp, { recursive: true, force: true });
       this.#sessions.delete(id);
     })());
   }

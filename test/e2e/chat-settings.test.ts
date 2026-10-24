@@ -15,6 +15,7 @@ import { runGit } from "../../src/core/git.ts";
 import { GOOD_KEY, startProviderFixture } from "../fixtures/provider-server.ts";
 import type { WorkingStateInfo } from "../../web/src/lib/api.ts";
 import { startMcpFixture } from "../fixtures/mcp-server.ts";
+import { terminalHome } from "../fixtures/terminal-home.ts";
 
 let browser: Browser;
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -38,6 +39,7 @@ async function setup(width: number, definitions?: readonly CompiledCapability[])
   cleanups.push(provider.close);
   const root = await mkdtemp(join(tmpdir(), "pal-chat-settings-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
+  for (const [key, value] of Object.entries(await terminalHome(join(root, "terminal-home")))) vi.stubEnv(key, value);
   const options = {
     dataRoot: join(root, "data"),
     installRoot: "/nonexistent",
