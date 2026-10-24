@@ -56,14 +56,15 @@
   async function load() {
     error = undefined;
     try {
-      const [mcp] = await Promise.all([
+      const [mcp, setup] = await Promise.all([
         api.mcp(),
+        api.modelSetup(),
         app.providers === undefined ? refreshProviders() : undefined,
         app.chatgpt === undefined ? refreshChatGPT() : undefined,
       ]);
       reviewed = !mcp.review;
       chosen = savedDefault()?.provider;
-      step = !defaultReady() ? "choose" : reviewed ? "project" : "internet";
+      step = !defaultReady() && !setup.deferred ? "choose" : reviewed ? "project" : "internet";
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
     }
@@ -78,6 +79,19 @@
     const heading = content?.querySelector("h2");
     heading?.setAttribute("tabindex", "-1");
     heading?.focus();
+  }
+
+  async function defer(deferred: boolean) {
+    busy = true;
+    failure = undefined;
+    try {
+      await api.deferModelSetup(deferred);
+      await go(deferred ? (reviewed ? "project" : "internet") : "choose");
+    } catch (cause) {
+      failure = cause instanceof ApiError ? cause.message : String(cause);
+    } finally {
+      busy = false;
+    }
   }
 
   /** Continuing with an API-key provider is the owner's choice to use it, so it is enabled here. */
@@ -122,7 +136,7 @@
       <div class="choices" role="radiogroup" aria-label="Model provider">
         {#each options as entry (entry.id)}
           <label class="choice">
-            <input type="radio" name="provider" value={entry.id} bind:group={chosen} />
+            <input type="radio" name="provider" value={entry.id} bind:group={chosen} disabled={busy} />
             <span class="what">
               <span class="line">
                 <strong>{entry.name}</strong><span class="method">{entry.method}</span>
@@ -136,9 +150,11 @@
           </label>
         {/each}
       </div>
+      {#if failure !== undefined}<div class="callout er" role="alert">{failure}</div>{/if}
       <div class="nav">
         <span class="later">You can add more later in Settings.</span>
-        <button class="b p" disabled={option === undefined} onclick={() => go("connect")}>Continue</button>
+        <button class="b q" disabled={busy} onclick={() => defer(true)}>Set up later</button>
+        <button class="b p" disabled={option === undefined || busy} onclick={() => go("connect")}>Continue</button>
       </div>
     {:else if step === "connect" && option !== undefined}
       <hgroup>
@@ -171,6 +187,11 @@
           New chats start with the model you choose from {view?.name ?? option.name}. You can switch models in any chat.
         </p>
       </hgroup>
+      <p class="setd">
+        {option.billing} Sending a message shares it and the selected conversation history with
+        {chosen === "compatible" ? view?.config?.baseUrl : option.name}. Chat history is not sent until you send a
+        message.
+      </p>
       <DefaultModel provider={chosen} />
       <div class="nav">
         <button class="b q" onclick={() => go("connect")}><Icon name="chevL" />Back</button>
@@ -190,7 +211,17 @@
         <h2 class="h2">Create your first project</h2>
         <p class="sub">Give Pal a managed workspace or choose an existing folder on this server.</p>
       </hgroup>
-      <div><button class="b p" onclick={onCreateProject}><Icon name="folderPlus" />Create project</button></div>
+      {#if !defaultReady()}
+        <div class="callout wa" role="status">
+          Model setup is deferred. Send stays disabled until you connect a provider and explicitly choose a usable
+          model. You can return here or open Settings → Models after creating a project.
+        </div>
+        {#if failure !== undefined}<div class="callout er" role="alert">{failure}</div>{/if}
+        <div><button class="b q" disabled={busy} onclick={() => defer(false)}>Set up a model</button></div>
+      {/if}
+      <div>
+        <button class="b p" disabled={busy} onclick={onCreateProject}><Icon name="folderPlus" />Create project</button>
+      </div>
       <WorkspaceCleanup />
     {/if}
   </div>

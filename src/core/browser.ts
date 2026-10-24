@@ -9,7 +9,7 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import { type Static, Type } from "typebox";
 import type { WebSocket, WebSocketServer } from "ws";
 import { EgressBroker } from "./browser-egress.ts";
-import { BrowserActionBody, type BrowserActionInput, BrowserPage } from "./browser-page.ts";
+import { BrowserActionBody, type BrowserActionInput, BrowserOwnerNeeded, BrowserPage } from "./browser-page.ts";
 import { cookie, HttpError, isOwnHost, isOwnOrigin } from "./http.ts";
 import { type Owner, SESSION_COOKIE } from "./owner.ts";
 import type { Projects } from "./projects.ts";
@@ -295,7 +295,7 @@ export class ProjectBrowsers {
         input = { ...input, action: { ...input.action, url: this.#modelUrl(input.action.url) } };
       if (await tab.model.privatePage(guard)) {
         this.#mode(instance, "private-login");
-        throw new HttpError(409, "browser_owner_needed", "Sign in privately before handing control back.");
+        throw new HttpError(409, "browser_owner_needed", "This private or unsupported page needs owner control.");
       }
       guard();
       await tab.model.act(input, guard);
@@ -385,6 +385,10 @@ export class ProjectBrowsers {
       this.#modelUrl(tab.page.url());
       return await work(instance, tab, guard);
     } catch (error) {
+      if (error instanceof BrowserOwnerNeeded) {
+        if (instance.mode === "agent") this.#mode(instance, "private-login");
+        throw new HttpError(409, "browser_owner_needed", "This private or unsupported page needs owner control.");
+      }
       if (instance.mode === "agent") this.#mode(instance, "paused");
       if (error instanceof HttpError) throw error;
       throw new HttpError(

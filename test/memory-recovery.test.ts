@@ -17,9 +17,13 @@ describe("memory projection recovery", () => {
   it.each(["projected", "committed"])("recovers an atomic head/version/FTS after SIGKILL at %s", async (phase) => {
     const dataRoot = await realpath(await mkdtemp(join(tmpdir(), "pal-memory-crash-")));
     cleanups.push(() => rm(dataRoot, { recursive: true, force: true }));
-    const child = spawn(process.execPath, [join(import.meta.dirname, "fixtures/memory-child.ts"), dataRoot, phase], {
-      stdio: ["ignore", "pipe", "inherit"],
-    });
+    const child = spawn(
+      process.execPath,
+      [...process.execArgv, join(import.meta.dirname, "fixtures/memory-child.ts"), dataRoot, phase],
+      {
+        stdio: ["ignore", "pipe", "inherit"],
+      },
+    );
     cleanups.push(async () => {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill("SIGKILL");

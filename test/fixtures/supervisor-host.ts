@@ -10,6 +10,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { checkedReleases, releaseManifest } from "../../src/core/release-check.ts";
 import { readReleaseJson } from "../../src/core/release-files.ts";
+import { selection } from "../../src/core/release-state.ts";
+import { openDatabase } from "../../src/storage/sqlite.ts";
 import { hash } from "../../src/core/release-policy.ts";
 import type { ReleaseView } from "../../src/core/supervise.ts";
 import { startProviderFixture } from "./provider-server.ts";
@@ -37,8 +39,17 @@ const evidence = JSON.parse(checked.stdout) as {
   candidatePackage: string;
   regressionRefused: boolean;
   changedCandidateRefused: boolean;
+  fixedChecks: string[];
+  legacyProofRefused: boolean;
+  legacyRecheckPassed: boolean;
 };
-assert(evidence.regressionRefused && evidence.changedCandidateRefused);
+assert(
+  evidence.regressionRefused &&
+    evidence.changedCandidateRefused &&
+    evidence.legacyProofRefused &&
+    evidence.legacyRecheckPassed,
+);
+assert.deepEqual(evidence.fixedChecks, ["package", "smoke", "tests", "browser", "e2e", "grading", "evals"]);
 const root = evidence.root,
   dataRoot = join(root, "data");
 const receipt = (await checkedReleases(dataRoot)).find((item) => item.digest === evidence.digest);
@@ -355,13 +366,52 @@ try {
     assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.equal((await view()).retained, 2);
   await stop();
+
+  parent = start(true);
+  await ready();
+  await ok("POST", `${releasePath}/activate`, {}, 202);
+  await ready(hash(receipt.package));
+  await until(async () => !(await view()).busy, Boolean);
+  const requests = provider.requests.length;
+  await arm("schema");
+  await ok("POST", `releases/${baseline}/rollback`, {}, 202);
+  const incompatible = parent;
+  await until(
+    () => incompatible.process.exitCode,
+    (code) => code !== null,
+  );
+  assert.equal(await incompatible.exited, 1, incompatible.diagnostic());
+  parent = undefined;
+  await assert.rejects(fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(1000) }));
+  const held = selection(await readReleaseJson(join(dataRoot, "release-control/selection.json")), base);
+  assert.equal(held.phase, "stable");
+  assert.equal(held.current.package, receipt.package);
+  assert.equal(held.previous?.package, base.package);
+  assert.equal(held.next, undefined);
+  assert.equal(held.retained.length, 2);
+  assert.match(held.lastError ?? "", /schema/);
+  const database = await openDatabase(join(dataRoot, "pal.sqlite"));
+  try {
+    assert.deepEqual(
+      { ...(await database.get("SELECT version, name FROM pal_migrations ORDER BY version DESC LIMIT 1")) },
+      { version: base.schema + 1, name: "fixture-future" },
+    );
+    assert.deepEqual({ ...(await database.get("SELECT id FROM pal_chats WHERE id = ?", chat.id)) }, { id: chat.id });
+  } finally {
+    await database.close();
+  }
+  assert.equal(hash(await readFile(join(dataRoot, "credentials.key"))), key);
+  assert.equal(await readFile(external, "utf8"), "external workspace effect stays");
+  assert.equal(provider.requests.length, requests);
   process.stdout.write(
     JSON.stringify({
       root,
       package: base.package,
       candidatePackage: receipt.package,
       digest: receipt.digest,
-      fixedChecks: 6,
+      fixedChecks: 7,
+      legacyProofRefused: evidence.legacyProofRefused,
+      legacyRecheckPassed: evidence.legacyRecheckPassed,
       ownerOrigin: true,
       changedApprovalRefused: true,
       busyNativeAndTerminalRefused: true,
@@ -370,6 +420,7 @@ try {
       selectionBeforeRestartSIGKILLRecovered: true,
       promotedSelectionRetainedAfterRestart: true,
       compatibleRollbackPreservedConversationKeysAndExternalFiles: true,
+      incompatibleRollbackHeldWithoutDataRestore: true,
     }) + "\n",
   );
 } finally {

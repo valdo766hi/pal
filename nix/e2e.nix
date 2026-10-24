@@ -23,6 +23,7 @@ tests.overrideAttrs {
   // pal.browserEnv;
   buildPhase = ''
     runHook preBuild
+    export SHELL="$PAL_BASH"
     pnpm build
     PAL_E2E_SCREENSHOTS=$PWD/screenshots pnpm test:e2e
     runHook postBuild

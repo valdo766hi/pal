@@ -8,10 +8,12 @@ import type { SqliteDatabase, SqliteExecutor } from "@earendil-works/pi-durable/
 import { WorkspaceLocks } from "./execution.ts";
 import { FileAccessError, readFileSnapshot, resolveProjectPath } from "./files.ts";
 import { HttpError } from "./http.ts";
+import type { PrivateFiles } from "./file-policy.ts";
 import type { Projects } from "./projects.ts";
 import type { Workspaces } from "./workspaces.ts";
 import { directoryIdentity } from "./workspace-root.ts";
 import { runGit } from "./git.ts";
+import { commentFeedback, type ReviewFeedback } from "./feedback.ts";
 
 const MAX_FILES = 128;
 const MAX_COMMENTS = 200;
@@ -40,7 +42,7 @@ export type ChangeComment = {
   line: number;
   lineText: string;
   body: string;
-  /** Put into the chat composer by "Send feedback"; whether the owner then sent that message is not tracked. */
+  /** Included in an input durably admitted by Pi, not merely copied into the composer. */
   sent: boolean;
   outdated: boolean;
 };
@@ -63,6 +65,7 @@ export class Changes {
   readonly #database: SqliteDatabase;
   readonly #projects: Projects;
   readonly #deny: string;
+  readonly #privateFiles: PrivateFiles;
   readonly #locks: WorkspaceLocks;
   readonly #workspaces: Workspaces | undefined;
   #active = 0;
@@ -70,12 +73,14 @@ export class Changes {
     database: SqliteDatabase,
     projects: Projects,
     dataRoot: string,
+    privateFiles: PrivateFiles,
     locks = new WorkspaceLocks(),
     workspaces?: Workspaces,
   ) {
     this.#database = database;
     this.#projects = projects;
     this.#deny = dataRoot;
+    this.#privateFiles = privateFiles;
     this.#locks = locks;
     this.#workspaces = workspaces;
   }
@@ -310,7 +315,7 @@ export class Changes {
       const info = await lstat(target);
       if (info.isSymbolicLink() || !info.isFile()) throw new Error("non-regular file");
       if (!this.#allowed(root, relative(root, await realpath(target)))) throw new Error("outside grant");
-      const snapshot = await readFileSnapshot(target);
+      const snapshot = await readFileSnapshot(target, undefined, this.#privateFiles);
       if (snapshot.truncated) throw new Error("too large");
       after = snapshot.bytes;
     } catch (error) {
@@ -454,7 +459,7 @@ export class Changes {
       const unchanged = async (target: string) => {
         await location.check();
         await this.#permission(root, path, scope, signal);
-        const now = await readFileSnapshot(target).then(
+        const now = await readFileSnapshot(target, undefined, this.#privateFiles).then(
           (snapshot) => (snapshot.truncated ? undefined : snapshot.bytes),
           (error: NodeJS.ErrnoException) => (error.code === "ENOENT" ? null : undefined),
         );
@@ -546,6 +551,7 @@ export class Changes {
       body: body.trim(),
       created_at: Date.now(),
       sent_at: null,
+      submission_id: null,
     };
     await this.#permission(root, path, scope, signal);
     await location.check();
@@ -600,36 +606,66 @@ export class Changes {
     });
   }
 
-  async markSent(
-    projectId: string,
-    ids: readonly string[],
-    scope: ReviewScope = "normal",
-    workspaceId?: string,
-  ): Promise<void> {
-    const location = await this.#location(projectId, workspaceId);
-    const comments = await this.#database.all<{ id: string; path: string }>(
-      "SELECT id, path FROM pal_change_comments WHERE scope_id = ?",
+  async #feedbackWorkspace(chatId: string, database: SqliteExecutor) {
+    const workspace = await database.get<{ id: string; project_id: string; mode: string }>(
+      "SELECT w.id, w.project_id, w.mode FROM pal_workspaces w JOIN pal_chats c ON c.id = w.chat_id AND c.project_id = w.project_id WHERE c.id = ?",
+      chatId,
+    );
+    if (workspace === undefined) throw new HttpError(404, "not_found", "no review workspace for this chat");
+    return { ...workspace, key: workspace.mode === "worktree" ? `worktree:${workspace.id}` : workspace.project_id };
+  }
+
+  async checkFeedback(chatId: string, feedback: ReviewFeedback, text: string): Promise<void> {
+    const workspace = await this.#feedbackWorkspace(chatId, this.#database);
+    const location = await this.#location(workspace.project_id, workspace.id);
+    const rows = await this.#database.all<CommentRow>(
+      "SELECT * FROM pal_change_comments WHERE scope_id = ?",
       location.key,
     );
+    const comments = feedback.ids.map((id) => {
+      const row = rows.find((comment) => comment.id === id);
+      if (row === undefined)
+        throw new HttpError(
+          409,
+          "feedback_stale",
+          "A linked comment was removed or belongs to another workspace. Your draft is kept; copy the remaining feedback again.",
+        );
+      const comment = toComment(row);
+      if (!text.includes(commentFeedback(comment)) && !text.includes(commentFeedback({ ...comment, outdated: true })))
+        throw new HttpError(
+          409,
+          "feedback_mismatch",
+          "The message no longer contains its linked feedback. Your comments are kept; copy them again or send the edited text without feedback links.",
+        );
+      return comment;
+    });
     const hidden = await this.#ignored(
       location.root,
-      comments.flatMap((comment) => (ids.includes(comment.id) ? [comment.path] : [])),
+      comments.map((comment) => comment.path),
       AbortSignal.timeout(10_000),
     );
-    if (scope === "normal" && hidden.size > 0)
+    if (feedback.scope === "normal" && hidden.size > 0)
       throw new HttpError(403, "ignored_permission", "include ignored files explicitly before sharing their comments");
-    const now = Date.now();
     await location.check();
-    await this.#database.transaction(async (transaction) => {
-      await this.#ready(projectId, transaction, workspaceId);
-      for (const id of ids)
-        await transaction.run(
-          "UPDATE pal_change_comments SET sent_at = ? WHERE scope_id = ? AND id = ? AND sent_at IS NULL",
-          now,
-          location.key,
-          id,
-        );
-    });
+    await this.#ready(workspace.project_id, this.#database, workspace.id);
+  }
+
+  /** Runs in the Pal admission commit, after Pi has accepted this exact input. */
+  async admitFeedback(
+    transaction: SqliteExecutor,
+    chatId: string,
+    feedback: ReviewFeedback,
+    submissionId: number,
+  ): Promise<void> {
+    const workspace = await this.#feedbackWorkspace(chatId, transaction);
+    for (const id of feedback.ids)
+      await transaction.run(
+        "UPDATE pal_change_comments SET sent_at = ?, submission_id = ? WHERE scope_id = ? AND id = ? AND submission_id IS NULL",
+        Date.now(),
+        submissionId,
+        workspace.key,
+        id,
+      );
   }
 
   /** The baseline's tree entry for exactly this path, or undefined when the baseline lacks it. */
@@ -655,6 +691,7 @@ type CommentRow = {
   body: string;
   created_at: number;
   sent_at: number | null;
+  submission_id: number | null;
 };
 const toComment = (row: CommentRow): Omit<ChangeComment, "outdated"> => ({
   id: row.id,
@@ -663,7 +700,7 @@ const toComment = (row: CommentRow): Omit<ChangeComment, "outdated"> => ({
   line: row.line,
   lineText: row.line_text,
   body: row.body,
-  sent: row.sent_at !== null,
+  sent: row.submission_id !== null,
 });
 
 async function syncDirectory(path: string): Promise<void> {

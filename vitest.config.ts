@@ -1,6 +1,8 @@
 import { configDefaults, defineConfig } from "vitest/config";
+import { svelte } from "@sveltejs/vite-plugin-svelte";
 
 export default defineConfig({
+  plugins: [svelte()],
   test: {
     include: ["test/**/*.test.ts"],
     // Tests that need Chromium run only via `pnpm test:feasibility` and `pnpm test:e2e`.

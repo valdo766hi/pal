@@ -34,7 +34,8 @@ export function createRequestListener({
   available,
   health,
 }: ServerOptions): RequestListener {
-  const external = publicOrigin === undefined ? undefined : new URL(publicOrigin);
+  const external = publicOrigin === undefined ? undefined : URL.parse(publicOrigin);
+  if (external === null) throw new Error("invalid public origin");
   // Built files come from the Nix store, whose timestamps are all 1970: without a policy, browsers keep index.html and
   // the icons for years. Vite's content-hashed assets never change under the same name.
   const assets =
@@ -42,11 +43,11 @@ export function createRequestListener({
       ? undefined
       : sirv(webRoot, {
           single: true,
-          setHeaders: (response, pathname) =>
-            response.setHeader(
-              "cache-control",
-              pathname.startsWith("/assets/") ? "public, max-age=31536000, immutable" : "no-cache",
-            ),
+          setHeaders: (response, pathname) => {
+            let cache = "no-cache";
+            if (pathname.startsWith("/assets/")) cache = "public, max-age=31536000, immutable";
+            response.setHeader("cache-control", cache);
+          },
         });
 
   return (request, response) => {
@@ -65,7 +66,8 @@ export function createRequestListener({
 
     if (pathname === "/api/health") {
       if (!readOnly) return methodNotAllowed(response);
-      return sendJson(request, response, 200, health?.() ?? { status: "ok", name: "pal", version });
+      const current = health?.() ?? { status: "ok", name: "pal", version };
+      return sendJson(request, response, current.status === "ok" ? 200 : 503, current);
     }
     if (available?.() === false)
       return sendJson(request, response, 503, {

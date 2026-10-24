@@ -22,9 +22,11 @@
     if (view === undefined || busy) return;
     busy = true;
     error = undefined;
-    const selected = view.catalog
-      .filter((item) => (item.id === id ? enabled : view.selected.some((choice) => choice.id === item.id)))
-      .map(({ id, version }) => ({ id, version }));
+    const selected = view.catalog.flatMap((item) => {
+      const pinned = view.selected.find((choice) => choice.id === item.id);
+      if (item.id === id) return enabled ? [{ id: item.id, version: item.version }] : [];
+      return pinned === undefined ? [] : [pinned];
+    });
     try {
       app.extensions = await api.selectExtensions(selected, view.digest);
     } catch (failure) {
@@ -48,6 +50,7 @@
 {/if}
 {#if app.extensions}
   {#each app.extensions.catalog as item (item.id)}
+    {@const pinned = app.extensions.selected.find((choice) => choice.id === item.id)}
     <div class="extension">
       <div class="details">
         <div class="heading">
@@ -56,6 +59,19 @@
           >
         </div>
         <p>{item.description}</p>
+        {#if item.available === false}<span class="pill wa">Not in this build</span>{/if}
+        {#if pinned !== undefined && pinned.version !== item.version}<p class="callout wa">
+            Default pins v{pinned.version}, unavailable in this build. Turn it off before explicitly choosing v{item.version}.
+          </p>{/if}
+        {#if item.capability}
+          <p class="fine">Core API {item.capability.core.min}–{item.capability.core.max}</p>
+          {#each item.capability.tools as tool (tool.name)}<p class="fine mono">
+              {tool.name} · {tool.replay} · {tool.permissions.join(", ")}
+            </p>{/each}
+        {/if}
+        {#if item.implementation}<p class="fine hash">
+            Implementation: <span class="mono">{item.implementation}</span>
+          </p>{/if}
         <div class="fine">
           {#if item.panels.length > 0}Contributes: {item.panels.join(", ")} ·
           {/if}<span class="mono">{item.native}</span>
@@ -68,8 +84,8 @@
           type="checkbox"
           role="switch"
           aria-label={`Enable ${item.name} for new chats`}
-          checked={app.extensions.selected.some((choice) => choice.id === item.id)}
-          disabled={busy}
+          checked={pinned !== undefined}
+          disabled={busy || (item.available === false && pinned === undefined)}
           onchange={(event) => toggle(item.id, event.currentTarget.checked)}
         />
       </label>

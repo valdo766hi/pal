@@ -166,7 +166,11 @@
         open.map(async (path) => [path, await api.files(project.id, path, selected, workspace?.id)] as const),
       );
       folders = Object.fromEntries(reloaded);
-      if (preview !== undefined) preview = await api.file(project.id, preview.path, selected, workspace?.id);
+      const opened = preview;
+      if (opened !== undefined) {
+        const refreshed = await api.file(project.id, opened.path, selected, workspace?.id);
+        if (preview === opened) preview = refreshed;
+      }
     });
   }
 

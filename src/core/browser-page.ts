@@ -39,6 +39,12 @@ export type PageObservation = {
   targets: { id: string; kind: string; label: string }[];
 };
 
+export class BrowserOwnerNeeded extends Error {
+  constructor() {
+    super("private or unsupported page; use the owner viewport");
+  }
+}
+
 /** Static inspection in an isolated world: page scripts cannot replace its DOM/string primitives. No input values. */
 function inspectPage(input: { id: string; read: boolean }): PageObservation {
   const visible = (element: Element) => {
@@ -52,12 +58,68 @@ function inspectPage(input: { id: string; read: boolean }): PageObservation {
       element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
     );
   };
+  const privateElement = (element: Element) => {
+    const role = element.getAttribute("role") ?? "";
+    if (
+      element.matches("iframe,frame,object,embed") ||
+      element.shadowRoot !== null ||
+      element.tagName.includes("-") ||
+      (element instanceof HTMLElement && element.isContentEditable) ||
+      role.length > 256 ||
+      /(?:^|\s)(?:textbox|searchbox|combobox|spinbutton)(?:\s|$)/i.test(role)
+    )
+      return true;
+    if (
+      !(element instanceof HTMLInputElement) &&
+      !(element instanceof HTMLTextAreaElement) &&
+      !(element instanceof HTMLSelectElement)
+    )
+      return false;
+    if (element instanceof HTMLInputElement && ["password", "email"].includes(element.type)) return true;
+    let hints = "";
+    for (const attribute of ["id", "name", "aria-label", "placeholder", "autocomplete"]) {
+      const value = element.getAttribute(attribute) ?? "";
+      if (value.length > 256 || (attribute === "autocomplete" && /(?:^|\s)cc-/i.test(value))) return true;
+      hints += ` ${value}`;
+    }
+    const references = element.getAttribute("aria-labelledby");
+    if (references !== null) {
+      if (references.length > 256) return true;
+      const ids = references.trim().split(/\s+/);
+      if (ids.length > 4) return true;
+      for (const id of ids) {
+        const label = document.getElementById(id)?.textContent;
+        if (typeof label !== "string" || label.length > 256) return true;
+        hints += ` ${label}`;
+      }
+    }
+    if ((element.labels?.length ?? 0) > 4) return true;
+    for (let index = 0; index < (element.labels?.length ?? 0); index++) {
+      const label = element.labels?.[index]?.textContent ?? "";
+      if (label.length > 256) return true;
+      hints += ` ${label}`;
+    }
+    return /\b(?:user\s*name|password|passcode|pin|otp|one\s*time\s*code|e\s*mail|login|sign\s*in|api\s*key|secret|(?:access|auth|refresh)\s*token|(?:recovery|verification|security)\s*code|cc\s*(?:number|csc))\b/i.test(
+      hints.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]/g, " "),
+    );
+  };
+  const privatePage = () => {
+    if (privateElement(document.body)) return true;
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+    let count = 0;
+    while (walker.nextNode()) if (++count > 5000 || privateElement(walker.currentNode as Element)) return true;
+    return false;
+  };
   const signature = (element: Element) =>
     JSON.stringify([
       element.tagName,
       element.getAttribute("type"),
       element.getAttribute("role"),
       element.getAttribute("aria-label"),
+      element.getAttribute("aria-labelledby"),
+      element.getAttribute("name"),
+      element.getAttribute("autocomplete"),
+      element.getAttribute("placeholder"),
       element.getAttribute("href"),
       (element.textContent ?? "").slice(0, 120),
     ]);
@@ -65,7 +127,7 @@ function inspectPage(input: { id: string; read: boolean }): PageObservation {
   const targets: { element: HTMLElement; signature: string }[] = [];
   const shown: PageObservation["targets"] = [];
   let count = 0,
-    login = false,
+    login = privateElement(document.body),
     truncated = false;
   while (walker.nextNode()) {
     if (++count > 5000) {
@@ -73,14 +135,8 @@ function inspectPage(input: { id: string; read: boolean }): PageObservation {
       break;
     }
     const element = walker.currentNode as HTMLElement;
-    if (!visible(element)) continue;
-    if (
-      element instanceof HTMLInputElement &&
-      (element.type === "password" ||
-        /(?:^|\s)(?:username|current-password|new-password|one-time-code)(?:\s|$)/.test(element.autocomplete))
-    )
-      login = true;
-    if (!input.read) continue;
+    if (privateElement(element)) login = true;
+    if (!input.read || !visible(element)) continue;
     const box = element.getBoundingClientRect();
     if (targets.length >= 40 || box.bottom <= 0 || box.top >= innerHeight || box.right <= 0 || box.left >= innerWidth)
       continue;
@@ -118,31 +174,27 @@ function inspectPage(input: { id: string; read: boolean }): PageObservation {
     if (part !== "") text += `${part}\n`;
   }
   const store = globalThis as typeof globalThis & {
-    __palView?: { id: string; targets: typeof targets; signature: typeof signature };
+    __palView?: { id: string; targets: typeof targets; signature: typeof signature; privatePage: typeof privatePage };
   };
-  store.__palView = { id: input.id, targets, signature };
+  store.__palView = { id: input.id, targets, signature, privatePage };
   return { text: text.slice(0, 8000), title: document.title.slice(0, 200), login, truncated, targets: shown };
 }
 
 /** Only opaque, freshly inspected elements can be acted on; arbitrary selectors and JavaScript are not accepted. */
-function actOnPage(input: { observation: string; action: Static<typeof BrowserAction> }): boolean {
+function actOnPage(input: { observation: string; action: Static<typeof BrowserAction> }): boolean | null {
   const store = (
     globalThis as typeof globalThis & {
       __palView?: {
         id: string;
         targets: { element: HTMLElement; signature: string }[];
         signature: (element: Element) => string;
+        privatePage: () => boolean;
       };
     }
   ).__palView;
   if (store?.id !== input.observation) throw new Error("stale observation");
   // The page can add a login form after the asynchronous preflight but before this DOM action.
-  if (
-    document.querySelector(
-      'input[type="password" i],input[autocomplete~="username" i],input[autocomplete~="current-password" i],input[autocomplete~="new-password" i],input[autocomplete~="one-time-code" i]',
-    ) !== null
-  )
-    throw new Error("private page");
+  if (store.privatePage()) return null;
   if (input.action.type !== "click" && input.action.type !== "type") return false;
   const index = /^t(\d+)$/.exec(input.action.target)?.[1];
   const target = index === undefined ? undefined : store.targets[Number(index)];
@@ -153,11 +205,6 @@ function actOnPage(input: { observation: string; action: Static<typeof BrowserAc
     box = element.getBoundingClientRect();
   if (style.visibility !== "visible" || style.display === "none" || box.width <= 0 || box.height <= 0)
     throw new Error("target hidden");
-  if (
-    element instanceof HTMLInputElement &&
-    (element.type === "password" || /username|password|one-time-code/.test(element.autocomplete))
-  )
-    throw new Error("private input");
   if (input.action.type === "click") HTMLElement.prototype.click.call(element);
   else {
     let prototype;
@@ -232,11 +279,12 @@ export class BrowserPage {
 
   async act(input: BrowserActionInput, guard: () => void): Promise<void> {
     this.current(input.observation);
-    if (await this.privatePage(guard)) throw new Error("private or unsupported page; use the owner viewport");
-    guard();
     try {
-      if (input.action.type === "click" || input.action.type === "type") await this.#evaluate(actOnPage, input, guard);
-      else if (input.action.type === "navigate")
+      if (await this.privatePage(guard)) throw new BrowserOwnerNeeded();
+      guard();
+      if (input.action.type === "click" || input.action.type === "type") {
+        if ((await this.#evaluate<boolean | null>(actOnPage, input, guard)) === null) throw new BrowserOwnerNeeded();
+      } else if (input.action.type === "navigate")
         await this.#page.goto(input.action.url, { waitUntil: "commit", timeout: 10_000 });
       else if (input.action.type === "key") await this.#page.keyboard.press(input.action.key);
       else await this.#page.mouse.wheel(0, input.action.dy);

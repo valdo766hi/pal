@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createInterface } from "node:readline";
-import { access, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +11,7 @@ import type { ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-dura
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { fileTools, searchFolder } from "../src/core/files.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 import { WorktreeFiles } from "../src/core/worktree-files.ts";
 import type { WorkspaceMode } from "../src/core/workspaces.ts";
 
@@ -62,6 +63,16 @@ async function setup() {
     },
   };
 }
+async function aliasedPal() {
+  const fixture = await setup();
+  await fixture.pal.close();
+  const alias = join(fixture.root, "alias");
+  await symlink(fixture.root, alias);
+  const pal = await openPal({ dataRoot: join(alias, "data"), installRoot: "/nonexistent-install" }, context);
+  cleanups.push(() => pal.close());
+  return { pal, alias, root: fixture.root, dataRoot: fixture.dataRoot, project: fixture.project };
+}
+
 const script = (code: string) => fauxAssistantMessage(fauxToolCall("codemode", { code }), { stopReason: "toolUse" });
 
 async function run(
@@ -92,6 +103,53 @@ async function run(
 }
 
 describe("immutable per-chat workspaces", () => {
+  it("keeps Local, Read-only and Worktree usable through a configured data-directory alias", async () => {
+    const { pal, dataRoot, project: source } = await aliasedPal();
+    for (const mode of ["local", "read-only"] as const) {
+      const project = await pal.projects.create(`alias-project-${mode}`, { name: mode });
+      const chat = await pal.chats.createChat(
+        `alias-chat-${mode}`,
+        { projectId: project.id, workspace: mode },
+        context,
+      );
+      const workspace = await pal.workspaces.info(chat.id);
+      expect(workspace).toMatchObject({
+        mode,
+        state: "ready",
+        root: join(dataRoot, "projects", project.id, "workspace"),
+      });
+      if (workspace === undefined) throw new Error("missing fixture workspace");
+      await writeFile(join(workspace.root, "hello.txt"), "canonical workspace");
+      expect(await pal.files.preview(project.id, "hello.txt", "primary", workspace.id)).toMatchObject({
+        text: "canonical workspace",
+      });
+    }
+    const chat = await pal.chats.createChat(
+      "alias-worktree-chat",
+      { projectId: source.id, workspace: "worktree" },
+      context,
+    );
+    const workspace = await pal.workspaces.provision(chat.id);
+    expect(workspace, JSON.stringify(workspace)).toMatchObject({
+      mode: "worktree",
+      state: "ready",
+      root: join(dataRoot, "worktrees", workspace.id),
+    });
+    expect(await readFile(join(workspace.root, "file.txt"), "utf8")).toBe("committed needle\n");
+  });
+
+  it("does not follow later changes to the configured data-directory alias", async () => {
+    const { pal, alias, root, dataRoot } = await aliasedPal();
+    const redirected = join(root, "elsewhere");
+    await mkdir(redirected);
+    await unlink(alias);
+    await symlink(redirected, alias);
+    const project = await pal.projects.create("pinned-data-project", { name: "Pinned" });
+    expect(project.root).toBe(join(dataRoot, "projects", project.id, "workspace"));
+    expect((await pal.chats.createChat("pinned-data-chat", { projectId: project.id }, context)).id).toBeDefined();
+    await expect(access(join(redirected, "data"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("preserves legacy/local request identity, pins committed worktree bytes and refuses admission before readiness", async () => {
     const fixture = await setup();
     const { pal, project, source } = fixture;
@@ -173,6 +231,7 @@ describe("immutable per-chat workspaces", () => {
     const tools = fileTools({
       root: async () => source,
       deny: [],
+      privateFiles: await PrivateFiles.open([]),
       folders: {
         list: () => pal.folders.list(project.id, created.workspace.id),
         open: () => pal.folders.owner(project.id, "primary", created.workspace.id),
@@ -416,7 +475,7 @@ describe("immutable per-chat workspaces", () => {
       await fixture.pal.close();
       const child = spawn(
         process.execPath,
-        [new URL("./fixtures/workspace-child.ts", import.meta.url).pathname, fixture.root, phase],
+        [...process.execArgv, new URL("./fixtures/workspace-child.ts", import.meta.url).pathname, fixture.root, phase],
         { stdio: ["ignore", "pipe", "pipe"] },
       );
       cleanups.push(async () => {

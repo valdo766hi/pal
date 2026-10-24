@@ -335,6 +335,19 @@ export class ModelProviders {
     return (await this.#ready(id)) && (await this.#enabled(id));
   }
 
+  /** Why a chat's chosen model can't be sent to now, if it can't; never a reason to send it elsewhere instead. */
+  async problem(model: { provider: string; modelId: string }): Promise<{ code: string; message: string } | undefined> {
+    if (!isApiProvider(model.provider)) return undefined;
+    if (!(await this.usable(model.provider)))
+      return {
+        code: "provider_unavailable",
+        message: `${API_PROVIDERS[model.provider].name} isn't enabled. Enable it in Settings → Models or choose another model.`,
+      };
+    if (this.#models.getModel(model.provider, model.modelId) === undefined)
+      return { code: "model_unavailable", message: `${model.modelId} is no longer offered; choose another model.` };
+    return undefined;
+  }
+
   /** Save or replace a key (the next request uses it), or remove it, which also disables a provider that needs it. */
   async setKey(id: ApiProviderId, key: string | null): Promise<void> {
     if (key === null) {
@@ -347,9 +360,18 @@ export class ModelProviders {
     await this.#credentials.modify(id, async () => ({ type: "api_key", key: trimmed }));
   }
 
-  /** Describe the compatible endpoint; an enabled one is re-registered with the new models at once. */
+  /**
+   * Describe the compatible endpoint; an enabled one is re-registered with the new models at once. The saved key and
+   * the owner's enablement belong to one destination, the normalized base URL: a new destination is disabled and its
+   * old key forgotten before it is saved, so no key is sent to an address the owner never approved it for.
+   */
   async setCompatible(body: CompatibleConfig): Promise<void> {
     const config = compatibleConfig(body);
+    const previous = await this.#config();
+    if (previous !== undefined && previous.baseUrl !== config.baseUrl) {
+      await this.setEnabled(COMPATIBLE, false);
+      await this.#credentials.forget(COMPATIBLE);
+    }
     await this.#save(CONFIG, JSON.stringify(config));
     if (await this.#enabled(COMPATIBLE)) {
       if (await this.#ready(COMPATIBLE)) await this.#register(COMPATIBLE);

@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type SqliteDatabase, SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
@@ -20,7 +20,7 @@ export type Store = {
  */
 export async function openStore(dataRoot: string): Promise<Store> {
   await mkdir(dataRoot, { recursive: true, mode: 0o700 });
-  const path = join(dataRoot, "pal.sqlite");
+  const path = join(await realpath(dataRoot), "pal.sqlite");
   const database = await openDatabase(path);
   let installationId: string | undefined;
   try {

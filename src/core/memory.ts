@@ -16,6 +16,7 @@ import { Type, type Static } from "typebox";
 import { FileAccessError, readFileSnapshot, resolveProjectPath } from "./files.ts";
 import type { FolderGrants, FolderLease } from "./folders.ts";
 import { HttpError } from "./http.ts";
+import type { PrivateFiles } from "./file-policy.ts";
 import { normalize, RequestConflict, validate } from "./requests.ts";
 import { directoryIdentity } from "./workspace-root.ts";
 
@@ -115,11 +116,19 @@ export class ProjectMemory {
   readonly folders: FolderGrants;
   readonly storage: Storage;
   readonly deny: readonly string[];
-  constructor(database: SqliteDatabase, folders: FolderGrants, storage: Storage, deny: readonly string[]) {
+  readonly #privateFiles: PrivateFiles;
+  constructor(
+    database: SqliteDatabase,
+    folders: FolderGrants,
+    storage: Storage,
+    deny: readonly string[],
+    privateFiles: PrivateFiles,
+  ) {
     this.database = database;
     this.folders = folders;
     this.storage = storage;
     this.deny = deny;
+    this.#privateFiles = privateFiles;
   }
 
   async #owner(project: string, workspace?: string): Promise<Scope> {
@@ -137,7 +146,7 @@ export class ProjectMemory {
     if (input.kind === "file") {
       const lease = await scope.lease(input.folder);
       const { target } = await resolveProjectPath(lease.root, input.path, this.deny);
-      const file = await readFileSnapshot(target);
+      const file = await readFileSnapshot(target, undefined, this.#privateFiles);
       if (file.truncated || hash(file.bytes) !== input.sha256)
         throw new RequestConflict("the memory source changed; read it again before saving");
       const identity = await directoryIdentity(lease.root);
@@ -375,7 +384,7 @@ export class ProjectMemory {
       if ((await directoryIdentity(lease.root)) !== source.identity)
         throw new FileAccessError("the source folder changed");
       const { target } = await resolveProjectPath(lease.root, source.path, this.deny);
-      const file = await readFileSnapshot(target);
+      const file = await readFileSnapshot(target, undefined, this.#privateFiles);
       current = !file.truncated && hash(file.bytes) === source.sha256;
       truncated = file.truncated || file.bytes.length > 4000;
       text =
@@ -417,7 +426,7 @@ export class ProjectMemory {
       const lease = await scope.lease(source.folder);
       if ((await directoryIdentity(lease.root)) !== source.identity) return "unavailable";
       const { target } = await resolveProjectPath(lease.root, source.path, this.deny);
-      const snapshot = await readFileSnapshot(target);
+      const snapshot = await readFileSnapshot(target, undefined, this.#privateFiles);
       await lease.check();
       return !snapshot.truncated && hash(snapshot.bytes) === source.sha256 ? "current" : "changed";
     } catch (error) {
@@ -447,7 +456,11 @@ export class ProjectMemory {
           terms.map((term) => `"${term}"`).join(" OR "),
           scope.project,
         );
-        rows = await this.#live(scope, candidates);
+        const live = new Map((await this.#live(scope, candidates)).map((row) => [row.id, row]));
+        rows = candidates.flatMap(({ id }) => {
+          const row = live.get(id);
+          return row === undefined ? [] : [row];
+        });
       }
       const items: MemoryItem[] = [];
       for (const row of rows) {

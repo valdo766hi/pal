@@ -96,7 +96,7 @@ describe("MCP connections", () => {
     const { manager, add, registry, fixture, script } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const prepared = registry
       .snapshot()
@@ -109,7 +109,7 @@ describe("MCP connections", () => {
       if (listed === undefined) throw new Error("missing fixture tool");
       listed.description = "New definition";
       await manager.test(server.id);
-      await manager.approve(server.id, ["search"]);
+      await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     }
     if (change === "endpoint") {
       await manager.update(server.id, {
@@ -119,7 +119,7 @@ describe("MCP connections", () => {
         private: true,
       });
       await manager.test(server.id);
-      await manager.approve(server.id, ["search"]);
+      await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
       await manager.setEnabled(server.id, true);
     }
     await expect(
@@ -136,7 +136,7 @@ describe("MCP connections", () => {
     const { manager, add, script, fixture } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const entered = Promise.withResolvers<undefined>(),
       release = Promise.withResolvers<undefined>();
@@ -147,8 +147,8 @@ describe("MCP connections", () => {
     const pending = script(tryCall(`tools.mcp__${server.id}__search({query:"durable"})`));
     try {
       await entered.promise;
-      await manager.approve(server.id, []);
-      await manager.approve(server.id, ["search"]);
+      await manager.approve(server.id, [], (await manager.get(server.id)).catalog);
+      await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     } finally {
       release.resolve(undefined);
     }
@@ -166,7 +166,7 @@ describe("MCP connections", () => {
     const { manager, add, script, fixture, project } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const before = await manager.grants.decision(project.id, server.id, "search");
     const entered = Promise.withResolvers<undefined>(),
@@ -178,13 +178,100 @@ describe("MCP connections", () => {
     const pending = script(tryCall(`tools.mcp__${server.id}__search({query:"durable"})`));
     try {
       await entered.promise;
-      await manager.approve(server.id, ["search"]);
+      await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
       expect(await manager.grants.decision(project.id, server.id, "search")).toEqual(before);
     } finally {
       release.resolve(undefined);
     }
     expect(await pending).toContain("Durable agents");
     expect(fixture.calls).toHaveLength(1);
+  });
+
+  it.each(["credential", "endpoint"])(
+    "rejects catalog consent during and after a concurrent %s change",
+    async (change) => {
+      const { manager, add, credentials, fixture, store } = await setup();
+      const server = await add();
+      const a = await manager.test(server.id);
+      await manager.approve(server.id, ["fetch"], a.catalog);
+      const entered = Promise.withResolvers<undefined>(),
+        release = Promise.withResolvers<undefined>();
+      const erase = vi.spyOn(credentials, "delete").mockImplementationOnce(async () => {
+        entered.resolve(undefined);
+        await release.promise;
+      });
+      const changing =
+        change === "credential"
+          ? manager.setKey(server.id, null)
+          : manager.update(server.id, {
+              name: server.name,
+              url: fixture.url + "?changed=1",
+              auth: { kind: "none" },
+              private: true,
+            });
+      try {
+        await entered.promise;
+        expect((await manager.get(server.id)).catalog).toBeNull();
+        await expect(manager.approve(server.id, ["search"], a.catalog)).rejects.toThrow(/changing/);
+      } finally {
+        release.resolve(undefined);
+        await changing;
+        erase.mockRestore();
+      }
+      const b = await manager.test(server.id);
+      expect(b.catalog).not.toBe(a.catalog);
+      const before = await store.database.get("SELECT approved FROM pal_mcp_servers WHERE id = ?", server.id);
+      await expect(manager.approve(server.id, ["search"], a.catalog)).rejects.toThrow(/catalog.*changed/);
+      expect(await store.database.get("SELECT approved FROM pal_mcp_servers WHERE id = ?", server.id)).toEqual(before);
+      await manager.approve(server.id, ["search"], b.catalog);
+      expect(fixture.calls).toEqual([]);
+    },
+  );
+
+  it("does not publish a concurrent rediscovery over the definitions being approved", async () => {
+    const { manager, add, fixture, store } = await setup();
+    const server = await add();
+    const a = await manager.test(server.id);
+    const search = fixture.state.tools[0];
+    if (search === undefined) throw new Error("missing fixture tool");
+    search.description = "Rediscovered definition B";
+    const entered = Promise.withResolvers<undefined>(),
+      release = Promise.withResolvers<undefined>();
+    fixture.state.beforeList = async () => {
+      entered.resolve(undefined);
+      await release.promise;
+    };
+    const refresh = manager.test(server.id);
+    let approving: Promise<unknown> | undefined;
+    try {
+      await entered.promise;
+      approving = manager.approve(server.id, ["search"], a.catalog);
+      await expect
+        .poll(async () => {
+          const row = await store.database.get<{ approved: string }>(
+            "SELECT approved FROM pal_mcp_servers WHERE id = ?",
+            server.id,
+          );
+          return row?.approved;
+        })
+        .toContain(a.tools.find((tool) => tool.name === "search")?.fingerprint);
+    } finally {
+      release.resolve(undefined);
+      await approving;
+      await refresh;
+    }
+    const approved = await manager.get(server.id);
+    expect(approved.catalog).toBe(a.catalog);
+    expect(approved.tools.find((tool) => tool.name === "search")).toMatchObject({
+      approved: true,
+      changed: false,
+      definition: a.tools.find((tool) => tool.name === "search")?.definition,
+    });
+    fixture.state.beforeList = undefined;
+    const b = await manager.test(server.id);
+    expect(b.catalog).not.toBe(a.catalog);
+    expect(b.tools.find((tool) => tool.name === "search")?.changed).toBe(true);
+    expect(fixture.calls).toEqual([]);
   });
 
   it("clears a saved key before publishing a changed recipient, including interrupted credential deletion", async () => {
@@ -240,7 +327,7 @@ describe("MCP connections", () => {
     const { manager, store, open, fixture, add } = await setup();
     const sample = await add();
     await manager.test(sample.id);
-    await manager.approve(sample.id, ["search"]);
+    await manager.approve(sample.id, ["search"], (await manager.get(sample.id)).catalog);
     const row = await store.database.get<{ approved: string }>(
       "SELECT approved FROM pal_mcp_servers WHERE id = ?",
       sample.id,
@@ -295,7 +382,7 @@ describe("MCP connections", () => {
     ]);
     expect(fixture.calls).toEqual([]);
 
-    await manager.approve(server.id, ["search", "fetch"]);
+    await manager.approve(server.id, ["search", "fetch"], (await manager.get(server.id)).catalog);
     // Approved but not enabled: the tool is not installed, so the script cannot call it.
     expect(await script(tryCall(`tools.mcp__${server.id}__search({ query: "x" })`))).toMatch(/error: /);
     await manager.setEnabled(server.id, true);
@@ -315,7 +402,7 @@ describe("MCP connections", () => {
     const { fixture, manager, add, script } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search", "fetch"]);
+    await manager.approve(server.id, ["search", "fetch"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     let disabling: Promise<unknown> | undefined;
     fixture.state.beforeCall = async (call) => {
@@ -342,7 +429,7 @@ describe("MCP connections", () => {
     const { fixture, manager, add, script } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const search = fixture.state.tools[0];
     if (search === undefined) throw new Error("fixture has no tools");
@@ -356,7 +443,7 @@ describe("MCP connections", () => {
     expect(await script(tryCall(`tools.mcp__${server.id}__search({ query: "x" })`))).toMatch(/error: .*does not exist/);
     expect(fixture.calls).toEqual([]);
 
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     expect(await script(tryCall(`tools.mcp__${server.id}__search({ query: "x" })`))).not.toMatch(/error: /);
     expect(fixture.calls.map((call) => call.name)).toEqual(["search"]);
   });
@@ -365,7 +452,7 @@ describe("MCP connections", () => {
     const { manager, add, script, project, projects, open } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search", "fetch"]);
+    await manager.approve(server.id, ["search", "fetch"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const grant = (await manager.grants.view(project.id)).servers.find((candidate) => candidate.id === server.id);
     if (grant === undefined) throw new Error("missing grant");
@@ -389,7 +476,7 @@ describe("MCP connections", () => {
     const { manager, add, script, project, fixture, open } = await setup();
     const server = await add({ kind: "header", header: "x-api-key" });
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const select = async () => {
       const current = (await manager.grants.view(project.id)).servers.find((candidate) => candidate.id === server.id);
@@ -411,7 +498,7 @@ describe("MCP connections", () => {
     if (tool === undefined) throw new Error("missing fixture tool");
     tool.description = "Changed capability";
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     expect(await manager.grants.decision(project.id, server.id, "search")).toMatchObject({ allowed: false });
     await select();
     await manager.update(server.id, {
@@ -421,7 +508,7 @@ describe("MCP connections", () => {
       private: true,
     });
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const restored = await open();
     cleanups.push(() => restored.close());
@@ -435,7 +522,7 @@ describe("MCP connections", () => {
     const { manager, add, script, project, fixture } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const release = Promise.withResolvers<undefined>();
     fixture.state.beforeCall = async () => {
@@ -467,7 +554,7 @@ describe("MCP connections", () => {
     const { manager, registry, add, fixture } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const tool = registry
       .snapshot()
@@ -475,10 +562,20 @@ describe("MCP connections", () => {
       .find((entry) => entry.tool.name === `mcp__${server.id}__search`)?.tool;
     if (tool === undefined) throw new Error("missing tool");
     const release = Promise.withResolvers<undefined>();
+    let active = 0,
+      peak = 0;
     fixture.state.beforeCall = async () => {
-      await release.promise;
+      active++;
+      peak = Math.max(peak, active);
+      try {
+        await release.promise;
+      } finally {
+        active--;
+      }
     };
     let rejected = 0;
+    const catalog = Promise.withResolvers<undefined>();
+    fixture.state.beforeList = () => catalog.promise;
     // This fixture isolates queue admission; API integration checks the real durable receipt commits.
     const executorApi = { conversationId: 2 as ConversationId } as ToolExecutionApi;
     executorApi.commit = vi.fn();
@@ -493,12 +590,17 @@ describe("MCP connections", () => {
         ),
       );
       await expect.poll(() => rejected).toBe(2);
-      expect(fixture.calls).toHaveLength(2);
+      expect(fixture.calls).toHaveLength(0);
+      catalog.resolve(undefined);
+      await expect.poll(() => fixture.calls.length).toBe(2);
       release.resolve(undefined);
       const results = await Promise.all(pending);
       expect(results.filter(Boolean)).toHaveLength(10);
       expect(fixture.calls).toHaveLength(10);
+      expect(peak).toBe(2);
+      expect(active).toBe(0);
     } finally {
+      catalog.resolve(undefined);
       release.resolve(undefined);
     }
   });
@@ -507,7 +609,7 @@ describe("MCP connections", () => {
     const { manager, add, script, project } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const closing = Promise.withResolvers<undefined>(),
       release = Promise.withResolvers<undefined>();
@@ -539,7 +641,7 @@ describe("MCP connections", () => {
     const key = 'fixture-key-"129\\secret';
     await manager.setKey(server.id, key);
     await manager.test(server.id);
-    await manager.approve(server.id, ["search", "fetch"]);
+    await manager.approve(server.id, ["search", "fetch"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     fixture.state.result = {
       content: [{ type: "text", text: key }],
@@ -573,7 +675,7 @@ describe("MCP connections", () => {
     const { manager, add, script, fixture } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     fixture.state.result = {
       content: [{ type: "text", text: "small text is not a bound on structured data" }],
@@ -624,7 +726,7 @@ describe("MCP connections", () => {
     const { fixture, manager, add } = await setup();
     const server = await add();
     await manager.test(server.id);
-    await manager.approve(server.id, ["search"]);
+    await manager.approve(server.id, ["search"], (await manager.get(server.id)).catalog);
     await manager.setEnabled(server.id, true);
     const moved = await manager.update(server.id, {
       name: "Fixture",

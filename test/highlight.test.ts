@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { highlight } from "../web/src/lib/highlight.ts";
+import { escapeHtml, highlight } from "../web/src/lib/highlight.ts";
 
 const plain = (html: string) =>
   html
@@ -52,6 +52,44 @@ describe("code highlighting", () => {
     const code = 'const value = "<tag>&";';
     for (const language of ["constructor", "__proto__", "(a+)+$", "js|.*", "[", "sql(?=.)"])
       expect(highlight(code, language)).toBe('const value = "&lt;tag&gt;&amp;";');
+  });
+
+  it("keeps ordinary YAML and TOML keys, values and sections highlighted", () => {
+    expect(spans(highlight("name: 'Pal'\nenabled: true\n- mode: local", "yaml"))).toEqual([
+      "p:name",
+      "s:'Pal'",
+      "p:enabled",
+      "n:true",
+      "p:mode",
+    ]);
+    expect(spans(highlight('[server]\nname = "Pal"\nenabled = true', "toml"))).toEqual([
+      "t:[server]",
+      "p:name",
+      's:"Pal"',
+      "p:enabled",
+      "n:true",
+    ]);
+  });
+
+  it.each(["yaml", "toml"])("bounds adversarial %s work below the total size limit", (language) => {
+    const cases = [
+      " ".repeat(100_000) + "x",
+      "\t".repeat(100_000) + "x",
+      ".".repeat(100_000) + "!",
+      " ".repeat(50_000) + 'key: "<tag>&',
+      '[section]\nkey = "' + "x".repeat(100_000) + "<>&",
+    ];
+    for (const code of cases) {
+      const started = performance.now();
+      const html = highlight(code, language);
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(html).toBe(escapeHtml(code));
+      expect(plain(html)).toBe(code);
+    }
+    const shortLines = (" ".repeat(2047) + "x\n").repeat(95);
+    const started = performance.now();
+    expect(plain(highlight(shortLines, language))).toBe(shortLines);
+    expect(performance.now() - started).toBeLessThan(1000);
   });
 
   it("uses escaped plain text above the highlighting limit", () => {

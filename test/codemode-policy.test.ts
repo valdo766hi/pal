@@ -34,6 +34,7 @@ async function setup(options: {
   const { extensions, sandbox } = createPalCodemode({
     allows: options.allows ?? (() => true),
     caps: { ...DEFAULT_CODEMODE_CAPS, ...options.caps },
+    namespaces: [{ name: "fixture", prefix: "fx_", description: "Fixture tools" }],
   });
   cleanups.push(() => sandbox.close());
   const registry = createRegistry();
@@ -133,6 +134,83 @@ return seen;`,
     const [result] = await run(root);
     expect(tool.calls).toBe(3);
     expect(text(result).match(/call limit of 3 reached/g)).toHaveLength(2);
+  });
+
+  it.each(['searchTools("Fixture")', 'describeTool("fx_count")', 'describeNamespace("fixture")'])(
+    "counts discovery calls through %s against the script budget",
+    async (call) => {
+      const tool = counter("fx_count");
+      const { root } = await setup({
+        tools: [tool.registration],
+        caps: { maxCalls: 3 },
+        scripts: [
+          [
+            `let allowed = 0; const errors = [];
+for (let i = 0; i < 5; i++) {
+  try { await ${call}; allowed++; } catch (error) { errors.push(error.message); }
+}
+return { allowed, errors };`,
+          ],
+        ],
+      });
+      const [result] = await run(root);
+      expect(result?.isError).toBe(false);
+      expect(text(result)).toContain('"allowed":3');
+      expect(text(result).match(/call limit of 3 reached/g)).toHaveLength(2);
+      expect(tool.calls).toBe(0);
+    },
+  );
+
+  it.each([false, true])("shares the budget across mixed calls (concurrent: %s)", async (concurrent) => {
+    const tool = counter("fx_count");
+    const calls = [
+      'searchTools("Fixture")',
+      "tools.fx_count({})",
+      'describeNamespace("fixture")',
+      'describeTool("fx_count")',
+      "tools.fx_count({})",
+    ];
+    const code = concurrent
+      ? `const outcomes = await Promise.allSettled([${calls.join(",")}]);
+return { allowed: outcomes.filter(x => x.status === "fulfilled").length,
+ errors: outcomes.filter(x => x.status === "rejected").map(x => x.reason.message) };`
+      : `let allowed = 0; const errors = [];
+for (const call of [${calls.map((call) => `() => ${call}`).join(",")}]) {
+ try { await call(); allowed++; } catch (error) { errors.push(error.message); }
+}
+return { allowed, errors };`;
+    const { root } = await setup({ tools: [tool.registration], caps: { maxCalls: 3 }, scripts: [[code]] });
+    const [result] = await run(root);
+    expect(result?.isError).toBe(false);
+    expect(text(result)).toContain('"allowed":3');
+    expect(text(result).match(/call limit of 3 reached/g)).toHaveLength(2);
+    expect(tool.calls).toBe(1);
+  });
+
+  it("keeps separate script budgets and does not charge local output or store helpers", async () => {
+    const tool = counter("fx_count");
+    const code = `store("k", 1); text(load("k")); console.log(ALL_TOOLS.length);
+await searchTools("Fixture"); await describeTool("fx_count");
+return await tools.fx_count({});`;
+    const { root } = await setup({
+      tools: [tool.registration],
+      caps: { maxCalls: 3 },
+      scripts: [[code], [code]],
+    });
+    const results = await run(root);
+    expect(results.map((result) => result.isError)).toEqual([false, false]);
+    expect(tool.calls).toBe(2);
+  });
+
+  it("returns a bounded error at the first over-budget discovery call", async () => {
+    const { root } = await setup({
+      caps: { maxCalls: 3 },
+      scripts: [[`for (let i = 0; i < 4; i++) await searchTools("anything");`]],
+    });
+    const [result] = await run(root);
+    expect(result?.isError).toBe(true);
+    expect(text(result)).toContain("script call limit of 3 reached");
+    expect(text(result).length).toBeLessThan(1000);
   });
 
   it("applies a revoked grant to the script's next call", async () => {

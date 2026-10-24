@@ -4,6 +4,7 @@
   import { api, type Project, type TerminalInfo, type Workspace } from "../lib/api.ts";
   import Icon from "../lib/Icon.svelte";
   import { shownTheme, viewport } from "../lib/state.svelte.ts";
+  import { terminalMirror } from "../lib/terminal-mirror.ts";
 
   const FONT = "Geist Mono Variable";
   /** ANSI colors desaturated to Pal's status and syntax tokens on the terminal well, so output never shouts. */
@@ -205,7 +206,9 @@
         disableStdin: true,
         convertEol: false,
         screenReaderMode: screenReader,
+        allowProposedApi: true,
       });
+      terminalMirror(term);
       terminal = term;
       const fit = new FitAddon();
       term.loadAddon(fit);

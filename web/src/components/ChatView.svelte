@@ -1,14 +1,14 @@
 <script lang="ts">
-  import { tick } from "svelte";
+  import { tick, untrack } from "svelte";
   import {
     api,
     ApiError,
     type ChatSummary,
     type CommandMode as Approval,
     type Effort,
+    type HelperView,
     type Project,
     requestId,
-    type Upload,
     type WorkspaceMode as Mode,
   } from "../lib/api.ts";
   import {
@@ -31,7 +31,9 @@
   import ModelControl, { type Group } from "./ModelControl.svelte";
   import ProjectMcpSettings from "./ProjectMcpSettings.svelte";
   import WorkspaceMode from "./WorkspaceMode.svelte";
-  import { codeCopy } from "../lib/copy.ts";
+  import { drafts, MAX_DRAFT_CHARS, MAX_DRAFT_FILES, type PendingInput } from "../lib/drafts.svelte.ts";
+  import type { ReviewFeedback } from "../../../src/core/feedback.ts";
+  import { codeCopy, copyText } from "../lib/copy.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { rise } from "../lib/motion.ts";
   import { app, navigate, refreshChatGPT, refreshProjects, viewport } from "../lib/state.svelte.ts";
@@ -43,6 +45,7 @@
     panels,
     onPanel,
     changeCount,
+    onAdmitted,
   }: {
     chat: ChatSummary;
     project: Project;
@@ -51,6 +54,7 @@
     panels: readonly { id: string; icon: IconName }[];
     onPanel: (id: string) => void;
     changeCount?: number | undefined;
+    onAdmitted?: () => void;
   } = $props();
   const workspace = $derived(chat.workspace);
   const root = $derived(workspace?.root ?? project.root);
@@ -72,6 +76,7 @@
     id: string;
     name: string;
     code: string | undefined;
+    latest: boolean;
     result: { text: string; isError: boolean; calls: NestedCall[] } | undefined;
   };
   type Item =
@@ -89,6 +94,7 @@
     | { kind: "note"; id: string; text: string }
     | { kind: "shell"; id: string; receipt: ShellReceipt }
     | { kind: "mcp"; id: string; receipt: McpReceipt }
+    | { kind: "helper"; id: string; task: number; purpose: string; status: "answered" | "unanswered" | undefined }
     | { kind: "approval"; id: string; approval: CommandApproval };
 
   const USAGE_URL = "https://chatgpt.com/settings/usage";
@@ -97,20 +103,32 @@
   let model: string | null = $state(null);
   let provider: string | null = $state(null);
   let effort: Effort = $state("off");
+  let configuration = $state("");
+  let metadata = $state<"loading" | "unset" | "configured" | "failed">("loading");
+  let metadataChat = $state("");
+  let metadataError: string | undefined = $state();
+  let loadEpoch = 0;
+  const hydrated = $derived(metadataChat === chat.id && (metadata === "unset" || metadata === "configured"));
   let choosing = $state(false);
-  let draft = $state("");
+  // Workspace keys this component by chat.id; the shared cells outlive observation of that chat.
+  const writing = drafts.open(untrack(() => chat.id));
   let typing = $state(false);
   let composer: HTMLTextAreaElement | undefined = $state();
+  let scheduling = $state(false);
   /** Add text the owner chose elsewhere (a terminal selection, a file reference) to the draft; never sends it. */
-  export function insertText(text: string) {
-    draft += `${draft ? "\n\n" : ""}${text}`;
-    composer?.focus();
+  export function insertText(text: string): boolean {
+    const added = writing.append(text);
+    if (added) composer?.focus();
+    return added;
   }
-  let pending: { key: string; text: string; files: string } | undefined;
-  let attachments: Upload[] = $state([]);
-  let uploading = $state(0);
-  let whenBusy: "followUp" | "steer" = $state("followUp");
-  let sending = $state(false);
+  export function insertFeedback(text: string, feedback: ReviewFeedback): boolean {
+    const added = writing.appendFeedback(text, feedback);
+    if (added) composer?.focus();
+    return added;
+  }
+  export function hasFeedback(id: string): boolean {
+    return writing.feedback?.ids.includes(id) ?? false;
+  }
   let error: string | undefined = $state();
   let openSteps: Record<string, boolean> = $state({});
   /** Texts this page queued, by submission, so a queued item can show what it says. */
@@ -135,23 +153,125 @@
     if (stream?.loaded && !settled) void tick().then(() => (settled = true));
   });
 
-  $effect(() => {
-    const current = new ChatStream(chat.id);
-    stream = current;
-    void api.chat(chat.id).then((loaded) => {
+  async function loadMetadata(id: string) {
+    const epoch = ++loadEpoch;
+    metadataChat = id;
+    metadata = "loading";
+    metadataError = undefined;
+    choosing = false;
+    model = null;
+    provider = null;
+    effort = "off";
+    configuration = "";
+    try {
+      const loaded = await api.chat(id);
+      if (epoch !== loadEpoch) return;
       model = loaded.model;
       provider = loaded.provider;
       effort = loaded.effort;
-    });
-    return () => current.close();
+      configuration = loaded.configuration;
+      metadata = loaded.model === null ? "unset" : "configured";
+    } catch (failure) {
+      if (epoch !== loadEpoch) return;
+      metadataError = failure instanceof Error ? failure.message : String(failure);
+      metadata = "failed";
+    }
+  }
+
+  /** Replaces a stream the server closed; the browser itself retries one that merely dropped. */
+  let reconnect = () => {};
+  $effect(() => {
+    const id = chat.id;
+    let current = new ChatStream(id);
+    stream = current;
+    reconnect = () => {
+      current.close();
+      current = new ChatStream(id);
+      stream = current;
+    };
+    void loadMetadata(id);
+    return () => {
+      loadEpoch++;
+      current.close();
+    };
   });
 
-  const items = $derived.by(() => build(stream?.entries ?? [], stream?.partial, stream?.approvals ?? []));
+  let diagnostics: "idle" | "copying" | "copied" = $state("idle");
+  /** Copies this chat's redacted run state, request IDs and effect outcomes for support. */
+  async function copyDiagnostics() {
+    diagnostics = "copying";
+    try {
+      const copied = await copyText(JSON.stringify(await api.chatDiagnostics(chat.id), null, 2));
+      diagnostics = copied ? "copied" : "idle";
+      if (!copied) error = "The browser refused to copy diagnostics.";
+    } catch (failure) {
+      diagnostics = "idle";
+      error = `Couldn't copy diagnostics: ${failure instanceof Error ? failure.message : String(failure)}`;
+    }
+  }
+
+  let stopping = $state(false);
+  let stopError: string | undefined = $state();
+  async function stop() {
+    stopping = true;
+    stopError = undefined;
+    try {
+      await api.stop(chat.id);
+    } catch (failure) {
+      stopError = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      stopping = false;
+    }
+  }
+
+  // Live text changes often; keep committed history from being rebuilt for each partial update.
+  const historyItems = $derived(build(stream?.entries ?? [], undefined, stream?.approvals ?? []));
+  /** Durable helper status, including calls left with unknown outcomes; refreshed as helpers and runs change. */
+  let helpers: HelperView[] = $state([]);
+  let helpersError: string | undefined = $state();
+  let helpersPending = $state(false);
+  let helpersRefresh = $state(0);
+  const helperUpdates = $derived((stream?.entries ?? []).filter((entry) => entry.kind === "pal.helper").length);
+  $effect(() => {
+    const id = chat.id;
+    const running = stream?.running;
+    void helpersRefresh;
+    if (helperUpdates === 0 || running === undefined) return;
+    let current = true;
+    helpersPending = true;
+    helpersError = undefined;
+    api.helpers(id).then(
+      (loaded) => {
+        if (!current) return;
+        helpers = loaded.helpers;
+        helpersPending = false;
+      },
+      (failure) => {
+        if (!current) return;
+        helpersError = failure instanceof Error ? failure.message : String(failure);
+        helpersPending = false;
+      },
+    );
+    return () => {
+      current = false;
+    };
+  });
+  function helperStatus(status: "answered" | "unanswered" | undefined, view: HelperView | undefined) {
+    if (status === "answered" || view?.status === "answered") return { text: "answered", failed: false };
+    if (status === "unanswered" || view?.status === "unanswered" || view?.status === "stopped")
+      return { text: view?.reason ? `stopped: ${view.reason}` : "stopped", failed: true };
+    if (view?.status === "running")
+      return { text: helpersError || helpersPending ? "last observed working" : "working", failed: false };
+    return { text: helpersPending ? "checking status" : "status unavailable", failed: true };
+  }
+  const items = $derived(historyItems.concat(build([], stream?.partial, [])));
   const awaiting = $derived((stream?.approvals ?? []).some((approval) => approval.state === "pending"));
   const connected = $derived(app.chatgpt?.account != null);
-  const effective = $derived(
-    model !== null ? { provider: provider ?? "openai", modelId: model } : (app.chatgpt?.default ?? null),
-  );
+  const effective = $derived.by(() => {
+    if (!hydrated) return null;
+    if (model === null) return app.chatgpt?.default ?? null;
+    return provider === null ? null : { provider, modelId: model };
+  });
   /** ChatGPT once connected (or while it is this chat's provider), then each API-key provider the owner enabled. */
   const groups = $derived<Group[]>([
     ...(connected || effective?.provider === "openai"
@@ -204,7 +324,18 @@
       app.chatgpt?.default?.provider === effective.provider &&
       app.chatgpt.default.modelId === effective.modelId,
   );
-  const canSend = $derived(ready && !sending && !choosing && uploading === 0 && draft.trim() !== "" && usable);
+  const canSend = $derived(
+    hydrated &&
+      ready &&
+      writing.active &&
+      !writing.blocked &&
+      !writing.sending &&
+      writing.pending === undefined &&
+      !choosing &&
+      writing.uploading === 0 &&
+      writing.text.trim() !== "" &&
+      usable,
+  );
 
   function build(entries: Entry[], partial: Message | undefined, approvals: readonly CommandApproval[]): Item[] {
     // A result belongs to the call of that ID in the latest assistant message before it; IDs may repeat across turns.
@@ -222,12 +353,12 @@
         };
       }
     }
-    const assistant = (id: string, message: Message, live: boolean): Item => {
+    const assistant = (id: number | "live", message: Message, live: boolean): Item => {
       const blocks: Block[] =
         typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
       return {
         kind: "assistant",
-        id,
+        id: String(id),
         texts: blocks.flatMap((block) => (block.type === "text" && block.text !== "" ? [block.text] : [])),
         steps: blocks.flatMap((block) =>
           block.type === "toolCall"
@@ -236,6 +367,7 @@
                   id: block.id,
                   name: block.name,
                   code: typeof block.arguments.code === "string" ? block.arguments.code : undefined,
+                  latest: caller[block.id] === id,
                   result: results[`${id}/${block.id}`],
                 },
               ]
@@ -250,6 +382,13 @@
     const receipts = new Map(
       entries.flatMap((entry) =>
         entry.data?.shell?.status === "finished" ? [[entry.data.shell.callId, entry.data.shell] as const] : [],
+      ),
+    );
+    const answers = new Map(
+      entries.flatMap((entry) =>
+        entry.kind === "pal.helper" && entry.data?.result
+          ? [[entry.data.result.task, entry.data.result.status] as const]
+          : [],
       ),
     );
     const internet = new Map(
@@ -268,6 +407,17 @@
       if (entry.kind === "pal.mcp" && entry.data?.mcp !== undefined) {
         if (internet.get(entry.data.mcp.callId) === entry.id)
           built.push({ kind: "mcp", id: String(entry.id), receipt: entry.data.mcp });
+        continue;
+      }
+      if (entry.kind === "pal.helper") {
+        if (entry.data?.helper !== undefined)
+          built.push({
+            kind: "helper",
+            id: String(entry.id),
+            task: entry.data.helper.task,
+            purpose: entry.data.helper.purpose,
+            status: answers.get(entry.data.helper.task),
+          });
         continue;
       }
       if (entry.kind === "pal.shell" && entry.data?.shell?.status === "started") {
@@ -291,7 +441,7 @@
           attachments: entry.data?.attachments ?? [],
         });
       } else if (entry.kind === "pi.assistant" && message !== undefined) {
-        built.push(assistant(String(entry.id), message, false), ...asked(entry.id));
+        built.push(assistant(entry.id, message, false), ...asked(entry.id));
       } else if (entry.kind === "pi.compaction") {
         built.push({
           kind: "note",
@@ -308,45 +458,112 @@
     return built;
   }
 
-  async function send() {
-    const text = draft.trim();
-    if (!canSend) return;
-    const ids = attachments.map((attachment) => attachment.id);
-    // A retry after a lost response reuses the key, so the server admits the message once.
-    if (pending?.text !== text || pending.files !== ids.join()) pending = { key: requestId(), text, files: ids.join() };
-    sending = true;
+  async function attempt(work: (epoch: number) => Promise<void>) {
+    if (!writing.active || writing.blocked || writing.sending) return;
+    const epoch = loadEpoch;
+    writing.sending = true;
+    writing.error = undefined;
+    writing.notice = undefined;
     error = undefined;
     try {
-      if (model === null && effective !== null) {
-        const chosen = await api.setChatModel(chat.id, effective.modelId, undefined, effective.provider);
-        model = chosen.model;
-        provider = chosen.provider;
-      }
-      const { admission } = await api.send(chat.id, pending.key, text, stream?.running ? whenBusy : "followUp", ids);
-      if (stream?.running) queuedTexts[admission.submissionId] = text;
-      pending = undefined;
-      draft = "";
-      attachments = [];
-      if (chat.title === null) void refreshProjects();
+      await work(epoch);
     } catch (failure) {
-      error = failure instanceof ApiError ? failure.message : String(failure);
+      if (!writing.active) return;
+      if (failure instanceof ApiError && failure.code === "configuration_stale") {
+        if (writing.pending !== undefined) writing.reject(writing.pending);
+        if (epoch === loadEpoch) settingsFailure(failure);
+        else writing.error = failure.message;
+      } else {
+        if (
+          failure instanceof ApiError &&
+          ["feedback_stale", "feedback_mismatch", "ignored_permission"].includes(failure.code) &&
+          writing.pending !== undefined
+        ) {
+          writing.unlinkFeedback(writing.pending.body.feedback?.ids ?? []);
+          writing.reject(writing.pending);
+        }
+        writing.error = failure instanceof Error ? failure.message : String(failure);
+      }
     } finally {
-      sending = false;
+      writing.sending = false;
     }
   }
 
+  async function deliver(envelope: PendingInput, epoch: number) {
+    const { text, whenBusy, attachments, configuration, feedback } = envelope.body;
+    const { admission } = await api.send(
+      envelope.chatId,
+      envelope.requestId,
+      text,
+      whenBusy,
+      attachments,
+      configuration,
+      writing.signal,
+      feedback,
+    );
+    writing.confirm(envelope, admission);
+    if (epoch !== loadEpoch) return;
+    if (feedback !== undefined) onAdmitted?.();
+    if (stream?.running) queuedTexts[admission.submissionId] = text;
+    if (chat.title === null) void refreshProjects();
+  }
+
+  async function send() {
+    if (!canSend) return;
+    const snapshot = writing.snapshot(stream?.running === true);
+    const destination = effective;
+    let selected = configuration;
+    await attempt(async (epoch) => {
+      if (model === null && destination !== null) {
+        const chosen = await api.setChatModel(
+          writing.chatId,
+          destination.modelId,
+          undefined,
+          destination.provider,
+          selected,
+        );
+        selected = chosen.configuration;
+        if (epoch === loadEpoch) {
+          model = chosen.model;
+          provider = chosen.provider;
+          effort = chosen.effort;
+          configuration = chosen.configuration;
+          metadata = "configured";
+        }
+      }
+      if (writing.active) await deliver(writing.stage(requestId(), snapshot, selected), epoch);
+    });
+  }
+
+  async function retrySaved() {
+    const envelope = writing.pending;
+    if (envelope !== undefined) await attempt((epoch) => deliver(envelope, epoch));
+  }
+
+  function settingsFailure(failure: unknown) {
+    if (failure instanceof ApiError && failure.code === "configuration_stale") {
+      metadata = "failed";
+      metadataError = failure.message;
+    } else error = failure instanceof ApiError ? failure.message : String(failure);
+  }
+
   async function chooseModel(choice: { provider: string; id: string }, level?: Effort) {
-    if (choosing) return;
+    if (choosing || writing.sending || !hydrated) return;
+    const id = chat.id,
+      epoch = loadEpoch;
     choosing = true;
     try {
-      const chosen = await api.setChatModel(chat.id, choice.id, level, choice.provider);
+      const chosen = await api.setChatModel(id, choice.id, level, choice.provider, configuration);
+      if (epoch !== loadEpoch) return;
       model = chosen.model;
       provider = chosen.provider;
       effort = chosen.effort;
+      configuration = chosen.configuration;
+      metadata = "configured";
     } catch (failure) {
-      error = failure instanceof ApiError ? failure.message : String(failure);
+      if (epoch === loadEpoch) settingsFailure(failure);
     } finally {
-      choosing = false;
+      if (epoch === loadEpoch) choosing = false;
     }
   }
 
@@ -411,14 +628,23 @@
   }
 
   async function upload(files: File[]) {
+    const projectId = project.id;
     for (const file of files) {
-      uploading += 1;
+      if (!writing.active || writing.blocked) return;
+      if (writing.attachments.length + writing.uploading >= MAX_DRAFT_FILES) {
+        writing.error = `A draft can attach at most ${MAX_DRAFT_FILES} files.`;
+        return;
+      }
+      writing.touch();
+      writing.uploading++;
       try {
-        attachments = [...attachments, await api.upload(project.id, file)];
+        const attachment = await api.upload(projectId, file, writing.signal);
+        writing.attachments = [...writing.attachments, attachment];
       } catch (failure) {
-        error = `${file.name}: ${failure instanceof ApiError ? failure.message : String(failure)}`;
+        if (writing.active)
+          writing.error = `${file.name}: ${failure instanceof ApiError ? failure.message : String(failure)}`;
       } finally {
-        uploading -= 1;
+        writing.uploading--;
       }
     }
   }
@@ -442,8 +668,20 @@
     return server === undefined || tool === undefined ? name : `${server} · ${tool}`;
   }
 
+  function activeTool(step: Step) {
+    return step.latest ? stream?.tools.find((tool) => tool.callId === step.id) : undefined;
+  }
+  function phase(step: Step, live: boolean) {
+    if (step.result !== undefined) return step.result.isError ? "Failed" : "Done";
+    if (live) return "Preparing";
+    const tool = activeTool(step);
+    if (tool?.status === "running") return stream?.connected ? "Running" : "Last observed running";
+    if (tool?.status === "pending") return "Queued";
+    return "Outcome unconfirmed";
+  }
+
   /** One quiet line for an assistant turn's scripts, counted from the tool calls that came back. */
-  function summary(steps: Step[]): string {
+  function summary(steps: Step[], live: boolean): string {
     const calls = steps.flatMap((step) => step.result?.calls ?? []);
     const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
     const commands = calls.filter((call) => call.name === "shell_run").length;
@@ -455,7 +693,16 @@
       tools > 0 ? `used ${count(tools, "tool")}` : "",
     ].filter((part) => part !== "");
     if (steps.some((step) => step.result?.isError)) did.push("with errors");
-    const ran = steps.length === 1 ? "Ran a script" : `Ran ${steps.length} scripts`;
+    const unresolved = steps.map((step) => phase(step, live)).find((state) => state !== "Done" && state !== "Failed");
+    if (unresolved !== undefined) did.push(unresolved.toLowerCase());
+    const ran =
+      unresolved === undefined
+        ? steps.length === 1
+          ? "Ran a script"
+          : `Ran ${steps.length} scripts`
+        : steps.length === 1
+          ? "Script"
+          : `${steps.length} scripts`;
     return did.length > 0 ? `${ran} · ${did.join(", ")}` : ran;
   }
 
@@ -471,6 +718,7 @@
     {current}
     {effort}
     busy={choosing}
+    disabled={!hydrated || writing.sending}
     {connected}
     {isDefault}
     {usable}
@@ -480,13 +728,25 @@
   />
 {/snippet}
 
+{#snippet diagnosticsButton()}
+  <button class="b sm" disabled={diagnostics === "copying"} onclick={copyDiagnostics}
+    >{diagnostics === "copied" ? "Copied" : "Copy diagnostics"}</button
+  >
+{/snippet}
+
 {#snippet busySwitch()}
   <div class="seg" role="radiogroup" aria-label="While the agent is running">
-    <button class="segb" role="radio" aria-checked={whenBusy === "steer"} onclick={() => (whenBusy = "steer")}
-      >Steer</button
+    <button
+      class="segb"
+      role="radio"
+      aria-checked={writing.whenBusy === "steer"}
+      onclick={() => (writing.whenBusy = "steer")}>Steer</button
     >
-    <button class="segb" role="radio" aria-checked={whenBusy === "followUp"} onclick={() => (whenBusy = "followUp")}
-      >Queue</button
+    <button
+      class="segb"
+      role="radio"
+      aria-checked={writing.whenBusy === "followUp"}
+      onclick={() => (writing.whenBusy = "followUp")}>Queue</button
     >
   </div>
 {/snippet}
@@ -498,6 +758,12 @@
       style:padding-inline={phone ? "18px" : "24px"}
       style:padding-bottom={app.pet.enabled ? "54px" : undefined}
     >
+      {#if helperUpdates > 0 && helpersError !== undefined}
+        <div class="callout er" role="alert">
+          Couldn't load helper status: {helpersError}
+          <button class="b sm" disabled={helpersPending} onclick={() => helpersRefresh++}>Retry helper status</button>
+        </div>
+      {/if}
       {#if stream?.loaded && items.length === 0}
         <div class="empty">
           <h2>Start the conversation</h2>
@@ -534,6 +800,21 @@
             <div class="note"><Icon name="info" /><span>{item.text}</span></div>
           {:else if item.kind === "mcp"}
             <InternetSources receipt={item.receipt} />
+          {:else if item.kind === "helper"}
+            {@const view = helpers.find((helper) => helper.task === item.task)}
+            {@const status = helperStatus(item.status, view)}
+            <div class="note helper">
+              <Icon name="search" />
+              <span
+                >Research helper · {item.purpose} · <span class={{ er: status.failed }}>{status.text}</span>
+                {#if view !== undefined && view.unknownEffects.length > 0}
+                  <span class="er"
+                    >Outcome unknown for {view.unknownEffects.map((effect) => effect.tool).join(", ")}; check before
+                    repeating.</span
+                  >
+                {/if}
+              </span>
+            </div>
           {:else if item.kind === "approval"}
             {@const approval = item.approval}
             {@const browser = approval.tool === "browser_act"}
@@ -587,9 +868,10 @@
                     ? "Timed out"
                     : item.receipt.exitCode !== undefined
                       ? `Exit ${item.receipt.exitCode}`
-                      : "Pending receipt"}
+                      : "Outcome unconfirmed"}
                 </span><Icon name="chevR" size={13} />
               </summary>
+              <div class="small dim mono ellipsis" title={item.receipt.callId}>Call {item.receipt.callId}</div>
               <div class="small dim mono ellipsis" title={item.receipt.cwd}>{item.receipt.cwd}</div>
               <pre class="out">{item.receipt.command}</pre>
               {#if item.receipt.executed !== undefined}<p class="small dim">
@@ -606,26 +888,39 @@
               {@const open = openSteps[item.id] === true}
               <div class="activity">
                 <button class="acth" aria-expanded={open} onclick={() => (openSteps[item.id] = !open)}>
-                  {#if item.live && item.steps.some((step) => step.result === undefined)}
+                  {#if item.steps.some((step) => ["Preparing", "Running"].includes(phase(step, item.live)))}
                     <span class="ring spin" aria-hidden="true"></span>
                   {/if}
-                  <span>{summary(item.steps)}</span>
+                  <span>{summary(item.steps, item.live)}</span>
                   <Icon name={open ? "chevD" : "chevR"} size={13} />
                 </button>
                 {#if open}
                   <ol>
                     {#each item.steps as step (step.id)}
+                      {@const state = phase(step, item.live)}
+                      {@const tool = activeTool(step)}
                       <li>
                         <div class="steprow">
-                          {#if step.result === undefined}<span class="ring spin" aria-hidden="true"></span><span
-                              class="sr">Running</span
-                            >
+                          {#if step.result === undefined}<span
+                              class="ring"
+                              class:spin={state === "Preparing" || state === "Running"}
+                              aria-hidden="true"
+                            ></span><span class="dim">{state}</span>
                           {:else if step.result.isError}<span class="tick er" aria-hidden="true">✕</span><span
                               class="sr">Failed</span
                             >
                           {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span>{/if}
                           <span>{step.name}</span>
                         </div>
+                        {#if step.result === undefined}
+                          <div class="dim small">
+                            <span>Call {step.id}</span>{#if tool?.taskId !== undefined}
+                              · <span>Task {tool.taskId}</span>{/if}
+                          </div>
+                          {#if state === "Outcome unconfirmed"}<p class="dim small">
+                              No result was recorded. Inspect the workspace before repeating an action.
+                            </p>{/if}
+                        {/if}
                         {#if step.code !== undefined}<pre class="out">{step.code}</pre>{/if}
                         {#each step.result?.calls ?? [] as call (call.id)}
                           <div class="steprow call">
@@ -689,7 +984,7 @@
     <div class="dockin">
       {#if app.pet.enabled}
         {#await import("./Pet.svelte") then { default: Pet }}
-          <Pet id={app.pet.id} running={stream?.running ?? false} active={typing || draft !== ""} />
+          <Pet id={app.pet.id} running={stream?.running ?? false} active={typing || writing.text !== ""} />
         {/await}
       {/if}
       {#if !ready}
@@ -700,7 +995,16 @@
             >{/if}
         </div>
       {/if}
-      {#if effective === null}
+      {#if !hydrated}
+        {#if metadata === "failed" && metadataChat === chat.id}
+          <div class="callout er" role="alert">
+            <span class="grow">Couldn't load saved chat settings. {metadataError}</span>
+            <button class="b sm" onclick={() => loadMetadata(chat.id)}>Try again</button>
+          </div>
+        {:else}
+          <div class="callout ac" role="status">Loading saved chat settings…</div>
+        {/if}
+      {:else if effective === null}
         <div class="callout wa nowrap" role="status">
           <span class="grow"><strong>No model is chosen.</strong> Connect a provider and choose a model to send.</span>
           <button class="b sm" onclick={() => navigate({ view: "settings", tab: "models" })}>Connect</button>
@@ -719,8 +1023,20 @@
           <button class="b sm" onclick={() => navigate({ view: "settings", tab: "models" })}>Settings</button>
         </div>
       {/if}
-      {#if stream !== undefined && stream.loaded && !stream.connected}
-        <div class="callout wa" role="status">Reconnecting to Pal… The chat keeps running on the server.</div>
+      {#if stream?.loaded === false && stream.problem === undefined}
+        <div class="callout wa" role="status">Loading saved conversation… Your draft is kept.</div>
+      {:else if stream?.problem === "closed"}
+        <div class="callout er" role="alert">
+          <span class="grow">Pal stopped sending this chat's updates. The chat and your draft are kept.</span>
+          {@render diagnosticsButton()}
+          <button class="b sm" onclick={() => reconnect()}>Reconnect</button>
+        </div>
+      {:else if stream?.problem === "retrying"}
+        <div class="callout wa" role="status">
+          {stream.loaded
+            ? "Reconnecting to Pal… The chat keeps running on the server."
+            : "Can't reach Pal yet; retrying. Your draft is kept."}
+        </div>
       {/if}
       {#if stream?.retry !== undefined}
         <div class="callout wa" role="status">The model request failed; Pal retries shortly. {stream.retry.error}</div>
@@ -736,8 +1052,16 @@
                 : ""}</span
             ></span
           >
-          <button class="b t sm" onclick={() => api.stop(chat.id)}>Stop</button>
+          <button class="b t sm" disabled={stopping} onclick={stop}>Stop</button>
         </div>
+        {#if stopError !== undefined}
+          <div class="callout er" role="alert">
+            <span class="grow"
+              >Stop didn't reach Pal: {stopError} The run may still be going; press Stop to try again.</span
+            >
+            {@render diagnosticsButton()}
+          </div>
+        {/if}
       {/if}
       {#if (stream?.inbox.length ?? 0) > 0}
         <div class="queue">
@@ -751,23 +1075,41 @@
         </div>
       {/if}
       {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
+      {#if writing.pending !== undefined && !writing.sending}
+        <div class="callout wa" role="alert">
+          <span class="grow"
+            >This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.
+            <span class="mono dim">Request {writing.pending.requestId}</span></span
+          >
+          {@render diagnosticsButton()}
+          <button class="b sm" onclick={retrySaved}>Retry saved send</button>
+        </div>
+        <details class="activity">
+          <summary class="acth" title={`Request ${writing.pending.requestId}`}
+            >Saved message · {writing.pending.body.attachments.length} attached<Icon name="chevR" size={13} /></summary
+          >
+          <pre class="out">{writing.pending.body.text}</pre>
+        </details>
+      {:else if writing.error !== undefined}<div class="callout er" role="alert">{writing.error}</div>{/if}
+      {#if writing.notice !== undefined}<div class="callout ac" role="status">{writing.notice}</div>{/if}
       {#if phone && stream?.running}{@render busySwitch()}{/if}
 
       <div class="cbx" class:oneline={phone}>
-        {#if attachments.length > 0 || uploading > 0}
+        {#if writing.attachments.length > 0 || writing.uploading > 0}
           <div class="chips">
-            {#each attachments as attachment (attachment.id)}
+            {#each writing.attachments as attachment (attachment.id)}
               <span class="chip">
                 <Icon name="file" /><span class="ellipsis">{attachment.name}</span>
                 <button
                   class="chipx"
                   aria-label={`Remove ${attachment.name}`}
-                  onclick={() => (attachments = attachments.filter((kept) => kept.id !== attachment.id))}
+                  onclick={() =>
+                    (writing.attachments = writing.attachments.filter((kept) => kept.id !== attachment.id))}
                   ><Icon name="x" size={12} /></button
                 >
               </span>
             {/each}
-            {#if uploading > 0}<span class="chip plain"
+            {#if writing.uploading > 0}<span class="chip plain"
                 ><span class="ring spin" aria-hidden="true"></span>Uploading…</span
               >{/if}
           </div>
@@ -783,12 +1125,18 @@
               ? "Steer or queue"
               : "Steer the run or queue a follow-up"
             : "Message Pal"}
-          bind:value={draft}
+          maxlength={MAX_DRAFT_CHARS}
+          disabled={writing.blocked || !writing.active}
+          title="Drafts stay in this tab only. Reloading or signing out clears them."
+          bind:value={writing.text}
           onfocus={() => (typing = true)}
           onblur={() => (typing = false)}
           onkeydown={onKey}></textarea>
         <div class="tools">
-          <AddMenu onFiles={upload} />
+          {#if writing.active && !writing.blocked}<AddMenu
+              onFiles={upload}
+              onSchedule={() => (scheduling = true)}
+            />{/if}
           {#if !phone}
             {#if workspace?.mode !== "read-only"}<CommandMode mode={stream?.mode} onChoose={chooseMode} />{/if}
             <WorkspaceMode {workspace} {onNewChat} />
@@ -796,20 +1144,29 @@
             {@render modelControl()}
             {#if stream?.running}{@render busySwitch()}{/if}
           {/if}
-          {#if stream?.running}
-            <button class="b p send busy" onclick={send} disabled={!canSend}>
-              <Icon name={whenBusy === "steer" ? "steer" : "send"} />{whenBusy === "steer" ? "Steer" : "Queue"}
-            </button>
-          {:else}
-            <button class="b p send" aria-label="Send" title="Send" onclick={send} disabled={!canSend}>
-              <Icon name="send" size={phone ? 18 : 15} />
-            </button>
-          {/if}
+          <button
+            class={["b p send", stream?.running && "busy"]}
+            aria-label={stream?.running ? undefined : "Send"}
+            title={stream?.running ? undefined : "Send"}
+            onclick={send}
+            disabled={!canSend}
+          >
+            <Icon
+              name={stream?.running && writing.whenBusy === "steer" ? "steer" : "send"}
+              size={stream?.running ? 16 : phone ? 18 : 15}
+            />{#if stream?.running}{writing.whenBusy === "steer" ? "Steer" : "Queue"}{/if}
+          </button>
         </div>
       </div>
     </div>
   </div>
 </section>
+
+{#if scheduling}
+  {#await import("./ScheduleDialog.svelte") then { default: ScheduleDialog }}
+    <ScheduleDialog chatId={chat.id} draft={writing.text} onClose={() => (scheduling = false)} />
+  {:catch failure}<div class="callout er" role="alert">Couldn't open scheduling: {String(failure)}</div>{/await}
+{/if}
 
 {#if phone && tools}
   <dialog
@@ -1314,6 +1671,7 @@
   .tools {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 2px;
     flex-wrap: wrap;
   }

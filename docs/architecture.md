@@ -56,6 +56,12 @@ already finished. A tool marked replay-safe may run again. One marked unsafe, su
 write, is reported as interrupted and never re-run blindly. A command still waiting for approval asks again,
 because nothing was recorded as started.
 
+Scheduled messages (`src/core/schedules.ts`) are an opt-in timer on top of the same admission. Schedules live in
+Pal's settings table. A due run is first claimed there under the request ID `schedule-<id>-<n>` and then admitted
+like a typed input, so reopening after a crash completes the claimed run rather than repeating it. Trigger times
+are computed separately from authority: a run only admits a message, and what it may do is decided by the chat's
+grants and approvals.
+
 ## Projects and workspaces
 
 - `src/core/projects.ts`: a project is a **managed** folder under the data directory or an **existing** folder on
@@ -65,18 +71,85 @@ because nothing was recorded as started.
 - `src/core/folders.ts`: read-only reference folders, bound to a run when it starts.
 - `src/core/uploads.ts`: device uploads stored under the data directory, up to 25 MiB each.
 
+## Instruction sources
+
+`src/core/instructions.ts` loads `~/.agents/AGENTS.md` from the Pal host account and the actual chat workspace's
+`AGENTS.md` before each model preparation. Global guidance precedes project guidance; deeper instructions apply
+only within their subtree. Core policy and the current user always take precedence. Skills are separate: this
+instruction loader does not discover or eagerly inject `SKILL.md` bodies.
+
+Context shows current source paths, SHA-256 identities, limits and diagnostics. Project-specific source settings use
+revision checks; the global file can be disabled or explicitly changed to an absolute host path, including
+`~/AGENTS.md`. There is no implicit home alias or ancestor/sibling crawl. Disabled resolved paths do not fall back
+to another file. Local, Read-only and Worktree use their actual workspace, not another source checkout.
+
+`instructions_scope` selects up to eight relative directories. File reads/listings/writes/edits stop before execution
+if applicable guidance differs from the last prepared request; the next preparation includes that scoped chain.
+Shell commands cannot be reliably parsed for every affected path: declare nested scopes before using `cd` or
+commands targeting a subtree. This is guidance coordination, not a shell sandbox or filesystem-race guarantee.
+
+Files are UTF-8 regular files without symlinks or hardlinks, at most 8 KiB each. Source context is bounded to 32 KiB,
+32 sources, depth 16, four concurrent inspections and 2,048 entries per source directory; omissions and read failures
+are visible, not represented as applied instructions. Loading never executes code or changes grants. Pi journals the
+prepared section and tool results, preserving the bytes used by an earlier request after source edits or restart.
+
+## Skill sources
+
+`src/core/skills.ts` discovers `~/.agents/skills/<package>/SKILL.md` from the host account and
+`<actual-workspace>/.agents/skills/<package>/SKILL.md`. Context remains available without optional memory tools.
+Its source settings support four absolute global roots and four workspace-relative project roots, enabled/disabled
+per project. No ancestor/sibling discovery, package installation or bundled script execution occurs.
+
+A package starts with bounded YAML frontmatter, followed by its procedure:
+
+```markdown
+---
+name: verify-changes
+description: Use when checking changes in this project.
+---
+Inspect the project's declared checks before running its approved tools.
+```
+
+Names use Unicode NFKC, lowercase and trimmed edges, with a 1–80 character bound before and after normalization.
+A valid project definition overrides its global namesake;
+same-scope duplicates are unavailable, not enumeration-order winners. Disabling a name disables every source for
+that project, with no fallback. Disabling/removing a project root can expose an enabled global definition. Aliases
+of the same global root are deduplicated. Incomplete discovery withholds affected winners because a duplicate or
+project override may be hidden; narrow or repair the enabled roots.
+
+Discovery reads at most 8 KiB of frontmatter per file, validates string names/descriptions and rejects aliases,
+tags, duplicate YAML keys and excessive nesting. Catalogs stop at 128 packages; model metadata is bounded to 16 KiB.
+`skills_search` finds relevant metadata, and `skills_read` reads the chosen current revision or a package-relative
+UTF-8 reference/asset. Code Mode output caps still apply: scripts can store the returned JSON and print its text in
+pages without raising those caps. Binary assets are explicitly unsupported. Files are bounded to 32 KiB; four inspections run
+at once, and each directory is bounded to 2,048 entries. Loading grants no file, shell or MCP authority.
+
+The owner can select up to four skills for a chat, within 32 KiB of selected context. Choices retain source revision
+and full-body SHA-256; edits, deletion and disabling withhold them from the current effective prompt until explicitly
+reselected. Model tool reads remain on demand rather than becoming permanent selected prompt bodies. Context shows
+catalog, source hashes, selected bytes and recent historical tool identities. Settings/selection use independent
+revision checks and retain stale UI drafts. Source snapshots refresh before each request or on explicit reload.
+Pi's positional system patches and Code Mode journal retain exact historical bytes; refreshing does not erase them
+or reread a finished tool call during script recovery.
+
+Both document loaders share `src/core/guidance-files.ts`: confined regular UTF-8 reads, protected-path and retained
+private-inode checks, no source-file symlinks or hardlinks, and stable pre/post-open checks. These checks do not
+claim an atomic filesystem or a hostile-host sandbox.
+
 ## Agent tools
 
 | Namespace | Tools                                                                                 | Source                    |
 | --------- | ------------------------------------------------------------------------------------- | ------------------------- |
 | files     | `files_folders`, `files_list`, `files_read`, `files_find`, `files_search`, `files_write`, `files_edit` | `src/core/files.ts` |
 | shell     | `shell_run`                                                                           | `src/core/execution.ts`   |
+| instructions | `instructions_scope` | `src/core/instructions.ts` |
+| skills | `skills_search`, `skills_read` | `src/core/skills.ts` |
 | memory    | `memory_search`                                                                       | `src/core/memory.ts`      |
 | browser   | `browser_observe`, `browser_act` (only while the owner has handed control over)       | `src/pi/browser-tools.ts` |
 | MCP       | one tool per approved server tool, such as Exa search or Context7 docs                | `src/pi/mcp-tools.ts`     |
 
-The tools share one path policy (`resolveProjectPath`, `isProtected`), which keeps them inside the chat's folders
-and away from Pal's data. Writes check the file's current SHA-256 first. Overlapping workspaces are serialized by
+Workspace file tools share a path policy (`resolveProjectPath`, `isProtected`), which keeps them inside the chat's
+folders and away from Pal's data. Guidance readers separately authorize only their configured document roots. Writes check the file's current SHA-256 first. Overlapping workspaces are serialized by
 `WorkspaceLocks`, and each mutation records a Git baseline first so the Changes panel can show it.
 
 ## Review, search and terminal
@@ -120,6 +193,35 @@ people can create, customize and share.
 The current catalog is compiled into Pal, not a public plug-in SDK or a downloadable package loader. Custom MCP
 servers are today's way to add tools without rebuilding Pal. Extensions never bypass host policy, and in-process
 code requires full application-code trust.
+
+`src/capabilities/contract.ts` is the first internal compiled-capability adapter. The kernel retains authentication,
+one database owner, credentials, grants, approvals, native task/replay policy and release verification. A capability
+supplies a bounded manifest and a factory, not registry access or replacement kernel hooks. Its manifest declares
+identity/version, compatible capability-API range, Code Mode namespace, tool names/replay/output bounds, permissions,
+named precompiled panels and the existing new-chat selection setting. Factories may dispose ephemeral resources after
+durable work stops; failed opens must release their own unfinished acquisitions. Previously opened contributions are
+disposed in reverse order, once, including partial-startup failures.
+
+Memory is composed through `src/capabilities/memory.ts`; `src/capabilities/compiled.ts` is the build-time selection.
+Removing its entry removes its service, native tools and namespace, not saved data or core Context/guidance inspection.
+Unavailable saved defaults remain visible for explicit removal. Existing chats never silently adopt another capability
+version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid
+new-chat defaults are refused before recording provisioning. Existing creation/admission receipts still deduplicate;
+changing another default never silently upgrades a version pin. Unfinished work also blocks startup under a changed
+release or compiled catalog. Request inspection joins additive `pal.capabilities` identity receipts to the unchanged
+`pal.extensions` wire records, keeping older inspectors readable. Historical records without those identities stay
+historical, without invented digests.
+
+The implementation digest binds the manifest to the verified **whole Pal release**, not an independently upgradable
+package. `project.read` is this first adapter's only declared permission; the kernel checks live folder authority around
+every native tool execution, requires Code Mode-only callers and verifies replay declarations. Trusted source can still
+use Node APIs: declarations are not a sandbox or proof of read-only behavior. Effectful adapters require further reviewed
+kernel integration, not a permission string supplied by a skill or manifest.
+
+Copy `src/capabilities/example.ts` for a tiny opt-in bounded echo tool. Add the reviewed definition to the compiled list
+and rebuild; no runtime directory scan or package install occurs. Its new-chat switch and manifest/identity appear in
+Settings; Context inspects request pins. The optional panel declaration references an already compiled named panel,
+not executable or downloaded UI. `test/capabilities.test.ts` exercises the contract and composition boundaries.
 
 - `src/core/extensions.ts`: built-in contributions (files, shell, memory, browser, compact) can be switched for new
   chats. Each chat freezes its selection and the implementation versions it ran with. Compact output is opt-in: in

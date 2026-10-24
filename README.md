@@ -13,6 +13,10 @@ decide how much it may do without asking.
 Runs are durable: a chat keeps going when you close the tab, and a restart resumes interrupted work instead of
 silently repeating it.
 
+Unsent drafts and saved sends stay in this tab's memory: 32 chats, 100,000 characters and 10 files per draft.
+Navigation keeps them; reloading or signing out clears them. If a send was unconfirmed, inspect chat history before
+sending again. **Retry saved send** preserves the original request and destination.
+
 ## Philosophy
 
 **Everything is an extension or a package.** Pal should be a small, dependable core with capabilities you can add,
@@ -43,12 +47,15 @@ and package installer are not available yet. See [extension architecture](docs/a
   owner-approved local programs. Grants are per project, lookups are cached with explicit freshness, and results
   render as source cards.
 - **Review.** The Changes panel shows real Git diffs against a recorded baseline, with reviewed marks, line comments
-  you can send to the composer, and discards bound to the revision you looked at. The Files panel has fast
+  you can copy to the composer, and discards bound to the revision you looked at. Comments remain recoverable until
+  an input containing their unchanged feedback is durably admitted; copying or editing it is not acknowledgement.
+  Previously copied comments without admission receipts are offered again. The Files panel has fast
   [fff](https://github.com/dmtrKovalenko/fff)-powered search.
 - **Human terminal.** A real shell in the browser (node-pty + xterm). Reconnect from your phone and take over
   control.
-- **Context.** Source-linked project memory with corrections and forgetting, pinned chat instructions, and a view of
-  the exact context prepared for the model.
+- **Context.** Source-linked memory, pinned chat instructions and scoped AGENTS.md guidance. Global/project
+  `SKILL.md` procedures load lazily through Code Mode or explicit selection, with source controls, provenance and
+  inspection of the latest retained prepared context.
 - **Browser** (Linux). A per-project Chromium with its own profile, running in a network-less sandbox whose only
   egress is a broker that admits public addresses. You drive it from the panel. The agent may use it only after
   you hand it control.
@@ -77,6 +84,9 @@ The server prints a one-time setup link. Open it, choose an owner passphrase, th
 sign-in, an API key, or an OpenAI-compatible endpoint. Arguments after `pnpm start` go to the server, for example
 `pnpm start --port 8080 --data-dir /srv/pal`. Run `pnpm serve` to start an existing build without rebuilding.
 
+Stop Pal before changing its runtime or dependencies. Unfinished work needs the same implementation bytes;
+keep an intact build for recovery. See [source-installation resume safety](docs/development.md#mutable-installations-and-resume-safety).
+
 Platform notes:
 
 - **macOS:** agent shell commands and Git-backed features (Changes, Worktree chats) need GNU `timeout`.
@@ -90,8 +100,10 @@ To check your host, run `node dist/main.js probe`. It tests SQLite FTS5, fff, Co
 
 ### With Nix
 
-The flake provides the package, a development shell and the full test suite for `x86_64-linux` and
-`aarch64-darwin`:
+The flake targets `x86_64-linux` and `aarch64-darwin`, matching the current Linux host and Apple Silicon Mac.
+Linux has the full packaged checks; macOS has portable, native-process and rendered UI subsets, not yet the
+protected project browser or full release lifecycle. Other architectures are outside the current validation
+scope. See the [platform acceptance matrix](docs/development.md#platform-scope-and-acceptance).
 
 ```sh
 nix run github:valdo766hi/pal            # run Pal

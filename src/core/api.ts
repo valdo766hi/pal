@@ -1,7 +1,8 @@
+import { once } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type ProviderAuthInteraction } from "@earendil-works/pi-ai";
-import { type AgentEvent, watchEvents } from "@earendil-works/pi-durable";
+import { type AgentEvent, type Conversation, watchEvents } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import {
   CHATGPT_PROVIDER,
@@ -11,15 +12,25 @@ import {
   listChatGPTModels,
 } from "../pi/chatgpt.ts";
 import { McpConfigError } from "../pi/mcp.ts";
-import { API_PROVIDERS, CompatibleBody, isApiProvider, ProviderConfigError } from "../pi/providers.ts";
+import { CompatibleBody, isApiProvider, ProviderConfigError } from "../pi/providers.ts";
 import { StdioConfigError, StdioServerBody } from "../pi/mcp-stdio.ts";
 import type { Pal } from "./app.ts";
 import { ApprovalDecision, CommandModeBody } from "./approvals.ts";
+import { helperViews } from "./delegation.ts";
+import { chatDiagnostics, installationDiagnostics } from "./diagnostics.ts";
 import { ExtensionSelection } from "./extensions.ts";
-import { AdmissionStopped, ChatNotFound, ProjectUnavailable, type ChatSummary } from "./chats.ts";
+import {
+  AdmissionStopped,
+  chatConfiguration,
+  ChatNotFound,
+  ConfigurationRevision,
+  ProjectUnavailable,
+  type ChatSummary,
+} from "./chats.ts";
 import { cookie, HttpError, isOwnOrigin, readJson, sendJson } from "./http.ts";
 import { OwnerError, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS } from "./owner.ts";
 import { WorkspaceBusy } from "./execution.ts";
+import { AllowanceChange } from "./working-allowance.ts";
 import { FileAccessError, searchFolder } from "./files.ts";
 import { SearchError } from "./search.ts";
 import { FolderError } from "./projects.ts";
@@ -29,6 +40,7 @@ import { TerminalSize } from "./terminals.ts";
 import { MemoryBody } from "./memory.ts";
 import type { ReleaseRpc } from "./release-rpc.ts";
 import { ReleaseDigest } from "./release-state.ts";
+import type { ScheduleNotice, ScheduleView } from "./schedules.ts";
 
 const WorkspaceId = Type.Optional(Type.String({ minLength: 1, maxLength: 64 }));
 const workspaceQuery = (url: URL) => {
@@ -68,6 +80,7 @@ const ChatModelChoice = Type.Object(
   {
     ...ModelChoice.properties,
     provider: Type.Optional(ProviderId),
+    expected: Type.Optional(ConfigurationRevision),
     // Every Pi thinking level; the chosen model's own support is enforced by clamping below.
     effort: Type.Optional(Type.Enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])),
   },
@@ -101,8 +114,13 @@ const ProgramApproval = Type.Object(
 );
 const KeyBody = Type.Object({ key: Type.String({ maxLength: 4096 }) }, { additionalProperties: false });
 const Toggle = Type.Object({ enabled: Type.Boolean() }, { additionalProperties: false });
+const ModelSetup = Type.Object({ deferred: Type.Boolean() }, { additionalProperties: false });
 const ToolChoice = Type.Object(
   { tools: Type.Array(Type.String({ maxLength: 200 }), { maxItems: 128 }) },
+  { additionalProperties: false },
+);
+const CatalogApproval = Type.Object(
+  { tools: ToolChoice.properties.tools, catalog: Type.String({ pattern: "^[a-f0-9]{64}$" }) },
   { additionalProperties: false },
 );
 const Review = Type.Object({ enable: Type.Boolean() }, { additionalProperties: false });
@@ -127,14 +145,6 @@ const FileComment = Type.Object(
     revision: Type.String({ pattern: "^[a-f0-9]{64}$" }),
     line: Type.Integer({ minimum: 1, maximum: 10_000_000 }),
     body: Type.String({ minLength: 1, maxLength: 4000 }),
-    scope: Type.Optional(ReviewScope),
-    workspace: WorkspaceId,
-  },
-  { additionalProperties: false },
-);
-const CommentsSent = Type.Object(
-  {
-    ids: Type.Array(Type.String({ maxLength: 64 }), { maxItems: 200 }),
     scope: Type.Optional(ReviewScope),
     workspace: WorkspaceId,
   },
@@ -214,16 +224,17 @@ class SignInAttempt {
  * state-changing request must come from Pal's own origin.
  */
 export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<ReleaseRpc, "call">) {
-  const external = publicOrigin === undefined ? undefined : new URL(publicOrigin);
+  const parsedOrigin = publicOrigin === undefined ? undefined : URL.parse(publicOrigin);
+  if (parsedOrigin === null) throw new Error("invalid public origin");
+  const external = parsedOrigin;
   let attempt: SignInAttempt | undefined;
   let listing: { models: ChatGPTModel[] } | { error: string } | undefined;
 
   async function refreshListing(): Promise<void> {
     try {
       const models = await listChatGPTModels(pal.models);
+      // Listing never chooses a default: new chats use a ChatGPT model only after the owner picks one.
       listing = { models };
-      const first = models.find((model) => model.supported);
-      if ((await pal.settings.model()) === undefined && first !== undefined) await pal.settings.setModel(first.slug);
     } catch (error) {
       listing = { error: (error as Error).message };
     }
@@ -267,6 +278,58 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     };
   }
 
+  /** What a scheduled run of this chat would cost and could do, shown before the owner approves a schedule. */
+  async function scheduleNotice(
+    chat: ChatSummary,
+    agent: Awaited<ReturnType<Conversation["agent"]>>,
+  ): Promise<ScheduleNotice> {
+    const mode = await pal.approvals.mode(chat.id);
+    const workspace = await pal.workspaces.info(chat.id);
+    const model = agent.model;
+    const known = model === undefined ? undefined : pal.models.getModel(model.provider, model.modelId);
+    const effort = known === undefined ? "off" : clampThinkingLevel(known, agent.thinkingLevel);
+    const provider =
+      model === undefined || model.provider === CHATGPT_PROVIDER
+        ? { name: "ChatGPT", billing: "Counts against your ChatGPT plan's usage limits." }
+        : ((await pal.providers.list()).find((item) => item.id === model.provider) ?? {
+            name: model.provider,
+            billing: "Billed by this model's provider.",
+          });
+    return {
+      configuration: chatConfiguration(agent),
+      mode,
+      model:
+        model === undefined
+          ? null
+          : {
+              provider: model.provider,
+              providerName: provider.name,
+              modelId: model.modelId,
+              effort,
+            },
+      cost:
+        model === undefined
+          ? "This chat has no model yet. Choose one before scheduling."
+          : `${provider.billing} Each run is one message, but it can make many model requests while it uses tools; Pal can't predict its size.`,
+      effects: [
+        mode === "full"
+          ? "Full access: agent shell commands run on this host without asking, as the Pal host user."
+          : "Ask for approval: each agent shell command waits for you and is declined if nobody answers within 2 minutes.",
+        workspace?.mode === "read-only"
+          ? "Read-only workspace: no file writes or agent shell commands."
+          : "File changes in this chat's workspace happen without asking.",
+        "Internet tools granted to this project can reach outside services without asking.",
+        "If this chat's model or command mode changes, the schedule pauses until you review it again.",
+      ],
+    };
+  }
+
+  async function scheduleViews(schedules: ScheduleView[]) {
+    return Promise.all(
+      schedules.map(async (schedule) => ({ ...schedule, chat: (await pal.chats.get(schedule.chatId))?.title ?? null })),
+    );
+  }
+
   async function signedIn(request: IncomingMessage): Promise<boolean> {
     return pal.owner.authenticate(cookie(request, SESSION_COOKIE));
   }
@@ -306,9 +369,16 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     if (resource === "sign-out" && path.length === 1 && method === "POST") {
       pal.terminals.revoke(cookie(request, SESSION_COOKIE));
       pal.browsers.revoke(cookie(request, SESSION_COOKIE));
+      revokeObservers(cookie(request, SESSION_COOKIE));
       await pal.owner.signOut(cookie(request, SESSION_COOKIE));
       response.setHeader("set-cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
       return send(200, { signedIn: false });
+    }
+
+    if (resource === "model-setup" && path.length === 1 && (method === "GET" || method === "PUT")) {
+      if (method === "PUT")
+        await pal.settings.setModelSetupDeferred(validate(ModelSetup, await readJson(request)).deferred);
+      return send(200, { deferred: await pal.settings.modelSetupDeferred() });
     }
 
     if (resource === "releases") {
@@ -343,6 +413,18 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         return send(202, await releases.call(action, { digest }));
       }
       throw new HttpError(404, "not_found", "no such release operation");
+    }
+
+    if (resource === "diagnostics" && path.length === 1 && method === "GET")
+      return send(200, await installationDiagnostics(pal));
+
+    if (resource === "scheduler" && path.length === 1) {
+      if (method === "PUT") await pal.schedules.setEnabled(validate(Toggle, await readJson(request)).enabled);
+      if (method === "GET" || method === "PUT")
+        return send(200, {
+          enabled: await pal.schedules.enabled(),
+          schedules: await scheduleViews(await pal.schedules.list()),
+        });
     }
 
     if (resource === "extensions" && path.length === 1) {
@@ -458,9 +540,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         }
         if (part === "test" && method === "POST") return send(200, { server: await pal.mcp.test(serverId) });
         if (part === "tools" && method === "PUT") {
-          return send(200, {
-            server: await pal.mcp.approve(serverId, validate(ToolChoice, await readJson(request)).tools),
-          });
+          const body = validate(CatalogApproval, await readJson(request));
+          return send(200, { server: await pal.mcp.approve(serverId, body.tools, body.catalog) });
         }
       }
     }
@@ -580,11 +661,6 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           ),
         });
       }
-      if (path.length === 4 && path[3] === "sent" && method === "POST") {
-        const body = validate(CommentsSent, await readJson(request));
-        await pal.changes.markSent(id, body.ids, body.scope, body.workspace);
-        return send(200, { sent: true });
-      }
       if (path.length === 4 && path[3] !== undefined && method === "DELETE") {
         await pal.changes.uncomment(id, path[3], workspaceQuery(url));
         return send(200, { deleted: true });
@@ -691,6 +767,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         await pal.approvals.setMode(chat.id, validate(CommandModeBody, await readJson(request)).mode);
         return send(200, { chat: await describeChat(chat) });
       }
+      if (action === "diagnostics" && path.length === 3 && method === "GET")
+        return send(200, {
+          installation: await installationDiagnostics(pal),
+          chat: await chatDiagnostics(pal, chat.id, chat.conversationId),
+        });
       if (action === "approvals" && path.length === 3 && method === "GET")
         return send(200, await pal.approvals.view(chat.id));
       if (action === "approvals" && path.length === 4 && path[3] !== undefined && method === "POST") {
@@ -713,17 +794,68 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           model: agent.model?.modelId ?? null,
           provider: agent.model?.provider ?? null,
           effort: model === undefined ? "off" : clampThinkingLevel(model, agent.thinkingLevel),
+          configuration: chatConfiguration(agent),
         });
       }
+      if (action === "schedules") {
+        const [, , , scheduleId, change] = path;
+        if (path.length === 3 && method === "GET")
+          return send(200, {
+            enabled: await pal.schedules.enabled(),
+            notice: await scheduleNotice(chat, await conversation.agent(context)),
+            schedules: await pal.schedules.list(chat.id),
+          });
+        if (path.length === 3 && method === "POST") {
+          const { requestId, ...body } = validate(Keyed, await readJson(request));
+          return send(200, { schedule: await pal.schedules.create(chat.id, requestId, body) });
+        }
+        if (path.length === 5 && scheduleId !== undefined && method === "POST") {
+          if (change === "pause") return send(200, { schedule: await pal.schedules.pause(chat.id, scheduleId) });
+          if (change === "cancel") return send(200, { schedule: await pal.schedules.cancel(chat.id, scheduleId) });
+          if (change === "resume")
+            return send(200, {
+              schedule: await pal.schedules.resume(chat.id, scheduleId, await readJson(request)),
+            });
+        }
+      }
+      if (action === "helpers" && path.length === 3 && method === "GET")
+        return send(200, {
+          helpers: await helperViews(pal.harness, pal.store.storage, chat.conversationId, context),
+        });
       if (action === "extensions" && path.length === 3 && method === "GET")
         return send(200, {
           release: pal.extensions.release,
           selected: chat.extensions,
           requests: await pal.extensions.pins(chat.conversationId, pal.harness, context),
         });
+      if (action === "instructions" && path.length === 3) {
+        if (method === "PUT") await pal.instructions.configure(chat.conversationId, await readJson(request));
+        if (method === "GET" || method === "PUT")
+          return send(200, await pal.instructions.inspect(chat.conversationId, context));
+      }
+      if (action === "skills" && path.length === 3) {
+        if (method === "PUT") await pal.skills.configure(chat.conversationId, await readJson(request));
+        if (method === "GET" || method === "PUT")
+          return send(200, await pal.skills.inspect(chat.conversationId, context));
+      }
+      if (action === "skills" && path.length === 4 && path[3] === "selection" && method === "PUT") {
+        await pal.skills.select(chat.conversationId, await readJson(request), context);
+        return send(200, await pal.skills.inspect(chat.conversationId, context));
+      }
       if (action === "context" && path.length === 3 && method === "GET")
         return send(200, await pal.context.inspect(chat, context));
       if (action === "context" && path.length === 4) {
+        if (path[3] === "working-state" && (method === "GET" || method === "PUT")) {
+          if (method === "PUT") return send(200, await pal.working.setGoal(chat, await readJson(request), context));
+          return send(200, await pal.working.inspect(chat, context));
+        }
+        if (path[3] === "working-allowance" && method === "PUT")
+          return send(
+            200,
+            await pal.working.configureAllowance(chat, validate(AllowanceChange, await readJson(request)), context),
+          );
+        if (path[3] === "working-review" && method === "POST")
+          return send(200, await pal.working.acceptChecks(chat, await readJson(request), context));
         if (path[3] === "instructions" && method === "PUT") {
           await pal.context.pin(chat, await readJson(request), context);
           return send(200, { saved: true });
@@ -745,22 +877,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         const { requestId, ...body } = validate(Keyed, await readJson(request));
         // A chat on a disabled provider or a removed model stops here; it is never sent anywhere else instead.
         const chosen = (await conversation.agent(context)).model;
-        if (chosen !== undefined && isApiProvider(chosen.provider)) {
-          if (!(await pal.providers.usable(chosen.provider))) {
-            throw new HttpError(
-              409,
-              "provider_unavailable",
-              `${API_PROVIDERS[chosen.provider].name} isn't enabled. Enable it in Settings → Models or choose another model.`,
-            );
-          }
-          if (pal.models.getModel(chosen.provider, chosen.modelId) === undefined) {
-            throw new HttpError(
-              409,
-              "model_unavailable",
-              `${chosen.modelId} is no longer offered; choose another model.`,
-            );
-          }
-        }
+        const problem = chosen === undefined ? undefined : await pal.providers.problem(chosen);
+        if (problem !== undefined) throw new HttpError(409, problem.code, problem.message);
         return send(200, { admission: await pal.chats.submit(chat.id, requestId, body, context) });
       }
       if (action === "stop" && method === "POST") {
@@ -772,39 +890,93 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           model,
           provider = CHATGPT_PROVIDER,
           effort: requested,
+          expected,
         } = validate(ChatModelChoice, await readJson(request));
         const known = await chosenModel(provider, model);
         const effort = clampThinkingLevel(known, requested ?? (await conversation.agent(context)).thinkingLevel);
-        await conversation.configure({ model: { provider, modelId: model }, thinkingLevel: effort }, context);
-        return send(200, { chat: await describeChat(chat), model, provider, effort });
+        const configuration = await pal.chats.configure(
+          chat.id,
+          {
+            model: { provider, modelId: model },
+            thinkingLevel: effort,
+            ...(expected === undefined ? {} : { expected }),
+          },
+          context,
+        );
+        return send(200, { chat: await describeChat(chat), model, provider, effort, configuration });
       }
-      if (action === "events" && method === "GET") return observe(request, response, chat.id, chat.conversationId);
+      if (action === "events" && method === "GET")
+        return observe(response, chat.id, chat.conversationId, cookie(request, SESSION_COOKIE));
     }
     throw new HttpError(404, "not_found", "no such API route");
   }
 
+  /** Live event streams by their end function, each bound to the owner session that opened it. */
+  const observers = new Map<(revoked: boolean) => void, string | undefined>();
+  /** Sign-out revokes this session's event streams like its terminals and browser views. */
+  function revokeObservers(token: string | undefined) {
+    for (const [end, owner] of observers) if (owner === token) end(true);
+  }
+
   /**
-   * Server-sent events: the conversation's snapshot, then one event batch per commit until the client leaves. The
-   * chat's command approvals arrive as whole `approvals` views, first with the snapshot and again on every change.
+   * Server-sent events: the conversation's snapshot, then one event batch per commit until the client leaves, the
+   * owner session ends or expires, or the stream closes. The chat's command approvals arrive as whole `approvals`
+   * views, first with the snapshot and again on every change. Cleanup is registered before the first write, and a
+   * write blocked by backpressure also ends when the stream does, so a vanished client never holds the handler.
    */
   async function observe(
-    request: IncomingMessage,
     response: ServerResponse,
     chatId: string,
     conversationId: Parameters<typeof watchEvents>[1],
+    token: string | undefined,
   ): Promise<void> {
+    const expiry = await pal.owner.sessionExpiry(token);
+    if (expiry === undefined) throw new HttpError(401, "signed_out", "sign in to Pal first");
+    const scope = new AbortController();
+    // What `end` must release, filled in as the stream starts.
+    const live: {
+      stream?: Awaited<ReturnType<typeof watchEvents>>;
+      heartbeat?: ReturnType<typeof setInterval>;
+      unwatch?: () => void;
+    } = {};
+    // Idempotent: revocation and expiry drop anything still buffered; a finished stream flushes it.
+    const end = (revoked: boolean) => {
+      if (scope.signal.aborted) return;
+      scope.abort();
+      observers.delete(end);
+      clearTimeout(expiryTimer);
+      clearInterval(live.heartbeat);
+      live.unwatch?.();
+      void live.stream?.stop();
+      if (revoked) response.destroy();
+      else if (!response.writableEnded) response.end();
+    };
+    const expiryTimer = setTimeout(() => end(true), Math.min(Math.max(0, expiry - Date.now()), 2 ** 31 - 1));
+    expiryTimer.unref();
+    observers.set(end, token);
+    // The response closes when the connection does, whether or not the request body was ever read.
+    response.once("close", () => end(true));
+    response.once("error", () => end(true));
+
     const stream = await watchEvents(pal.harness, conversationId, context);
+    live.stream = stream;
+    if (scope.signal.aborted) {
+      void stream.stop();
+      return;
+    }
     response.writeHead(200, {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-store",
       "x-accel-buffering": "no",
     });
     const write = async (event: string, data: unknown) => {
+      if (scope.signal.aborted) return;
       if (!response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)) {
-        await new Promise((resolve) => response.once("drain", resolve));
+        await once(response, "drain", { signal: scope.signal }).catch(() => undefined);
       }
     };
     await write("snapshot", stream.snapshot);
+    if (scope.signal.aborted) return;
     // Views are written in order; a change during a write is folded into the next one.
     let approvals: Promise<void> = Promise.resolve();
     let dirty = false;
@@ -814,39 +986,40 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       approvals = approvals.then(async () => {
         dirty = false;
         try {
-          if (!response.writableEnded) await write("approvals", await pal.approvals.view(chatId));
+          if (!scope.signal.aborted) await write("approvals", await pal.approvals.view(chatId));
         } catch {
           // A removed chat or a closed response ends the view; the event stream closes on its own.
         }
       });
     };
-    const unwatch = pal.approvals.watch(chatId, sendApprovals);
+    live.unwatch = pal.approvals.watch(chatId, sendApprovals);
     sendApprovals();
-    const heartbeat = setInterval(() => response.write(": keep-alive\n\n"), HEARTBEAT_MS);
+    // A keep-alive is pointless while output is already waiting to drain.
+    live.heartbeat = setInterval(() => {
+      if (!scope.signal.aborted && !response.writableNeedDrain) response.write(": keep-alive\n\n");
+    }, HEARTBEAT_MS);
     stream.start(async (events: readonly AgentEvent[]) => {
       // An overflowed watch replaces its undelivered batches with a snapshot, which the client applies as a reset.
       for (const event of events) await write(event.type === "snapshot" ? "snapshot" : "event", event);
     });
-    const end = () => {
-      clearInterval(heartbeat);
-      unwatch();
-      void stream.stop();
-    };
-    request.once("close", end);
-    void stream.closed.then(() => {
-      end();
-      response.end();
-    });
+    void stream.closed.then(() => end(false));
   }
 
+  const unavailable = new HttpError(
+    503,
+    "runtime_unavailable",
+    "Pal's durable runtime is unavailable. Restart to reconcile committed work.",
+  );
   return async (request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> => {
     try {
+      if (pal.status !== "ready") throw unavailable;
       await route(request, response, url);
     } catch (error) {
-      const [status, code] = classify(error);
-      if (status >= 500) console.error(error);
+      const failure = pal.status === "ready" ? error : unavailable;
+      const [status, code] = classify(failure);
+      if (status >= 500 && failure !== unavailable) console.error(failure);
       if (!response.headersSent) {
-        sendJson(request, response, status, { error: code, message: (error as Error).message });
+        sendJson(request, response, status, { error: code, message: (failure as Error).message });
       } else {
         response.end();
       }

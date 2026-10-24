@@ -338,6 +338,22 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     },
   },
+  {
+    version: 21,
+    name: "feedback_admission_receipts",
+    up: async (transaction) => {
+      // Historical sent_at meant copied into a composer, not durably admitted.
+      await transaction.exec("ALTER TABLE pal_change_comments ADD COLUMN submission_id INTEGER");
+    },
+  },
+  {
+    version: 22,
+    name: "working_execution_allowance_compatibility",
+    // Older builds must refuse the store rather than silently ignore its durable execution limits.
+    up: async (transaction) => {
+      await transaction.exec("SELECT 1");
+    },
+  },
 ];
 
 /**

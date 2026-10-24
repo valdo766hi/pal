@@ -1,10 +1,11 @@
-import { access, mkdir, mkdtemp, readFile, realpath, rename, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { McpClient } from "@earendil-works/pi-mcp";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkStdioAuth, decodeStdio, StdioPrograms, stdioDigest, type StdioAuth } from "../src/pi/mcp-stdio.ts";
 import { STDIO_FIXTURE } from "./fixtures/stdio-server.ts";
+import { running } from "./fixtures/process.ts";
 
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
@@ -44,16 +45,6 @@ async function inspect(client: McpClient, mode = "echo") {
     env: Record<string, string>;
   };
 }
-async function running(pid: number) {
-  try {
-    process.kill(pid, 0);
-    return !/^\d+ \(.*\) [ZX]/.test(await readFile(`/proc/${pid}/stat`, "utf8"));
-  } catch (error) {
-    if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) return false;
-    throw error;
-  }
-}
-
 describe("approved local MCP programs", () => {
   it("requires the exact command/arguments/cwd/environment approval, with no anonymous key fallback", async () => {
     const fixture = await setup({ kind: "env", variable: "LOCAL_TOKEN" });
@@ -78,13 +69,29 @@ describe("approved local MCP programs", () => {
   it("uses the explicit cwd and a private temporary home with only the dedicated encrypted-key slot", async () => {
     const fixture = await setup({ kind: "env", variable: "LOCAL_TOKEN" });
     fixture.approve();
-    const prior = process.env.OPENAI_API_KEY;
+    const prior = {
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      __CF_USER_TEXT_ENCODING: process.env.__CF_USER_TEXT_ENCODING,
+    };
+    const uid = process.getuid?.();
+    if (uid === undefined) throw new Error("native MCP controls require a POSIX user ID");
+    const encodingCanary = `0x${uid.toString(16)}:0xA11CE:0xBADC0DE`;
     process.env.OPENAI_API_KEY = "fixture-ambient-must-not-leak";
+    process.env.__CF_USER_TEXT_ENCODING = encodingCanary;
     try {
       const client = await fixture.connect("fixture-stdio-key");
       const info = await inspect(client);
       expect(info.cwd).toBe(fixture.cwd);
-      expect(info.env).toEqual({
+      const env = { ...info.env };
+      // CoreFoundation adds numeric locale metadata itself, not the caller's environment.
+      if (process.platform === "darwin" && env.__CF_USER_TEXT_ENCODING !== undefined) {
+        expect(env.__CF_USER_TEXT_ENCODING.split(":").slice(1).map(Number)).not.toEqual([0xa11ce, 0xbadc0de]);
+        expect(env.__CF_USER_TEXT_ENCODING).toMatch(
+          new RegExp(`^0x${uid.toString(16)}:(?:0x[\\da-f]+|\\d+):(?:0x[\\da-f]+|\\d+)$`, "i"),
+        );
+        delete env.__CF_USER_TEXT_ENCODING;
+      }
+      expect(env).toEqual({
         HOME: info.home,
         TMPDIR: info.home,
         PATH: dirname(fixture.program.command),
@@ -103,8 +110,10 @@ describe("approved local MCP programs", () => {
         )
         .toBe(false);
     } finally {
-      if (prior === undefined) delete process.env.OPENAI_API_KEY;
-      else process.env.OPENAI_API_KEY = prior;
+      for (const [name, value] of Object.entries(prior)) {
+        if (value === undefined) Reflect.deleteProperty(process.env, name);
+        else process.env[name] = value;
+      }
     }
   });
 
