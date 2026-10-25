@@ -1,0 +1,61 @@
+---
+name: Security
+
+"on":
+  push:
+    branches: [main, development]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: Trivy and Gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+          enable_kvm: false
+      - name: Scan dependencies, configuration and Git history
+        id: scan
+        continue-on-error: true
+        env:
+          NIXPKGS: github:NixOS/nixpkgs/26f4107e47e3ad0ffd0db220469ba83b6f6d96e8
+          REPORT_DIR: ${{ runner.temp }}/security
+        run: |
+          nix shell "$NIXPKGS#trivy" "$NIXPKGS#gitleaks" "$NIXPKGS#nodejs_24" \
+            -c bash scripts/security-scan.sh "$REPORT_DIR"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: security-report
+          path: ${{ runner.temp }}/security/report.json
+          retention-days: 7
+          if-no-files-found: error
+      - name: Enforce scan results
+        if: always() && steps.scan.outcome != 'success'
+        run: exit 1
+
+  comment:
+    needs: scan
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      actions: read
+      pull-requests: write
+    uses: ./.github/workflows/security-comment.yml
+    with:
+      run-id: ${{ github.run_id }}

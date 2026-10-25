@@ -1,0 +1,175 @@
+---
+name: Security comment
+
+# Fork reports need write access; no PR code is checked out or executed.
+"on": # zizmor: ignore[dangerous-triggers]
+  workflow_call:
+    inputs:
+      run-id:
+        required: true
+        type: string
+  workflow_run:
+    workflows: [Security]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: >-
+    security-comment-${{ github.event.pull_request.head.repo.id ||
+    github.event.workflow_run.head_repository.id }}-${{ github.head_ref ||
+    github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name !=
+      github.repository &&
+      github.event.workflow_run.conclusion != 'cancelled')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        continue-on-error: true
+        with:
+          name: security-report
+          path: ${{ runner.temp }}/security-report
+          run-id: ${{ inputs.run-id || github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Update the security report
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          RUN_ID: ${{ inputs.run-id || github.event.workflow_run.id }}
+          REPORT_PATH: ${{ runner.temp }}/security-report/report.json
+        with:
+          script: |
+            const assert = require('node:assert/strict');
+            const { readFileSync, statSync } = require('node:fs');
+            const runId = Number(process.env.RUN_ID);
+            assert(Number.isSafeInteger(runId) && runId > 0);
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              ...context.repo, run_id: runId,
+            });
+            if (run.event !== 'pull_request' ||
+                run.conclusion === 'cancelled') return;
+            assert(/^[a-f0-9]{40}$/.test(run.head_sha));
+            assert(/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/actions\/runs\/\d+$/
+              .test(run.html_url));
+            const marker = '<!-- pal-security-report -->';
+            function scan(value, width) {
+              assert(value && typeof value === 'object');
+              assert(Number.isSafeInteger(value.exitCode) &&
+                value.exitCode >= 0);
+              assert(Array.isArray(value.findings));
+              assert(value.findings.every(row => Array.isArray(row) &&
+                row.length === width && row.every(v => typeof v === 'string')));
+              assert(value.exitCode !== 0 || value.findings.length === 0);
+              assert(value.exitCode !== 10 || value.findings.length > 0);
+              return value;
+            }
+            let report;
+            try {
+              assert(statSync(process.env.REPORT_PATH).size <= 10 * 1024 ** 2);
+              const input = JSON.parse(
+                readFileSync(process.env.REPORT_PATH, 'utf8'),
+              );
+              report = {
+                trivy: scan(input.trivy, 6),
+                gitleaks: scan(input.gitleaks, 3),
+              };
+            } catch {
+              core.setFailed('Security report is missing or invalid');
+              report = {
+                trivy: { exitCode: 2, findings: [] },
+                gitleaks: { exitCode: 2, findings: [] },
+              };
+            }
+            function cell(value) {
+              return value.replace(/[&<>|`@\\[\]()!*_#~\r\n]/g,
+                c => `&#${c.charCodeAt(0)};`).slice(0, 180);
+            }
+            function table(headers, rows, budget = 28000) {
+              const line = row => `| ${row.map(cell).join(' | ')} |\n`;
+              let result = line(headers) + line(headers.map(() => '---'));
+              let shown = 0;
+              for (const row of rows) {
+                const next = line(row);
+                if (Buffer.byteLength(result + next) > budget) break;
+                result += next;
+                shown++;
+              }
+              if (shown < rows.length) {
+                result += `\nShowing ${shown} of ${rows.length} findings ` +
+                  '(GitHub comment size limit).\n';
+              }
+              return result;
+            }
+            function status(result) {
+              if (result.exitCode === 0) return 'Passed';
+              if (result.exitCode === 10) return 'Findings';
+              return `Scan error (exit ${result.exitCode})`;
+            }
+            let body = `${marker}\n### Security scan\n\n` + table(
+              ['Scanner', 'Result', 'Findings'],
+              [['Trivy', status(report.trivy),
+                String(report.trivy.findings.length)],
+               ['Gitleaks', status(report.gitleaks),
+                String(report.gitleaks.findings.length)]],
+            ) + `\nCommit \`${run.head_sha.slice(0, 7)}\` · ` +
+              `[Scan run](${run.html_url})\n\n` +
+              'Scope: all Trivy severities and Git history. ' +
+              'Secret values are omitted.\n';
+            if (report.trivy.findings.length) {
+              body += '\n#### Trivy findings\n\n' + table(
+                ['Severity', 'ID', 'Package / check',
+                 'Installed', 'Fixed', 'File'], report.trivy.findings,
+              );
+            }
+            if (report.gitleaks.findings.length) {
+              body += '\n#### Gitleaks findings\n\n' + table(
+                ['Rule', 'Location', 'Commit'], report.gitleaks.findings,
+              );
+            }
+            const pulls = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              { ...context.repo, commit_sha: run.head_sha, per_page: 100 },
+            );
+            for (const candidate of pulls) {
+              const { data: pr } = await github.rest.pulls.get({
+                ...context.repo, pull_number: candidate.number,
+              });
+              if (pr.state !== 'open' || pr.head.sha !== run.head_sha ||
+                  pr.head.repo?.id !== run.head_repository.id) continue;
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                { ...context.repo, issue_number: pr.number, per_page: 100 },
+              );
+              const existing = comments.find(c =>
+                c.user?.login === 'github-actions[bot]' &&
+                c.body?.startsWith(marker));
+              const previous = existing?.body?.match(
+                /<!-- pal-security-run:(\d+):(\d+) -->/,
+              );
+              if (previous && (Number(previous[1]) > run.id ||
+                  (Number(previous[1]) === run.id &&
+                  Number(previous[2]) > run.run_attempt))) continue;
+              const update = {
+                ...context.repo,
+                body: body + `\n<!-- pal-security-run:${run.id}:` +
+                  `${run.run_attempt} -->`,
+              };
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  ...update, comment_id: existing.id,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  ...update, issue_number: pr.number,
+                });
+              }
+            }
