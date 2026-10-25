@@ -1,0 +1,84 @@
+---
+name: Security comment
+
+# Fork comments require write access; only default-branch code runs.
+"on": # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [Security]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: >-
+    security-comment-${{ github.event.workflow_run.head_repository.id
+    }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: security-report
+          path: ${{ runner.temp }}/security-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Update the security report
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          REPORT_PATH: ${{ runner.temp }}/security-report/report.json
+        with:
+          script: |
+            const { readFileSync, statSync } = require('node:fs');
+            const script =
+              `${process.env.GITHUB_WORKSPACE}/scripts/security-report.ts`;
+            const { formatReport, commentUpdate } = await import(script);
+            const run = context.payload.workflow_run;
+            if (statSync(process.env.REPORT_PATH).size > 10 * 1024 * 1024) {
+              throw new Error('Security report exceeds the size limit');
+            }
+            const report = JSON.parse(
+              readFileSync(process.env.REPORT_PATH, 'utf8'),
+            );
+            const body = formatReport(report, run.head_sha, run.html_url);
+            const pulls = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              { ...context.repo, commit_sha: run.head_sha, per_page: 100 },
+            );
+            for (const candidate of pulls) {
+              const { data: pr } = await github.rest.pulls.get({
+                ...context.repo, pull_number: candidate.number,
+              });
+              if (pr.state !== 'open' || pr.head.sha !== run.head_sha ||
+                  pr.head.repo?.id !== run.head_repository.id) continue;
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                { ...context.repo, issue_number: pr.number, per_page: 100 },
+              );
+              const update = commentUpdate(
+                comments, body, run.id, run.run_attempt,
+              );
+              if (!update) continue;
+              if (update.comment_id) {
+                await github.rest.issues.updateComment({
+                  ...context.repo, ...update,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: pr.number, ...update,
+                });
+              }
+            }
