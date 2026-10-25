@@ -76,6 +76,8 @@ let
         (root + "/eslint.config.js")
         (root + "/.prettierrc.json")
         (root + "/.prettierignore")
+        (root + "/.github/workflows/security.yml")
+        (root + "/.github/workflows/security-comment.yml")
       ]
     );
   };

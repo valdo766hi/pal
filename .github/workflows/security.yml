@@ -47,3 +47,15 @@ jobs:
       - name: Enforce scan results
         if: always() && steps.scan.outcome != 'success'
         run: exit 1
+
+  comment:
+    needs: scan
+    if: >-
+      always() && github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      actions: read
+      pull-requests: write
+    uses: ./.github/workflows/security-comment.yml
+    with:
+      run-id: ${{ github.run_id }}
