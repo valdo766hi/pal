@@ -31,7 +31,7 @@ function fixture(os = "linux") {
   const packagePath = (digit: string) => `/nix/store/${digit.repeat(32)}-pal-0.0.0`;
   const samples = <T>(sample: T) => Array.from({ length: 7 }, () => structuredClone(sample));
   const startup = (digit: string, readyMs: number) => ({
-    format: 2,
+    format: 3,
     scenario: "provider-unconfigured-http-startup",
     host: structuredClone(host),
     identity: {
@@ -39,6 +39,7 @@ function fixture(os = "linux") {
       release: createHash("sha256").update(packagePath(digit)).digest("hex"),
     },
     install: { narBytes: 110 * MiB, closureNarBytes: 1.5 * GiB },
+    firstLaunch: { readyMs: readyMs * 3, rssBytes: 125 * MiB },
     samples: samples({ readyMs, rssBytes: 125 * MiB }),
   });
   const activation = (capability: string) => ({
@@ -125,6 +126,30 @@ describe("performance regression budgets", () => {
     expect(result.checks).toContainEqual(expect.objectContaining({ metric: "startup.readyMs.p95", passed: false }));
   });
 
+  it("holds the first launch to the startup deadline apart from the sample percentiles", () => {
+    const cold = fixture().core;
+    cold["startup-candidate"].firstLaunch.readyMs = 1900;
+    const result = checkPerformance("core", cold);
+    expect(result.passed).toBe(true);
+    expect(result.checks).toContainEqual(
+      expect.objectContaining({ metric: "startup.firstLaunch.readyMs", observed: 1900, maximum: 5000, passed: true }),
+    );
+    expect(result.checks).toContainEqual(expect.objectContaining({ metric: "startup.readyMs.p95", observed: 420 }));
+    const stuck = fixture().core;
+    stuck["startup-candidate"].firstLaunch.readyMs = 5001;
+    expect(checkPerformance("core", stuck).checks).toContainEqual(
+      expect.objectContaining({ metric: "startup.firstLaunch.readyMs", passed: false }),
+    );
+    for (const report of ["startup-baseline", "startup-candidate"] as const) {
+      const missing: Record<string, Record<string, unknown>> = fixture().core;
+      delete missing[report]?.firstLaunch;
+      expect(() => checkPerformance("core", missing), report).toThrow();
+      const invalid = fixture().core;
+      invalid[report].firstLaunch.rssBytes = 0.5;
+      expect(() => checkPerformance("core", invalid), report).toThrow();
+    }
+  });
+
   it("rejects missing reports and fewer than seven samples", () => {
     const data: Record<string, unknown> = fixture().core;
     delete data["activation-search"];
@@ -138,9 +163,11 @@ describe("performance regression budgets", () => {
     const data = fixture().core;
     for (const sample of data["startup-candidate"].samples) sample.rssBytes = NaN;
     expect(() => checkPerformance("core", data)).toThrow();
-    const old = fixture().core;
-    old["startup-baseline"].format = 1;
-    expect(() => checkPerformance("core", old)).toThrow();
+    for (const format of [1, 2]) {
+      const old = fixture().core;
+      old["startup-baseline"].format = format;
+      expect(() => checkPerformance("core", old)).toThrow();
+    }
   });
 
   it("rejects unsupported profiles and fractional byte counts", () => {
