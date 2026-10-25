@@ -22,9 +22,40 @@
       forSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
     {
-      packages = forSystems (pkgs: {
-        default = pkgs.callPackage ./nix/package.nix { pkgsPath = pkgs.path; };
-      });
+      packages = forSystems (
+        pkgs:
+        let
+          pal = pkgs.callPackage ./nix/package.nix { pkgsPath = pkgs.path; };
+          ui = pkgs.callPackage ./nix/ui-fixture.nix {
+            tests = pkgs.callPackage ./nix/tests.nix { inherit pal; };
+          };
+          startupBenchmarkSource = pkgs.lib.fileset.toSource {
+            root = ./scripts;
+            fileset = pkgs.lib.fileset.unions [
+              ./scripts/benchmark-startup.ts
+              ./scripts/benchmark-startup-observer.mjs
+            ];
+          };
+        in
+        {
+          default = pal;
+          ui-check = pkgs.callPackage ./nix/ui-check.nix { inherit ui; };
+          native-check = pkgs.callPackage ./nix/native-check.nix { inherit ui pal; };
+          transcript-benchmark = pkgs.callPackage ./nix/transcript-benchmark.nix { inherit ui; };
+          mcp-benchmark = pkgs.callPackage ./nix/mcp-benchmark.nix { inherit ui; };
+          activation-benchmark = pkgs.callPackage ./nix/activation-benchmark.nix { inherit ui pal; };
+          performance-check = pkgs.callPackage ./nix/performance-check.nix { };
+          evaluate = pkgs.callPackage ./nix/evaluate.nix { inherit ui; };
+          startup-benchmark = pkgs.writeShellApplication {
+            name = "pal-benchmark-startup";
+            runtimeInputs = [
+              pkgs.nodejs_24
+              pkgs.nix
+            ];
+            text = ''exec node ${startupBenchmarkSource}/benchmark-startup.ts "$@"'';
+          };
+        }
+      );
 
       apps = forSystems (pkgs: {
         default = {
@@ -43,6 +74,8 @@
           package = pal;
           smoke = pkgs.callPackage ./nix/smoke.nix { inherit pal; };
           inherit tests;
+          portable = tests.override { portable = true; };
+          evaluation = pkgs.callPackage ./nix/evaluation.nix { };
         }
         # Chromium's macOS sandbox cannot start inside Nix's darwin build sandbox, and disabling it is not an option.
         // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {

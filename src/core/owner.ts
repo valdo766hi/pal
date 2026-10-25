@@ -28,6 +28,7 @@ export class Owner {
   /** Shown on the terminal at startup while no owner exists; valid until used or the process stops. */
   readonly setupToken: string = randomBytes(24).toString("base64url");
   #failures: number[] = [];
+  #pending = 0;
 
   constructor(database: SqliteDatabase, now: () => number = Date.now) {
     this.#database = database;
@@ -57,13 +58,19 @@ export class Owner {
   async signIn(passphrase: string): Promise<string> {
     const now = this.#now();
     this.#failures = this.#failures.filter((at) => now - at < FAILURE_WINDOW_MS);
-    if (this.#failures.length >= MAX_FAILURES) throw new OwnerError("throttled", "too many attempts; try again later");
-    const row = await this.#database.get<{ passphrase: string }>("SELECT passphrase FROM pal_owner");
-    if (row === undefined || !(await verifyPassphrase(passphrase, row.passphrase))) {
-      this.#failures.push(now);
-      throw new OwnerError("wrong_passphrase", "that passphrase is not correct");
+    if (this.#failures.length + this.#pending >= MAX_FAILURES)
+      throw new OwnerError("throttled", "too many attempts; try again later");
+    this.#pending++;
+    try {
+      const row = await this.#database.get<{ passphrase: string }>("SELECT passphrase FROM pal_owner");
+      if (row === undefined || !(await verifyPassphrase(passphrase, row.passphrase))) {
+        this.#failures.push(this.#now());
+        throw new OwnerError("wrong_passphrase", "that passphrase is not correct");
+      }
+      return await this.#startSession();
+    } finally {
+      this.#pending--;
     }
-    return this.#startSession();
   }
 
   /** Whether a cookie's token is a live session. */

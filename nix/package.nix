@@ -26,6 +26,7 @@
 }:
 let
   root = sourceRoot;
+  nativeLock = import (root + "/nix/release-lock.nix") { inherit stdenv sourceRoot; };
   # Chromium must match the pinned Playwright client.
   browsers = playwright-driver.browsers.override {
     withChromium = false;
@@ -69,6 +70,7 @@ let
         (root + "/devenv.nix")
         (root + "/.envrc")
         (root + "/vitest.config.ts")
+        (root + "/vitest.portable.config.ts")
         (root + "/vitest.e2e.config.ts")
         (root + "/vitest.feasibility.config.ts")
         (root + "/eslint.config.js")
@@ -77,7 +79,10 @@ let
       ]
     );
   };
-  releaseEnv = lib.optionalAttrs stdenv.hostPlatform.isLinux {
+  releaseEnv = {
+    PAL_RELEASE_LOCK = lib.getExe nativeLock;
+  }
+  // lib.optionalAttrs stdenv.hostPlatform.isLinux {
     PAL_NIX = lib.getExe nix;
     PAL_FLOCK = "${util-linux}/bin/flock";
   };
@@ -108,7 +113,7 @@ stdenv.mkDerivation (finalAttrs: {
     };
     pnpm = pnpm_11;
     fetcherVersion = 4;
-    hash = "sha256-NGbVP5zcg1B/vr0W45m/CawFW1PbutTGPNKKCMHnXBs=";
+    hash = "sha256-M6edxwWiErXj/N2xQ5ni4McRyK1Rj2NFJav05f67kjY=";
   };
 
   nativeBuildInputs = [
@@ -156,7 +161,12 @@ stdenv.mkDerivation (finalAttrs: {
 
   passthru = {
     inherit (finalAttrs) pnpmDeps;
-    inherit buildNodePty browserEnv releaseEnv;
+    inherit
+      buildNodePty
+      browserEnv
+      releaseEnv
+      nativeLock
+      ;
   };
 
   meta = {

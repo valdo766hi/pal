@@ -118,7 +118,7 @@
   }
   /* Sprites differ in size; each stands on the same floor. */
   .stage {
-    height: 60px;
+    height: 64px;
     display: flex;
     align-items: flex-end;
     justify-content: center;

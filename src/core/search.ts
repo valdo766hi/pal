@@ -1,8 +1,10 @@
 import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { FileFinder } from "@ff-labs/fff-node";
-import { isProtected } from "./files.ts";
+import type { GrepCursor } from "@ff-labs/fff-node";
+import { NativeFinder, type Finder, type FinderFactory } from "./native-finder.ts";
+import { FileAccessError, isProtected, readFileSnapshot, resolveProjectPath } from "./files.ts";
+import type { PrivateFiles } from "./file-policy.ts";
 
 const MAX_FINDERS = 3;
 const IDLE_MS = 5 * 60_000;
@@ -11,6 +13,8 @@ const WATCH_WAIT_MS = 1_000;
 const WATCH_NOT_READY = "Failed to subscribe: File system watcher is not ready";
 const PAGE = 50;
 const LINE_CHARS = 300;
+const QUERY_MS = 2_000;
+const MAX_SNIPPET_BYTES = 16 * 1024;
 
 export type SearchMode = "files" | "text" | "regex";
 export type SearchHit = {
@@ -34,7 +38,7 @@ export type SearchResults = {
 export class SearchError extends Error {}
 
 type Index = {
-  finder: FileFinder;
+  finder: Finder;
   used: number;
   scanned: boolean;
   rescan: boolean;
@@ -49,11 +53,20 @@ type Index = {
  */
 export class ProjectSearch {
   readonly #deny: readonly string[];
+  readonly #privateFiles: PrivateFiles;
   readonly #indexes = new Map<string, Index>();
   readonly #sweep: NodeJS.Timeout;
+  readonly #create: FinderFactory;
+  readonly #retiring = new Set<Promise<void>>();
+  readonly #pending = new Set<{ root: string; released: boolean }>();
+  #queue = Promise.resolve();
+  #stopped = false;
+  #closing: Promise<void> | undefined;
 
-  constructor(deny: readonly string[]) {
+  constructor(deny: readonly string[], privateFiles: PrivateFiles, create: FinderFactory = NativeFinder.open) {
     this.#deny = deny;
+    this.#privateFiles = privateFiles;
+    this.#create = create;
     this.#sweep = setInterval(() => this.reclaim(Date.now() - IDLE_MS), 60_000).unref();
   }
 
@@ -67,52 +80,93 @@ export class ProjectSearch {
       return !between.startsWith("..") && !isAbsolute(between) && !isProtected(this.#deny, root, target);
     };
     if (mode === "files") {
-      const found = index.finder.fileSearch(query, { pageSize: PAGE });
+      const found = await index.finder.fileSearch(query, { pageSize: PAGE });
       if (!found.ok) throw new SearchError(found.error);
       const hits = found.value.items.flatMap((item) => (keep(item.relativePath) ? [{ path: item.relativePath }] : []));
       return { mode, hits, truncated: found.value.totalMatched > hits.length, indexing: !index.scanned };
     }
-    const found = index.finder.grep(query, {
-      mode: mode === "regex" ? "regex" : "plain",
-      pageSize: PAGE,
-      maxMatchesPerFile: 20,
-      timeBudgetMs: 2_000,
-      enforceTimeBudget: true,
-    });
-    if (!found.ok) throw new SearchError(found.error);
-    // fff falls back to literal matching on a bad pattern; Pal reports the error instead.
-    if (found.value.regexFallbackError !== undefined)
-      throw new SearchError(`invalid regex: ${found.value.regexFallbackError}`);
-    const hits = found.value.items.flatMap((item) => {
-      // fff's per-match `isBinary` mislabels some text files (it can follow file-type tables where `.ts` is video);
-      // grep already skips binary content, so only a stray NUL byte disqualifies a matched line.
-      if (item.lineContent.includes("\u0000") || !keep(item.relativePath)) return [];
-      const text = item.lineContent.slice(0, LINE_CHARS);
-      // fff reports byte ranges; convert to character offsets for the UTF-16 line text.
-      const toChars = (bytes: number) =>
-        Buffer.from(item.lineContent, "utf8").subarray(0, bytes).toString("utf8").length;
-      return [
-        {
+    // Hidden matches do not consume the public page; all pages share one query deadline.
+    const deadline = performance.now() + QUERY_MS;
+    const hits: SearchHit[] = [];
+    let cursor: GrepCursor | null = null;
+    let truncated = false;
+    do {
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      const found = await index.finder.grep(query, {
+        mode: mode === "regex" ? "regex" : "plain",
+        pageSize: PAGE,
+        maxMatchesPerFile: 20,
+        timeBudgetMs: remaining,
+        enforceTimeBudget: true,
+        cursor,
+      });
+      if (!found.ok) throw new SearchError(found.error);
+      // fff falls back to literal matching on a bad pattern; Pal reports the error instead.
+      if (found.value.regexFallbackError !== undefined)
+        throw new SearchError(`invalid regex: ${found.value.regexFallbackError}`);
+      for (const item of found.value.items) {
+        if (performance.now() >= deadline) {
+          truncated = true;
+          break;
+        }
+        // fff's isBinary can mislabel text by extension; content NULs still disqualify a line.
+        if (item.lineContent.includes("\u0000") || !keep(item.relativePath)) continue;
+        const length = Buffer.byteLength(item.lineContent);
+        if (length > MAX_SNIPPET_BYTES || !Number.isSafeInteger(item.byteOffset) || item.byteOffset < 0)
+          throw new SearchError("search snippet exceeds its size or offset limits");
+        let bytes: Buffer;
+        try {
+          const resolved = await resolveProjectPath(root, item.relativePath, this.#deny);
+          if (resolved.root !== root) throw new SearchError("the search folder changed; retry the query");
+          bytes = (await readFileSnapshot(resolved.target, length, this.#privateFiles, item.byteOffset)).bytes;
+        } catch (error) {
+          if (error instanceof FileAccessError) continue;
+          throw error;
+        }
+        if (!bytes.equals(Buffer.from(item.lineContent)))
+          throw new SearchError("a search source changed; retry the query");
+        const text = bytes.toString("utf8").slice(0, LINE_CHARS);
+        // fff reports byte ranges; the UI uses UTF-16 character offsets.
+        const toChars = (offset: number) => bytes.subarray(0, offset).toString("utf8").length;
+        hits.push({
           path: item.relativePath,
           line: item.lineNumber,
           text,
           ranges: item.matchRanges
             .map(([start, end]) => [toChars(start), toChars(end)] as const)
             .filter(([start]) => start < text.length),
-        },
-      ];
-    });
-    return { mode, hits, truncated: found.value.nextCursor !== null, indexing: !index.scanned };
+        });
+        if (hits.length > PAGE) {
+          truncated = true;
+          break;
+        }
+      }
+      cursor = found.value.nextCursor;
+    } while (!truncated && cursor !== null);
+    return { mode, hits: hits.slice(0, PAGE), truncated, indexing: !index.scanned };
   }
 
   /** Release a folder's index at once, as when its project is removed. */
   async forget(configured: string): Promise<void> {
-    this.#drop(await realpath(configured).catch(() => configured));
+    // Revoke canonical queued roots before yielding to path resolution.
+    this.#release(configured);
+    const root = await realpath(configured).catch(() => configured);
+    if (root !== configured) this.#release(root);
+    // Revocation joins child exit, not observations that may be paused in their caller.
+    await Promise.all(this.#retiring);
   }
 
-  close(): void {
+  close(): Promise<void> {
+    this.#stopped = true;
     clearInterval(this.#sweep);
     for (const root of [...this.#indexes.keys()]) this.#drop(root);
+    return (this.#closing ??= this.#queue.then(async () => {
+      await Promise.all(this.#retiring);
+    }));
   }
 
   /** How many indexes are alive, for tests of reclamation. */
@@ -125,7 +179,20 @@ export class ProjectSearch {
     for (const [root, index] of this.#indexes) if (index.used < before) this.#drop(root);
   }
 
-  async #index(root: string): Promise<Index> {
+  #index(root: string): Promise<Index> {
+    const ticket = { root, released: false };
+    const task = this.#queue.then(() => this.#openIndex(ticket));
+    this.#pending.add(ticket);
+    const settled = () => {
+      this.#pending.delete(ticket);
+    };
+    this.#queue = task.then(settled, settled);
+    return task;
+  }
+
+  async #openIndex(ticket: { root: string; released: boolean }): Promise<Index> {
+    const { root } = ticket;
+    if (this.#stopped || ticket.released) throw new SearchError("search is closed or its folder was released");
     const existing = this.#indexes.get(root);
     if (existing !== undefined && !existing.finder.isDestroyed) {
       existing.used = Date.now();
@@ -138,19 +205,25 @@ export class ProjectSearch {
         "this folder contains Pal's own data, so Pal does not index it; search a project inside it",
       );
     }
-    // No background content index or mmap cache: searches read files directly, so an idle index holds little
-    // memory and results never depend on how far background indexing has got.
-    const created = FileFinder.create({
+    while (this.#indexes.size >= MAX_FINDERS) {
+      const oldest = [...this.#indexes.entries()].sort((a, b) => a[1].used - b[1].used)[0];
+      if (oldest === undefined) break;
+      this.#drop(oldest[0]);
+    }
+    await Promise.all(this.#retiring);
+    if (this.#stopped || ticket.released) throw new SearchError("search is closed or its folder was released");
+    // Only filenames are indexed; content searches remain live and never warm a private content cache.
+    const created = await this.#create({
       basePath: root,
       aiMode: true,
       disableMmapCache: true,
       disableContentIndexing: true,
     });
     if (!created.ok) throw new SearchError(`search is unavailable for this folder: ${created.error}`);
-    while (this.#indexes.size >= MAX_FINDERS) {
-      const oldest = [...this.#indexes.entries()].sort((a, b) => a[1].used - b[1].used)[0];
-      if (oldest === undefined) break;
-      this.#drop(oldest[0]);
+    if (this.#stopped || ticket.released) {
+      created.value.destroy();
+      await created.value.closed;
+      throw new SearchError("search is closed or its folder was released");
     }
     const index: Index = { finder: created.value, used: Date.now(), scanned: false, rescan: false, pending: undefined };
     this.#indexes.set(root, index);
@@ -169,7 +242,7 @@ export class ProjectSearch {
 
   async #ready(root: string, index: Index): Promise<void> {
     if (index.rescan) {
-      const started = index.finder.scanFiles();
+      const started = await index.finder.scanFiles();
       if (!started.ok) throw new SearchError(`search recovery failed: ${started.error}`);
       index.rescan = false;
     }
@@ -187,7 +260,7 @@ export class ProjectSearch {
       for (;;) {
         if (this.#indexes.get(root) !== index || index.finder.isDestroyed)
           throw new SearchError("search index was released; try again");
-        const watching = index.finder.watch((events) => {
+        const watching = await index.finder.watch((events) => {
           if (this.#indexes.get(root) !== index || !events.some((event) => event.kind === "rescan")) return;
           index.scanned = false;
           index.rescan = true;
@@ -211,11 +284,23 @@ export class ProjectSearch {
     }
   }
 
+  #release(root: string): void {
+    for (const ticket of this.#pending) if (ticket.root === root) ticket.released = true;
+    this.#drop(root);
+  }
+
   #drop(root: string): void {
     const index = this.#indexes.get(root);
     this.#indexes.delete(root);
     index?.unwatch?.();
-    if (index !== undefined && !index.finder.isDestroyed) index.finder.destroy();
+    if (index !== undefined) {
+      index.finder.destroy();
+      const closed = index.finder.closed;
+      if (closed !== undefined) {
+        this.#retiring.add(closed);
+        void closed.then(() => this.#retiring.delete(closed));
+      }
+    }
   }
 }
 

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
+import type { SqliteExecutor } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { openDatabase } from "../storage/sqlite.ts";
 import { hash, type ReleaseManifest } from "./release-policy.ts";
@@ -72,7 +72,7 @@ export function compatibleRelease(base: ReleaseManifest, candidate: ReleaseManif
 }
 
 /** The owning connection uses this too; release code never opens a second live connection. */
-export async function unfinishedWork(database: SqliteDatabase): Promise<number> {
+export async function unfinishedWork(database: SqliteExecutor): Promise<number> {
   const row = await database.get<{ n: number }>(
     "SELECT (SELECT count(*) FROM pi_tasks WHERE status <> 'terminal')" +
       " + (SELECT count(*) FROM pi_submissions WHERE status IN ('queued', 'placed'))" +
@@ -81,7 +81,8 @@ export async function unfinishedWork(database: SqliteDatabase): Promise<number> 
       " + (SELECT count(*) FROM pal_projects WHERE state = 'provisioning')" +
       " + (SELECT count(*) FROM pal_workspaces WHERE state = 'provisioning')" +
       " + (SELECT count(*) FROM pal_workspace_purges WHERE completed_at IS NULL)" +
-      " + (SELECT count(*) FROM pal_command_approvals WHERE state = 'pending') AS n",
+      " + (SELECT count(*) FROM pal_command_approvals WHERE state = 'pending')" +
+      " + (SELECT count(*) FROM pal_settings WHERE key GLOB 'schedule:*' AND CASE WHEN json_valid(value) THEN json_type(value, '$.pending') IS NOT 'null' ELSE 1 END) AS n",
   );
   return row?.n ?? 0;
 }

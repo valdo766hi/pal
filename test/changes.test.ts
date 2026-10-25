@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Changes } from "../src/core/changes.ts";
 import { WorkspaceBusy, WorkspaceLocks } from "../src/core/execution.ts";
 import { fileTools } from "../src/core/files.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 import { Projects } from "../src/core/projects.ts";
 import { openStore } from "../src/storage/store.ts";
 
@@ -52,7 +53,12 @@ async function setup(committed = true) {
   }
   const projects = await Projects.open({ database: store.database, dataRoot, installRoot: "/nonexistent-install" });
   const project = await projects.create("fixture-project", { name: "Repo", folder: root });
-  const changes = new Changes(store.database, projects, dataRoot);
+  const changes = new Changes(
+    store.database,
+    projects,
+    dataRoot,
+    await PrivateFiles.open([store.path, `${store.path}-wal`, `${store.path}-shm`]),
+  );
   return { root, dataRoot, store, projects, project, changes };
 }
 
@@ -87,7 +93,7 @@ describe("revision-bound Git changes", () => {
     expect((await changes.list(project.id, "include-ignored")).comments).toMatchObject([
       { id: comment.id, lineText: "ignored fixture" },
     ]);
-    await expect(changes.markSent(project.id, [comment.id])).rejects.toMatchObject({ code: "ignored_permission" });
+    expect((await changes.list(project.id, "include-ignored")).comments[0]?.sent).toBe(false);
     await expect(changes.discard(project.id, path, revision)).rejects.toMatchObject({ code: "ignored_permission" });
     await changes.discard(project.id, path, revision, "include-ignored");
     await expect(access(join(root, path))).rejects.toThrow();
@@ -113,7 +119,12 @@ describe("revision-bound Git changes", () => {
       dataRoot,
       installRoot: "/nonexistent-install",
     });
-    const next = new Changes(reopened.database, projects, dataRoot);
+    const next = new Changes(
+      reopened.database,
+      projects,
+      dataRoot,
+      await PrivateFiles.open([reopened.path, `${reopened.path}-wal`, `${reopened.path}-shm`]),
+    );
     expect((await next.list(project.id)).comments).toEqual([]);
     expect((await next.list(project.id, "include-ignored")).comments).toMatchObject([{ id: comment.id }]);
   });
@@ -123,7 +134,12 @@ describe("revision-bound Git changes", () => {
     const head = (await git(root, "rev-parse", "HEAD")).stdout.trim();
     await writeFile(join(root, "file.txt"), "manual edit\n");
     const locks = new WorkspaceLocks((root) => changes.capture(root));
-    const tools = fileTools({ root: async () => root, deny: [dataRoot], locks });
+    const tools = fileTools({
+      root: async () => root,
+      deny: [dataRoot],
+      privateFiles: await PrivateFiles.open([store.path, `${store.path}-wal`, `${store.path}-shm`]),
+      locks,
+    });
     const write = tools.tools?.find((tool) => tool.name === "files_write") as ToolRegistration;
     const expectedHash = createHash("sha256").update("manual edit\n").digest("hex");
     await write.execute(
@@ -144,7 +160,16 @@ describe("revision-bound Git changes", () => {
     expect(await readFile(join(root, "file.txt"), "utf8")).toBe("after\n");
     await git(root, "add", "file.txt");
     await git(root, "commit", "-qm", "later");
-    expect((await new Changes(store.database, projects, dataRoot).list(project.id)).base).toBe(head);
+    expect(
+      (
+        await new Changes(
+          store.database,
+          projects,
+          dataRoot,
+          await PrivateFiles.open([store.path, `${store.path}-wal`, `${store.path}-shm`]),
+        ).list(project.id)
+      ).base,
+    ).toBe(head);
   });
 
   it("moves the baseline to a later commit only on the owner's explicit, current request", async () => {
@@ -190,7 +215,12 @@ describe("revision-bound Git changes", () => {
     const reopened = await openStore(dataRoot);
     cleanups.push(() => reopened.close());
     const projects = await Projects.open({ database: reopened.database, dataRoot, installRoot: "/nonexistent" });
-    const next = new Changes(reopened.database, projects, dataRoot);
+    const next = new Changes(
+      reopened.database,
+      projects,
+      dataRoot,
+      await PrivateFiles.open([reopened.path, `${reopened.path}-wal`, `${reopened.path}-shm`]),
+    );
     expect((await next.list(project.id)).files[0]?.reviewed).toBe(true);
     await writeFile(join(root, "file.txt"), "later\n");
     await expect(next.review(project.id, file.path, file.revision, true)).rejects.toMatchObject({
@@ -216,7 +246,13 @@ describe("revision-bound Git changes", () => {
     await unlink(join(root, "link"));
     await writeFile(join(root, "new.txt"), "new\n");
     const locks = new WorkspaceLocks();
-    const discarding = new Changes(store.database, projects, dataRoot, locks);
+    const discarding = new Changes(
+      store.database,
+      projects,
+      dataRoot,
+      await PrivateFiles.open([store.path, `${store.path}-wal`, `${store.path}-shm`]),
+      locks,
+    );
     const revision = async (path: string) =>
       (await changes.list(project.id)).files.find((file) => file.path === path)?.revision ?? "";
 
@@ -263,7 +299,7 @@ describe("revision-bound Git changes", () => {
   });
 
   it("keeps line comments on the revision shown and marks them outdated when that line changes", async () => {
-    const { root, project, changes } = await setup();
+    const { root, project, changes, store } = await setup();
     await writeFile(join(root, "file.txt"), "one\ntwo\nthree\n");
     const shown = (await changes.list(project.id)).files[0];
     if (shown === undefined) throw new Error("missing diff");
@@ -289,8 +325,9 @@ describe("revision-bound Git changes", () => {
       ["two", true],
       ["three", false],
     ]);
-    await changes.markSent(project.id, [comment.id]);
-    expect((await changes.list(project.id)).comments.map((c) => c.sent)).toEqual([true, false]);
+    // An old composed-only receipt must not become evidence of durable admission after an upgrade.
+    await store.database.run("UPDATE pal_change_comments SET sent_at = ? WHERE id = ?", Date.now(), comment.id);
+    expect((await changes.list(project.id)).comments.map((c) => c.sent)).toEqual([false, false]);
     await changes.uncomment(project.id, comment.id);
     expect((await changes.list(project.id)).comments.map((c) => c.body)).toEqual(["Keep three."]);
 

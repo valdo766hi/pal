@@ -16,7 +16,7 @@ if [ "$1" = rewrite ]; then
     "report "*) printf 'rtk %s\\n' "$2"; exit 3 ;;
     "allowed "*) printf 'rtk report %s\\n' "\${2#allowed }"; exit 0 ;;
     "denied "*) printf 'blocked by a pipeline rule\\n'; exit 2 ;;
-    "slow "*) echo $$ > '${slow}'; trap '' TERM; sleep 30; printf 'rtk report late 0\\n'; exit 3 ;;
+    "slow "*) trap '' TERM; sleep 30 & printf '%s %s\\n' $$ $! > '${slow}'; wait; printf 'rtk report late 0\\n'; exit 3 ;;
     *) exit 1 ;;
   esac
 fi
@@ -36,7 +36,10 @@ exit 99
           const [home = "", args = ""] = line.split("|");
           return { home, args };
         }),
-    slowPid: async () => Number((await readFile(slow, "utf8").catch(() => "")).trim()) || undefined,
+    slowPids: async () => {
+      const match = /^([1-9]\d*) ([1-9]\d*)\n$/.exec(await readFile(slow, "utf8").catch(() => ""));
+      return match === null ? undefined : ([Number(match[1]), Number(match[2])] as const);
+    },
     cleanup: async () => {
       if (path === undefined) delete process.env.PATH;
       else process.env.PATH = path;

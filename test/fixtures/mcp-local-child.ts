@@ -36,7 +36,7 @@ const server = await pal.mcp.add({
 if (server.stdio === null) throw new Error("missing fixture configuration");
 await pal.mcp.approveProgram(server.id, server.stdio.digest, true);
 await pal.mcp.test(server.id);
-await pal.mcp.approve(server.id, ["inspect"]);
+await pal.mcp.approve(server.id, ["inspect"], (await pal.mcp.get(server.id)).catalog);
 await pal.mcp.setEnabled(server.id, true);
 const project = await pal.projects.create("recovery-project", { name: "Fixture" });
 const chat = await pal.chats.createChat("recovery-chat", { projectId: project.id }, context);

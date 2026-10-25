@@ -307,7 +307,7 @@ describe("native Code Mode cache policy and provenance", () => {
     expect((await a.run()).text).toMatch(/changed/);
     expect((await f.pal.mcp.get("exa")).state).toBe("changed");
     await f.pal.mcp.test("exa");
-    await f.pal.mcp.approve("exa", ["web_search_exa"]);
+    await f.pal.mcp.approve("exa", ["web_search_exa"], (await f.pal.mcp.get("exa")).catalog);
     expect((await a.run()).receipt?.cache?.hit).toBe(false);
     expect(f.fixture.calls).toHaveLength(5);
   });
@@ -338,13 +338,13 @@ describe("native Code Mode cache policy and provenance", () => {
     expect((await a.run()).receipt?.cache?.hit).toBe(false);
     const custom = await f.pal.mcp.add({ name: "Generic", url: f.fixture.url, auth: { kind: "none" }, private: true });
     await f.pal.mcp.test(custom.id);
-    await f.pal.mcp.approve(custom.id, ["web_search_exa"]);
+    await f.pal.mcp.approve(custom.id, ["web_search_exa"], (await f.pal.mcp.get(custom.id)).catalog);
     await f.pal.mcp.setEnabled(custom.id, true);
     const code = `return await tools.mcp__${custom.id}__web_search_exa({query:"durable"});`;
     expect((await a.run(code)).receipt?.cache).toBeUndefined();
     await a.run(code);
     expect(f.fixture.calls).toHaveLength(8);
-    await f.pal.mcp.approve("exa", ["web_search_exa", "delete_everything"]);
+    await f.pal.mcp.approve("exa", ["web_search_exa", "delete_everything"], (await f.pal.mcp.get("exa")).catalog);
     const unknown = "return await tools.mcp__exa__delete_everything({});";
     expect((await a.run(unknown)).receipt?.cache).toBeUndefined();
     await a.run(unknown);

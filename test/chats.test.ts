@@ -9,6 +9,7 @@ import {
   AdmissionStopped,
   type Barrier,
   ChatNotFound,
+  chatConfiguration,
   ChatService,
   MAX_INPUT_CHARS,
   ProjectUnavailable,
@@ -53,7 +54,7 @@ async function open(dataRoot: string, barrier?: (point: Barrier) => void | Promi
     };
     return messages.filter((message) => message.role === "user").length;
   };
-  return { store, harness, chats, userMessages };
+  return { store, harness, chats, userMessages, faux };
 }
 
 /** Make the next write that needs a new database page fail with SQLITE_FULL. */
@@ -144,6 +145,127 @@ describe("chats", () => {
     );
     const tooLong = { text: "x".repeat(MAX_INPUT_CHARS + 1) };
     await expect(chats.submit(chat.id, "input-request-2", tooLong, context)).rejects.toBeInstanceOf(InvalidRequest);
+  });
+
+  it("rejects stale settings and concurrent configuration changes without recording an input", async () => {
+    const { chats, harness, store } = await open(await tempDir());
+    const chat = await chats.createChat("config-chat-request", { projectId: "project-1" }, context);
+    const conversation = await harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing chat");
+    const before = chatConfiguration(await conversation.agent(context));
+    const outcomes = await Promise.allSettled([
+      chats.configure(
+        chat.id,
+        { model: { provider: "first", modelId: "one" }, thinkingLevel: "off", expected: before },
+        context,
+      ),
+      chats.configure(
+        chat.id,
+        { model: { provider: "second", modelId: "two" }, thinkingLevel: "off", expected: before },
+        context,
+      ),
+    ]);
+    expect(outcomes.map((outcome) => outcome.status)).toEqual(["fulfilled", "rejected"]);
+    expect(outcomes[1]).toMatchObject({ reason: { status: 409, code: "configuration_stale" } });
+    await expect(
+      chats.submit(chat.id, "stale-input-request", { text: "private history", configuration: before }, context),
+    ).rejects.toMatchObject({ status: 409, code: "configuration_stale" });
+    expect(await store.database.all("SELECT * FROM pal_admissions")).toEqual([]);
+    expect(chats.stopped).toBe(false);
+  });
+
+  it("serializes configuration with admission and keeps active and queued inputs on their destination", async () => {
+    const recorded = Promise.withResolvers<undefined>();
+    const admit = Promise.withResolvers<undefined>();
+    const requested = Promise.withResolvers<undefined>();
+    const finish = Promise.withResolvers<undefined>();
+    const { chats, harness, faux, userMessages } = await open(await tempDir(), async (point) => {
+      if (point === "input-recorded") {
+        recorded.resolve(undefined);
+        await admit.promise;
+      }
+    });
+    const destinations: string[] = [];
+    faux.setResponses([
+      async (_context, _options, _state, model) => {
+        destinations.push(model.provider);
+        requested.resolve(undefined);
+        await finish.promise;
+        return fauxAssistantMessage("first");
+      },
+      (_context, _options, _state, model) => {
+        destinations.push(model.provider);
+        return fauxAssistantMessage("second");
+      },
+    ]);
+    const chat = await chats.createChat("pinned-chat-request", { projectId: "project-1" }, context);
+    const conversation = await harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing chat");
+    const configuration = chatConfiguration(await conversation.agent(context));
+    try {
+      const first = chats.submit(chat.id, "pinned-input-first", { text: "first", configuration }, context);
+      await recorded.promise;
+      const change = chats.configure(
+        chat.id,
+        { model: { provider: "other", modelId: "other" }, thinkingLevel: "off", expected: configuration },
+        context,
+      );
+      const rejected = expect(change).rejects.toMatchObject({ status: 409, code: "configuration_busy" });
+      admit.resolve(undefined);
+      await first;
+      await rejected;
+      await requested.promise;
+      await chats.submit(chat.id, "pinned-input-second", { text: "second", configuration }, context);
+      await expect(
+        chats.configure(chat.id, { model: { provider: "other", modelId: "other" }, thinkingLevel: "off" }, context),
+      ).rejects.toMatchObject({ status: 409, code: "configuration_busy" });
+      finish.resolve(undefined);
+      expect(await userMessages(chat.conversationId)).toBe(2);
+      expect(destinations).toEqual([faux.getModel().provider, faux.getModel().provider]);
+      expect(chats.stopped).toBe(false);
+    } finally {
+      admit.resolve(undefined);
+      finish.resolve(undefined);
+    }
+  });
+
+  it("deduplicates a confirmed input even after settings change and binds its key to the original configuration", async () => {
+    const { chats, harness, userMessages } = await open(await tempDir());
+    const chat = await chats.createChat("retry-config-chat", { projectId: "project-1" }, context);
+    const conversation = await harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing chat");
+    const configuration = chatConfiguration(await conversation.agent(context));
+    const body = { text: "one input", configuration };
+    const first = await chats.submit(chat.id, "retry-config-input", body, context);
+    expect(await userMessages(chat.conversationId)).toBe(1);
+    const updated = await chats.configure(
+      chat.id,
+      { model: { provider: "other", modelId: "other" }, thinkingLevel: "off" },
+      context,
+    );
+    expect(await chats.submit(chat.id, "retry-config-input", body, context)).toEqual(first);
+    await expect(
+      chats.submit(chat.id, "retry-config-input", { ...body, configuration: updated }, context),
+    ).rejects.toBeInstanceOf(RequestConflict);
+    expect(await userMessages(chat.conversationId)).toBe(1);
+  });
+
+  it.each(["retry", "reopen"])("fails closed on a corrupt saved input during %s", async (mode) => {
+    const root = await tempDir();
+    const { chats, harness, store, userMessages } = await open(root);
+    const chat = await chats.createChat("corrupt-chat-request", { projectId: "project-1" }, context);
+    await chats.submit(chat.id, "corrupt-input-request", { text: "one input" }, context);
+    expect(await userMessages(chat.conversationId)).toBe(1);
+    await store.database.run("UPDATE pal_admissions SET intent = '{', state = 'admitting', submission_id = NULL");
+    if (mode === "retry") {
+      await expect(chats.submit(chat.id, "corrupt-input-request", { text: "one input" }, context)).rejects.toThrow(
+        "a saved input is corrupt",
+      );
+      expect(chats.stopped).toBe(true);
+    } else {
+      await harness.close(context);
+      await expect(open(root)).rejects.toThrow("a saved input is corrupt");
+    }
   });
 
   it.each(["input-recorded", "input-submitted"] as const)(

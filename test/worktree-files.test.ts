@@ -21,6 +21,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorktreeFiles, type WorktreeIntent } from "../src/core/worktree-files.ts";
 import { ProjectSearch } from "../src/core/search.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 import { GitEffectUnknown, runGitEffect } from "../src/core/git.ts";
 
 const exec = promisify(execFile);
@@ -126,7 +127,7 @@ describe("raw Git worktree provisioning", () => {
   it("does not let the native worktree index read an escaping symlink to private data", async () => {
     const { files, intent, dataRoot } = await setup();
     await provision(files, intent);
-    const search = new ProjectSearch([dataRoot]);
+    const search = new ProjectSearch([dataRoot], await PrivateFiles.open([join(dataRoot, "credentials.key")]));
     cleanups.push(() => search.close());
     expect((await search.search(files.root(intent.id), "private-worktree-fixture-needle", "text")).hits).toEqual([]);
   });

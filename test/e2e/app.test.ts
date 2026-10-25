@@ -14,6 +14,7 @@ import { createApi } from "../../src/core/api.ts";
 import { openPal, type Pal } from "../../src/core/app.ts";
 import { browserRuntime } from "../../src/core/browser.ts";
 import { startServer } from "../../src/core/server.ts";
+import { chatDiagnostics } from "../../src/core/diagnostics.ts";
 import { startMcpFixture } from "../fixtures/mcp-server.ts";
 import { startCachedMcp } from "../fixtures/cached-mcp.ts";
 import { STDIO_FIXTURE } from "../fixtures/stdio-server.ts";
@@ -40,6 +41,7 @@ let page: Page;
 let chatUrl: string;
 const cleanups: (() => Promise<unknown>)[] = [];
 const releases = fakeReleaseControl();
+const transport: { path: string; status: number }[] = [];
 
 beforeAll(async () => {
   fixture = await startOpenAIFixture();
@@ -95,6 +97,12 @@ beforeAll(async () => {
   browser = await chromium.launch({ headless: true, chromiumSandbox: true });
   cleanups.push(() => browser.close());
   page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  page.on("response", (response) => {
+    const url = new URL(response.url());
+    if (url.origin !== base || !url.pathname.endsWith("/inputs")) return;
+    transport.push({ path: url.pathname, status: response.status() });
+    if (transport.length > 64) transport.shift();
+  });
   // A private-network HTTP page lacks randomUUID, but must still be able to create projects and send messages.
   await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: undefined }));
   if (shots !== undefined) await mkdir(shots, { recursive: true });
@@ -108,7 +116,7 @@ async function shoot(name: string): Promise<void> {
   if (shots !== undefined) await page.screenshot({ path: join(shots, `${name}.png`), animations: "disabled" });
 }
 
-/** Onboarding's provider step with ChatGPT: sign in through the fixture, then keep the model it preselects. */
+/** Onboarding's provider step with ChatGPT: sign in through the fixture, then explicitly choose the default model. */
 async function onboardWithChatGPT(view: Page): Promise<void> {
   await view
     .getByRole("radiogroup", { name: "Model provider" })
@@ -124,7 +132,11 @@ async function onboardWithChatGPT(view: Page): Promise<void> {
   await view.getByText("Signed in as").waitFor();
   await view.getByRole("button", { name: "Continue" }).click();
   await view.getByRole("heading", { name: "Choose a model" }).waitFor();
-  expect(await view.getByRole("radio", { name: /gpt-5\.5/ }).isChecked()).toBe(true);
+  // Signing in lists models but saves no default until the owner picks one.
+  expect(await view.getByRole("radio", { name: /gpt-5\.5/ }).isChecked()).toBe(false);
+  expect(await view.getByRole("button", { name: "Continue" }).isDisabled()).toBe(true);
+  await view.getByRole("radio", { name: /gpt-5\.5/ }).check();
+  await expect.poll(() => view.getByRole("button", { name: "Continue" }).isEnabled()).toBe(true);
   await view.getByRole("button", { name: "Continue" }).click();
 }
 
@@ -659,7 +671,7 @@ describe("Pal in a browser", () => {
     const project = await pal.projects.create("context-browser-project", { name: "Context fixture" });
     const chat = await pal.chats.createChat("context-browser-chat", { projectId: project.id }, context);
     const errors: string[] = [];
-    const onError = (error: Error) => errors.push(error.message);
+    const onError = (error: Error) => errors.push(error.stack ?? error.message);
     page.on("pageerror", onError);
     try {
       await writeFile(join(project.root, "decision.txt"), "Original cobalt source");
@@ -1132,8 +1144,9 @@ describe("Pal in a browser", () => {
     await add.focus();
     await page.keyboard.press("Enter");
     const menu = page.getByRole("menu", { name: "Add" });
-    // Only device files for now: no folders, plugins or other pictured actions.
-    expect(await menu.getByRole("menuitem").count()).toBe(1);
+    expect(await menu.getByRole("menuitem").count()).toBe(2);
+    const scheduled = menu.getByRole("menuitem", { name: /^Schedule a message/ });
+    expect(await scheduled.count()).toBe(1);
     const item = menu.getByRole("menuitem", { name: /^Add file from this device/ });
     await expect.poll(() => item.evaluate((node) => node === document.activeElement)).toBe(true);
     for (const width of [1440, 768, 390]) {
@@ -1149,8 +1162,11 @@ describe("Pal in a browser", () => {
     expect(await add.evaluate((node) => node === document.activeElement)).toBe(true);
     // Listening first lets Playwright's file chooser interception settle before the key that opens it.
     const chooser = page.waitForEvent("filechooser");
-    // Arrow keys open the menu on its only item, the way a keyboard user would reach it.
     await page.keyboard.press("ArrowDown");
+    await expect.poll(() => item.evaluate((node) => node === document.activeElement)).toBe(true);
+    await page.keyboard.press("End");
+    await expect.poll(() => scheduled.evaluate((node) => node === document.activeElement)).toBe(true);
+    await page.keyboard.press("ArrowUp");
     await expect.poll(() => item.evaluate((node) => node === document.activeElement)).toBe(true);
     await page.keyboard.press("Enter");
     const picked = await chooser;
@@ -1298,9 +1314,22 @@ describe("Pal in a browser", () => {
     await expect.poll(() => pill.textContent()).toContain("Full access");
     const before = await page.getByRole("group", { name: "Approval request" }).count();
     fixture.behavior.script = 'return await tools.shell_run({ command: "printf full >> full.txt", timeout: 2 });';
+    const requestsBeforeFull = fixture.apiRequests.length;
     await page.getByLabel("Message").fill("run without asking");
     await page.getByRole("button", { name: "Send" }).click();
-    await expect.poll(() => readFile(join(project.root, "full.txt"), "utf8").catch(() => "")).toBe("full");
+    try {
+      await expect.poll(() => readFile(join(project.root, "full.txt"), "utf8").catch(() => "")).toBe("full");
+    } catch (failure) {
+      const chat = await pal.chats.get(page.url().split("/chat/")[1] ?? "");
+      const diagnostics = chat === undefined ? null : await chatDiagnostics(pal, chat.id, chat.conversationId);
+      const requests = fixture.apiRequests.slice(requestsBeforeFull).map(({ path, body }) => ({
+        path,
+        tail: Array.isArray(body.input)
+          ? body.input.slice(-3).map((item: { type?: string; role?: string }) => ({ type: item.type, role: item.role }))
+          : null,
+      }));
+      throw new Error(`Approval fixture: ${JSON.stringify({ transport, diagnostics, requests })}`, { cause: failure });
+    }
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     expect(await page.getByRole("group", { name: "Approval request" }).count()).toBe(before);
     for (const width of [1440, 768, 390]) {
@@ -1795,8 +1824,11 @@ describe("Pal in a browser", () => {
     await panel.getByRole("button", { name: "Comment on line 3" }).click();
     await panel.getByRole("textbox", { name: "Comment on line 3" }).fill("Unsubmitted draft");
     await panel.getByRole("button", { name: /host\.txt/ }).click();
-    expect(await panel.getByRole("textbox", { name: /Comment on line/ }).count()).toBe(0);
+    expect(await panel.getByRole("textbox", { name: "Comment on line 3" }).inputValue()).toBe("Unsubmitted draft");
+    expect(await panel.getByText(/^Original target: base\.txt/).count()).toBe(1);
     await panel.getByRole("button", { name: /base\.txt/ }).click();
+    expect(await panel.getByRole("textbox", { name: "Comment on line 3" }).inputValue()).toBe("Unsubmitted draft");
+    await panel.getByRole("button", { name: "Cancel", exact: true }).click();
     expect(await panel.getByRole("textbox", { name: /Comment on line/ }).count()).toBe(0);
     // Comments live on the server, so they survive a reload.
     await page.reload();
@@ -1828,22 +1860,6 @@ describe("Pal in a browser", () => {
       await shoot(`comments-${width}`);
     }
     await page.setViewportSize({ width: 1440, height: 900 });
-    const receiptRoute = `**/api/projects/${project.id}/comments/sent`;
-    await page.route(receiptRoute, (route) =>
-      route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "fixture_error", message: "Feedback receipt failed" }),
-      }),
-    );
-    try {
-      await panel.getByRole("button", { name: "Send feedback to chat (2)" }).click();
-      await panel.getByRole("alert").filter({ hasText: "Feedback receipt failed" }).waitFor();
-      expect(await panel.getByRole("status").filter({ hasText: "Feedback is in the composer" }).count()).toBe(0);
-      expect(await panel.getByText("Added to composer").count()).toBe(0);
-    } finally {
-      await page.unroute(receiptRoute);
-    }
     await page.getByLabel("Message").fill("");
     await panel.getByRole("button", { name: "Send feedback to chat (2)" }).click();
     await expect
@@ -1851,10 +1867,11 @@ describe("Pal in a browser", () => {
       .toMatch(
         /^Review feedback:\n\nWorkspace: [^\n]+\n\nbase\.txt \(revision [0-9a-f]{12}\), line 2 \(outdated\): two\nRename two\.\n\nbase\.txt \(revision [0-9a-f]{12}\), line 3: three\nKeep three\.$/,
       );
-    await expect.poll(() => panel.getByText("Added to composer").count()).toBe(2);
-    await expect
-      .poll(() => panel.getByRole("button", { name: "Send feedback to chat", exact: true }).isDisabled())
-      .toBe(true);
+    await expect.poll(() => panel.getByText("In composer · not admitted", { exact: true }).count()).toBe(2);
+    expect((await pal.changes.list(project.id)).comments.map((comment) => comment.sent)).toEqual([false, false]);
+    const composed = await page.getByLabel("Message").inputValue();
+    await panel.getByRole("button", { name: "Copy feedback again (2)", exact: true }).click();
+    expect(await page.getByLabel("Message").inputValue()).toBe(composed);
     expect(fixture.apiRequests.length).toBe(modelRequests);
     await panel.getByRole("button", { name: "Delete comment on line 3" }).click();
     await expect.poll(() => panel.getByText("Keep three.").count()).toBe(0);
@@ -1922,8 +1939,13 @@ describe("Pal in a browser", () => {
       await panel.getByRole("button", { name: "Send feedback to chat (1)" }).click();
       await panel.waitFor({ state: "detached" });
       await expect.poll(() => page.getByLabel("Message").inputValue()).toContain("Keep this context line.");
-      await expect.poll(async () => (await pal.changes.list(project.id)).comments[0]?.sent).toBe(true);
+      expect((await pal.changes.list(project.id)).comments[0]?.sent).toBe(false);
+      expect(
+        await pal.store.database.get("SELECT count(*) AS n FROM pal_admissions WHERE chat_id = ?", chat.id),
+      ).toEqual({ n: 0 });
       await openPanel("Changes");
+      await panel.getByText("In composer · not admitted", { exact: true }).waitFor();
+      await panel.getByRole("button", { name: "Copy feedback again (1)", exact: true }).waitFor();
       await panel.getByRole("button", { name: "Delete comment on line 2" }).click();
       await expect.poll(() => panel.getByText("Keep this context line.").count()).toBe(0);
     } finally {
@@ -2244,6 +2266,15 @@ describe("Pal in a browser", () => {
     await legacyPage.getByText("Signed in as").waitFor();
     await legacyPage.goto(`${url}/#/chat/${chat.id}`);
     await legacyPage.getByLabel("Message").fill("hi");
+    // Signing in chose no model, so this chat still waits for an explicit one.
+    expect(await legacyPage.getByRole("button", { name: "Send" }).isDisabled()).toBe(true);
+    await legacyPage.getByRole("button", { name: /^Model and reasoning/ }).click();
+    await legacyPage
+      .getByRole("dialog", { name: "Model and reasoning" })
+      .getByRole("button", { name: /^Choose model/ })
+      .click();
+    await legacyPage.getByRole("radio", { name: /gpt-5\.5/ }).click();
+    await legacyPage.keyboard.press("Escape");
     await legacyPage.getByRole("button", { name: "Send" }).click({ timeout: 3000 });
     await legacyPage.getByText("Hello").waitFor();
     expect(
@@ -2460,6 +2491,8 @@ describe("Pal in a browser", () => {
     await view.keyboard.press("ArrowDown");
     expect(await choice(/^OpenRouter/).isChecked()).toBe(true);
     await view.keyboard.press("Tab");
+    expect(await focused(view.getByRole("button", { name: "Set up later" }))).toBe(true);
+    await view.keyboard.press("Tab");
     expect(await focused(next)).toBe(true);
     await view.keyboard.press("Enter");
     await heading("Connect OpenRouter").waitFor();
@@ -2651,7 +2684,7 @@ describe("Pal in a browser", () => {
       await pins.getByText("files@1", { exact: true }).waitFor();
       expect(await pins.getByText("shell@1", { exact: true }).count()).toBe(0);
       await pins.getByText("Recent native request pins", { exact: true }).click();
-      await pins.getByText(/Task \d+ · development/).waitFor();
+      await pins.getByText(new RegExp(`Task \\d+ · ${before.release}`)).waitFor();
       await shoot("extension-pins-1440");
     } finally {
       const current = await pal.extensions.view();
@@ -2763,10 +2796,22 @@ describe("Pal in a browser", () => {
     const panel = page.getByRole("complementary", { name: "Workspace panel" });
     await panel.getByRole("button", { name: "Open browser" }).click();
     await panel.getByText("You control this browser").waitFor();
-    await panel.getByLabel("Address").fill(`http://127.0.0.1:${site}/`);
+    const view = panel.getByRole("img", { name: /^Page:/ });
+    const destination = `http://127.0.0.1:${site}/`;
+    await panel.getByLabel("Address").fill(destination);
+    await panel.getByLabel("Page size").focus();
+    await panel.getByLabel("Page size").selectOption("Tablet");
+    await expect
+      .poll(() => view.evaluate((image) => (image instanceof HTMLImageElement ? image.naturalWidth : 0)))
+      .toBe(768);
+    expect(await panel.getByLabel("Address").inputValue()).toBe(destination);
+    await panel.getByLabel("Page size").selectOption("Desktop");
+    await expect
+      .poll(() => view.evaluate((image) => (image instanceof HTMLImageElement ? image.naturalWidth : 0)))
+      .toBe(1280);
+    expect(await panel.getByLabel("Address").inputValue()).toBe(destination);
     await panel.getByRole("button", { name: "Go", exact: true }).click();
     await expect.poll(() => visited.includes("/")).toBe(true);
-    const view = panel.getByRole("img", { name: /^Page:/ });
     await view.waitFor();
     await expect
       .poll(() => view.evaluate((image) => image instanceof HTMLImageElement && image.naturalWidth > 0))

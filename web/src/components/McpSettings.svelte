@@ -12,6 +12,7 @@
   let open: Record<string, boolean> = $state({});
   let keys: Record<string, string> = $state({});
   let choices: Record<string, string[]> = $state({});
+  let previous: Record<string, { server: McpServer; selection: string[] } | undefined> = $state({});
   let busy: Record<string, boolean> = $state({});
   let confirmRemove: string | undefined = $state();
   let error: string | undefined = $state();
@@ -90,8 +91,39 @@
   }
 
   function replace(server: McpServer) {
+    const known = servers.find((candidate) => candidate.id === server.id);
+    const selection = choices[server.id];
+    if (known?.catalog != null && known.catalog !== server.catalog && selection !== undefined)
+      previous[server.id] ??= { server: known, selection: [...selection] };
     servers = servers.map((known) => (known.id === server.id ? server : known));
-    choices[server.id] = server.tools.filter((tool) => tool.approved && !tool.changed).map((tool) => tool.name);
+    if (previous[server.id] === undefined)
+      choices[server.id] = server.tools.filter((tool) => tool.approved && !tool.changed).map((tool) => tool.name);
+  }
+
+  async function approveTools(server: McpServer) {
+    const catalog = server.catalog;
+    if (catalog === null || previous[server.id] !== undefined || busy[server.id]) return;
+    const selection =
+      choices[server.id] ?? server.tools.filter((tool) => tool.approved && !tool.changed).map((tool) => tool.name);
+    await act(server.id, async () => {
+      try {
+        return await api.mcpTools(server.id, selection, catalog);
+      } catch (failure) {
+        if (failure instanceof ApiError && failure.status === 409) {
+          choices[server.id] = selection;
+          previous[server.id] ??= { server, selection: [...selection] };
+          accept(await api.mcp());
+        }
+        throw failure;
+      }
+    });
+  }
+
+  function reviewed(server: McpServer) {
+    choices[server.id] = (choices[server.id] ?? []).filter((name) =>
+      server.tools.some((tool) => tool.name === name && tool.available),
+    );
+    previous[server.id] = undefined;
   }
 
   async function act(id: string, work: () => Promise<{ server: McpServer }>) {
@@ -557,39 +589,58 @@
             </p>
           {/if}
           <div class="h3">Tools</div>
+          {#if previous[server.id] !== undefined}
+            <div class="callout wa" role="status">
+              The catalog or connection changed. Your previous selection is kept below for comparison; review the
+              current definitions before approving. Removed tools cannot be selected again.
+            </div>
+            <details>
+              <summary>Previously reviewed catalog and selection</summary>
+              <pre class="program mono">{JSON.stringify(previous[server.id], null, 2)}</pre>
+            </details>
+            <button class="b sm" disabled={busy[server.id] || server.catalog === null} onclick={() => reviewed(server)}
+              >I reviewed the current catalog</button
+            >
+          {/if}
+          {#if server.catalog === null}
+            <p class="sub">Test the connection before approving tools for its current configuration.</p>
+          {/if}
           {#if server.tools.length === 0}
             <p class="sub">Test the connection to list this server's tools.</p>
           {:else}
             {#each server.tools as tool (tool.name)}
-              <label class="srcrow tool">
-                <input
-                  type="checkbox"
-                  checked={(
-                    choices[server.id] ?? server.tools.filter((t) => t.approved && !t.changed).map((t) => t.name)
-                  ).includes(tool.name)}
-                  onchange={(event) => {
-                    choices[server.id] ??= server.tools.filter((t) => t.approved && !t.changed).map((t) => t.name);
-                    toggleTool(server.id, tool.name, event.currentTarget.checked);
-                  }}
-                />
-                <span class="grow">
-                  <span class="mono">{tool.name}</span>
-                  {#if tool.changed}<span class="pill wa">Changed since approval</span>
-                  {:else if tool.approved}<span class="pill ok">Approved</span>{/if}
-                  <span class="setd">{tool.description}</span>
-                </span>
-              </label>
+              <div>
+                <label class="srcrow tool">
+                  <input
+                    type="checkbox"
+                    disabled={busy[server.id] || !tool.available}
+                    checked={(
+                      choices[server.id] ?? server.tools.filter((t) => t.approved && !t.changed).map((t) => t.name)
+                    ).includes(tool.name)}
+                    onchange={(event) => {
+                      choices[server.id] ??= server.tools.filter((t) => t.approved && !t.changed).map((t) => t.name);
+                      toggleTool(server.id, tool.name, event.currentTarget.checked);
+                    }}
+                  />
+                  <span class="grow">
+                    <span class="mono">{tool.name}</span>
+                    {#if !tool.available}<span class="pill wa">Not in current catalog</span>
+                    {:else if tool.changed}<span class="pill wa">Changed since approval</span>
+                    {:else if tool.approved}<span class="pill ok">Approved</span>{/if}
+                    <span class="setd">{tool.description}</span>
+                  </span>
+                </label>
+                <details>
+                  <summary>Definition: {tool.name}</summary>
+                  <pre class="program mono">{JSON.stringify(tool.definition, null, 2)}</pre>
+                </details>
+              </div>
             {/each}
             <div class="row-buttons">
               <button
                 class="b sm p"
-                onclick={() =>
-                  act(server.id, () =>
-                    api.mcpTools(
-                      server.id,
-                      choices[server.id] ?? server.tools.filter((t) => t.approved && !t.changed).map((t) => t.name),
-                    ),
-                  )}>Approve selected tools</button
+                disabled={busy[server.id] || server.catalog === null || previous[server.id] !== undefined}
+                onclick={() => approveTools(server)}>Approve selected tools</button
               >
             </div>
           {/if}

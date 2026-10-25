@@ -1,4 +1,10 @@
-import { CodemodeSandbox } from "@earendil-works/pi-codemode";
+import { createHash } from "node:crypto";
+import {
+  CodemodeSandbox,
+  type CodemodeRun,
+  type CodemodeRunOptions,
+  type CodemodeSandboxOptions,
+} from "@earendil-works/pi-codemode";
 import { parseCodemodeSource } from "@earendil-works/pi-codemode/source";
 import {
   type Agent,
@@ -44,6 +50,42 @@ export type PalCodemodeOptions = {
   readonly namespaces?: readonly CodemodeNamespace[];
 };
 
+const CALL_LIMIT_GLOBAL = "palCallLimit";
+
+class CallLimitedSandbox extends CodemodeSandbox {
+  readonly #maxCalls: number;
+
+  constructor(options: CodemodeSandboxOptions, maxCalls: number) {
+    super(options);
+    this.#maxCalls = maxCalls;
+  }
+
+  override start(code: string, options: CodemodeRunOptions): CodemodeRun {
+    return super.start(code, {
+      ...options,
+      // The VM fingerprint omits host policy; an interrupted script must retain its call limit.
+      onStarted: (fingerprint) =>
+        options.onStarted?.(
+          createHash("sha256")
+            .update(JSON.stringify(["pal.calls.v1", fingerprint, this.#maxCalls]))
+            .digest("hex"),
+        ),
+      // Denials stay in Pi's global-call journal, with the VM's original ID and replay order.
+      onCall: (call) =>
+        options.onCall(
+          call.id <= this.#maxCalls
+            ? call
+            : {
+                id: call.id,
+                target: "global",
+                name: CALL_LIMIT_GLOBAL,
+                args: null,
+              },
+        ),
+    });
+  }
+}
+
 /**
  * Pi's durable `codemode` extension under Pal's host policy. `models: false`: no implicit model or image helpers.
  * The returned sandbox belongs to the caller, who closes it after the Harness.
@@ -56,16 +98,19 @@ export function createPalCodemode(options: PalCodemodeOptions): {
 } {
   const caps = options.caps ?? DEFAULT_CODEMODE_CAPS;
   let workers = 0;
-  const sandbox = new CodemodeSandbox({
-    memoryLimitBytes: caps.memoryLimitBytes,
-    acquireWorker: () => {
-      if (workers >= caps.maxWorkers) throw new Error(`at most ${caps.maxWorkers} scripts may run at once`);
-      workers += 1;
-      return () => {
-        workers -= 1;
-      };
+  const sandbox = new CallLimitedSandbox(
+    {
+      memoryLimitBytes: caps.memoryLimitBytes,
+      acquireWorker: () => {
+        if (workers >= caps.maxWorkers) throw new Error(`at most ${caps.maxWorkers} scripts may run at once`);
+        workers += 1;
+        return () => {
+          workers -= 1;
+        };
+      },
     },
-  });
+    caps.maxCalls,
+  );
 
   const policy = defineExtension({
     name: "pal.policy",
@@ -74,11 +119,6 @@ export function createPalCodemode(options: PalCodemodeOptions): {
         beforeTool: async (call, api) => {
           if (call.parent === undefined) {
             return call.name === CODEMODE_TOOL_NAME ? capScript(call.arguments.code, caps) : undefined;
-          }
-          // Code mode keys nested calls `c<VM call number>`, so the count survives replay without state.
-          const number = /\/c(\d+)$/.exec(call.id)?.[1];
-          if (number !== undefined && Number(number) > caps.maxCalls) {
-            return { block: `script call limit of ${caps.maxCalls} reached` };
           }
           if (!(await options.allows(api.conversationId, call.name))) {
             return { block: `${call.name} is not granted to this conversation` };
@@ -94,7 +134,19 @@ export function createPalCodemode(options: PalCodemodeOptions): {
     return { ...agent, callable: agent.callable.filter((_tool, index) => allowed[index]) };
   }
   const withNamespaces = (namespaces: readonly CodemodeNamespace[]): Extension => {
-    const extension = createCodemodeExtension({ sandbox, models: false, namespaces });
+    const extension = createCodemodeExtension({
+      sandbox,
+      models: false,
+      namespaces,
+      globals: [
+        {
+          name: CALL_LIMIT_GLOBAL,
+          execute: async () => {
+            throw new Error(`script call limit of ${caps.maxCalls} reached`);
+          },
+        },
+      ],
+    });
     // Native Code Mode snapshots callable metadata; execution checks alone would still expose ungranted tools.
     return {
       ...extension,

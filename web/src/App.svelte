@@ -4,6 +4,7 @@
   import Workspace from "./components/Workspace.svelte";
   import { api, type Session, signedOut } from "./lib/api.ts";
   import { shownTheme } from "./lib/state.svelte.ts";
+  import { drafts } from "./lib/drafts.svelte.ts";
 
   let session: Session | undefined = $state();
   let failure: string | undefined = $state();
@@ -20,6 +21,7 @@
   onMount(() => {
     void load();
     const ended = () => {
+      drafts.clear();
       if (session !== undefined) session = { ...session, signedIn: false };
     };
     signedOut.addEventListener("signed-out", ended);
@@ -35,6 +37,7 @@
   });
 
   async function signOut() {
+    drafts.clear();
     await api.signOut().catch(() => {});
     await load();
   }

@@ -9,6 +9,13 @@ import type { McpServerInput, McpServerView as McpServer } from "../../../src/pi
 export type { McpAuth, McpState } from "../../../src/pi/mcp.ts";
 export type { McpServer, McpServerInput };
 
+import type { Admission } from "../../../src/core/chats.ts";
+export type { Admission };
+import type { ScheduleInput, ScheduleNotice, ScheduleView } from "../../../src/core/schedules.ts";
+export type { ScheduleInput, ScheduleNotice, ScheduleView };
+export type { HelperView } from "../../../src/core/delegation.ts";
+export type Scheduler = { enabled: boolean; schedules: (ScheduleView & { chat: string | null })[] };
+
 export type Session = { owner: boolean; signedIn: boolean };
 export type { Change, ChangeComment, ChangeSet } from "../../../src/core/changes.ts";
 export type { TerminalInfo } from "../../../src/core/terminals.ts";
@@ -18,6 +25,12 @@ export type { GrantedFolder } from "../../../src/core/folders.ts";
 export type { Workspace, WorkspaceMode } from "../../../src/core/workspaces.ts";
 export type { MemoryItem, MemoryInput } from "../../../src/core/memory.ts";
 export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
+import type { WorkingState } from "../../../src/core/working-state.ts";
+export type WorkingStateInfo = Awaited<ReturnType<WorkingState["inspect"]>>;
+import type { InstructionInfo, InstructionSettings } from "../../../src/core/instructions.ts";
+export type { InstructionInfo, InstructionSettings };
+import type { SkillInfo, SkillSettings } from "../../../src/core/skills.ts";
+export type { SkillInfo, SkillSettings };
 export type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
 export type { CompatibleConfig, KeyCheck, ProviderModel, ProviderView } from "../../../src/pi/providers.ts";
 export type ModelRef = { provider: string; modelId: string };
@@ -97,14 +110,18 @@ export class ApiError extends Error {
 /** Called when the server says the owner's session ended, so the app can show sign-in again. */
 export const signedOut = new EventTarget();
 
-async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`/api/${path}`, {
     method,
     cache: "no-store",
+    signal: signal ?? null,
     headers: body === undefined ? {} : { "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const data = (await response.json().catch(() => ({}))) as { error?: string; message?: string };
+  const data = (await response.json().catch((error: unknown) => {
+    if (response.ok) throw error;
+    return {};
+  })) as { error?: string; message?: string };
   if (!response.ok) {
     if (response.status === 401 && data.error === "signed_out") signedOut.dispatchEvent(new Event("signed-out"));
     throw new ApiError(response.status, data.error ?? "error", data.message ?? `HTTP ${response.status}`);
@@ -118,6 +135,14 @@ export const requestId = (): string =>
   Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
 export const api = {
+  skills: (id: string, signal?: AbortSignal) => call<SkillInfo>("GET", `chats/${id}/skills`, undefined, signal),
+  configureSkills: (id: string, settings: SkillSettings) => call<SkillInfo>("PUT", `chats/${id}/skills`, settings),
+  selectSkills: (id: string, revision: number, skills: { id: string; revision: string }[]) =>
+    call<SkillInfo>("PUT", `chats/${id}/skills/selection`, { revision, skills }),
+  instructions: (id: string, signal?: AbortSignal) =>
+    call<InstructionInfo>("GET", `chats/${id}/instructions`, undefined, signal),
+  configureInstructions: (id: string, settings: InstructionSettings) =>
+    call<InstructionInfo>("PUT", `chats/${id}/instructions`, settings),
   releases: () => call<ReleaseView>("GET", "releases"),
   releaseReview: (digest: string, path: string) =>
     call<ReleaseReview>("GET", `releases/${digest}/review?path=${encodeURIComponent(path)}`),
@@ -143,6 +168,8 @@ export const api = {
   chatgptPaste: (url: string) => call<ChatGPTState>("POST", "chatgpt/sign-in/paste", { url }),
   chatgptCancel: () => call<ChatGPTState>("DELETE", "chatgpt/sign-in"),
   chatgptSignOut: () => call<ChatGPTState>("POST", "chatgpt/sign-out"),
+  modelSetup: () => call<{ deferred: boolean }>("GET", "model-setup"),
+  deferModelSetup: (deferred: boolean) => call<{ deferred: boolean }>("PUT", "model-setup", { deferred }),
   providers: () => call<ProvidersState>("GET", "providers"),
   providerKey: (id: string, key: string | null) =>
     key === null
@@ -176,6 +203,16 @@ export const api = {
       inWorkspace(`projects/${id}/changes?scope=${scope}`, workspace),
     ),
   context: (id: string) => call<import("../../../src/core/context.ts").ContextInfo>("GET", `chats/${id}/context`),
+  workingState: (id: string, signal?: AbortSignal) =>
+    call<WorkingStateInfo>("GET", `chats/${id}/context/working-state`, undefined, signal),
+  saveWorkingGoal: (id: string, goal: WorkingStateInfo["goal"]) =>
+    call<WorkingStateInfo>("PUT", `chats/${id}/context/working-state`, goal),
+  acceptWorkingChecks: (id: string, digest: string) =>
+    call<WorkingStateInfo>("POST", `chats/${id}/context/working-review`, { digest }),
+  saveWorkingAllowance: (
+    id: string,
+    value: Pick<WorkingStateInfo["allowance"], "revision" | "goalRevision" | "limits">,
+  ) => call<WorkingStateInfo>("PUT", `chats/${id}/context/working-allowance`, value),
   pinInstructions: (id: string, revision: number, text: string) =>
     call<{ saved: boolean }>("PUT", `chats/${id}/context/instructions`, { revision, text }),
   contextPrompt: (id: string, offset = 0, request?: string) =>
@@ -264,8 +301,6 @@ export const api = {
     }),
   uncomment: (id: string, comment: string, workspace?: string) =>
     call<{ deleted: true }>("DELETE", inWorkspace(`projects/${id}/comments/${comment}`, workspace)),
-  commentsSent: (id: string, ids: string[], scope: ReviewScope = "normal", workspace?: string) =>
-    call<{ sent: true }>("POST", `projects/${id}/comments/sent`, { ids, scope, workspace }),
   review: (
     id: string,
     path: string,
@@ -306,25 +341,50 @@ export const api = {
   prepareWorkspace: (id: string) => call<{ chat: ChatSummary }>("POST", `chats/${id}/workspace`, {}),
   deleteChat: (id: string) => call<{ removed: true }>("DELETE", `chats/${id}`),
   chat: (id: string) =>
-    call<{ chat: ChatSummary; model: string | null; provider: string | null; effort: Effort }>("GET", `chats/${id}`),
-  send: (id: string, key: string, text: string, whenBusy: "followUp" | "steer", attachments: string[]) =>
-    call<{ admission: { submissionId: number } }>("POST", `chats/${id}/inputs`, {
-      requestId: key,
-      text,
-      whenBusy,
-      ...(attachments.length === 0 ? {} : { attachments }),
-    }),
+    call<{ chat: ChatSummary; model: string | null; provider: string | null; effort: Effort; configuration: string }>(
+      "GET",
+      `chats/${id}`,
+    ),
+  send: (
+    id: string,
+    key: string,
+    text: string,
+    whenBusy: "followUp" | "steer",
+    attachments: readonly string[],
+    configuration: string,
+    signal?: AbortSignal,
+    feedback?: import("../../../src/core/feedback.ts").ReviewFeedback,
+  ) =>
+    call<{ admission: Admission }>(
+      "POST",
+      `chats/${id}/inputs`,
+      {
+        requestId: key,
+        text,
+        whenBusy,
+        configuration,
+        feedback,
+        ...(attachments.length === 0 ? {} : { attachments }),
+      },
+      signal,
+    ),
   /** Admit an upload, then stream its bytes; the server checks size and hashes while receiving. */
-  upload: async (projectId: string, file: File): Promise<Upload> => {
-    const { upload } = await call<{ upload: Upload }>("POST", `projects/${projectId}/uploads`, {
-      name: file.name,
-      size: file.size,
-      type: file.type,
-    });
+  upload: async (projectId: string, file: File, signal?: AbortSignal): Promise<Upload> => {
+    const { upload } = await call<{ upload: Upload }>(
+      "POST",
+      `projects/${projectId}/uploads`,
+      {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+      },
+      signal,
+    );
     const response = await fetch(`/api/uploads/${upload.id}`, {
       method: "PUT",
       headers: { "content-type": "application/octet-stream" },
       body: file,
+      signal: signal ?? null,
     });
     const data = (await response.json()) as { upload?: Upload; error?: string; message?: string };
     if (!response.ok || data.upload === undefined) {
@@ -333,6 +393,29 @@ export const api = {
     return data.upload;
   },
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
+  helpers: (chat: string) =>
+    call<{ helpers: import("../../../src/core/delegation.ts").HelperView[] }>("GET", `chats/${chat}/helpers`),
+  scheduler: () => call<Scheduler>("GET", "scheduler"),
+  setScheduler: (enabled: boolean) => call<Scheduler>("PUT", "scheduler", { enabled }),
+  schedules: (chat: string) =>
+    call<{ enabled: boolean; notice: ScheduleNotice; schedules: ScheduleView[] }>("GET", `chats/${chat}/schedules`),
+  /** Sending it is the owner's approval of the notice's cost and effects for every run. */
+  createSchedule: (chat: string, key: string, input: ScheduleInput) =>
+    call<{ schedule: ScheduleView }>("POST", `chats/${chat}/schedules`, {
+      requestId: key,
+      ...input,
+      acknowledged: true,
+    }),
+  changeSchedule: (chat: string, id: string, change: "pause" | "cancel") =>
+    call<{ schedule: ScheduleView }>("POST", `chats/${chat}/schedules/${id}/${change}`, {}),
+  resumeSchedule: (chat: string, id: string, notice: Pick<ScheduleNotice, "configuration" | "mode">) =>
+    call<{ schedule: ScheduleView }>("POST", `chats/${chat}/schedules/${id}/resume`, {
+      configuration: notice.configuration,
+      mode: notice.mode,
+      acknowledged: true,
+    }),
+  diagnostics: () => call<Record<string, unknown>>("GET", "diagnostics"),
+  chatDiagnostics: (id: string) => call<Record<string, unknown>>("GET", `chats/${id}/diagnostics`),
   renameChat: (id: string, title: string, expectedTitle: string | null) =>
     call<{ chat: ChatSummary }>("PUT", `chats/${id}/title`, { title, expectedTitle }),
   setCommandMode: (id: string, mode: import("../../../src/core/approvals.ts").CommandMode) =>
@@ -342,8 +425,13 @@ export const api = {
       decision,
       digest,
     }),
-  setChatModel: (id: string, model: string, effort?: Effort, provider?: string) =>
-    call<{ model: string; provider: string; effort: Effort }>("PUT", `chats/${id}/model`, { model, effort, provider }),
+  setChatModel: (id: string, model: string, effort?: Effort, provider?: string, expected?: string) =>
+    call<{ model: string; provider: string; effort: Effort; configuration: string }>("PUT", `chats/${id}/model`, {
+      model,
+      effort,
+      provider,
+      expected,
+    }),
 
   mcp: () => call<McpListing>("GET", "mcp"),
   mcpReview: (enable: boolean) => call<McpListing>("POST", "mcp/review", { enable }),
@@ -363,5 +451,6 @@ export const api = {
   mcpFakeIp: (id: string, enabled: boolean) =>
     call<{ server: McpServer }>("PUT", `mcp/servers/${id}/fake-ip`, { enabled }),
   mcpTest: (id: string) => call<{ server: McpServer }>("POST", `mcp/servers/${id}/test`),
-  mcpTools: (id: string, tools: string[]) => call<{ server: McpServer }>("PUT", `mcp/servers/${id}/tools`, { tools }),
+  mcpTools: (id: string, tools: string[], catalog: string) =>
+    call<{ server: McpServer }>("PUT", `mcp/servers/${id}/tools`, { tools, catalog }),
 };

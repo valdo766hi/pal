@@ -7,8 +7,9 @@ for sensitive work.
 ## Owner access
 
 - **Setup.** The first owner is created only through a one-time setup token printed on the server's terminal.
-  The passphrase must have at least 12 characters and is stored as an scrypt hash. Repeated wrong passphrases are
-  throttled.
+  The passphrase must have at least 12 characters and is stored as an scrypt hash. Sign-in admits at most ten
+  combined pending attempts and wrong passphrases completed in the last ten minutes. Pending attempts cannot age
+  out; successes and internal errors release their slot. This process-local limiter resets on restart.
 - **Sessions.** Sessions are random opaque tokens in an `HttpOnly`, `SameSite=Strict` cookie, `Secure` behind
   HTTPS. They are stored only as SHA-256 hashes and expire after 30 days. Signing out also closes that session's
   terminal and browser connections.
@@ -26,15 +27,39 @@ for sensitive work.
   different account than the one connected.
 - **No ambient keys.** Pal never reads model keys from its environment. Credentials are never passed to agent
   commands, terminals or local programs, except a local program's own consented key.
+- **Diagnostics.** The owner-only diagnostics export (Settings, and a chat's problem notices) holds versions,
+  states, counts, request IDs and command exit codes. It omits keys, tokens, server addresses, commands, outputs and
+  chat or file contents. Free-form provider and workspace errors are not exported: model failures use coarse
+  categories, not error bodies. Inspect detailed failures locally; review IDs and other metadata before sharing.
 
 ## What the agent can do
 
 The model has a single tool, `codemode`. Its scripts run in a QuickJS sandbox with memory, time, output and
-call-count limits, and can reach the host only through granted tools. Each call is checked against the current
+call-count limits, and can reach the host only through granted tools. Each tool call is checked against the current
 grants, workspace and command-approval mode immediately before it runs.
 
-- **File tools** resolve real paths, refuse symlink escapes and never touch Pal's data directory or credentials.
-  Writes are refused when the file changed since the agent read it.
+Each script has one 100-call host budget shared by `tools.*`, `searchTools()`, `describeTool()` and
+`describeNamespace()`, including rejected calls. Local output, `store()`/`load()` and `ALL_TOOLS` do not consume it.
+Pi journals budget rejections in the same order as other results. Changing the call limit or its adapter version
+refuses an unfinished replay rather than silently resetting its budget.
+
+- **File tools** resolve real paths and refuse symlink escapes and paths inside Pal's data directory.
+  Before reading project content, file tools, previews, Changes, memory and guidance also check the opened file's
+  identity against Pal's database, WAL/SHM and credential key. Startup identities remain protected after a rename;
+  current private paths cover replacements. Known private identities are refused before open too: closing a
+  database alias could release SQLite's locks. Native fff work runs in up to three lazy child processes for that
+  reason, with no credentials and a fixed ten-minute external lifetime plus one-second kill grace. This is process
+  separation, not a sandbox or native-memory cap. Search snippets are re-read through the file policy before delivery.
+  Ordinary project hardlinks remain usable. This does not identify copied secret bytes or every historical private
+  object; listings can still show alias metadata. Writes check the revision the agent read. Each write runs in a
+  short-lived helper whose working directory is the checked parent folder; relative operations cannot be redirected
+  into a replacement folder or symlink.
+  Parent/revision/grant changes observed before preparation or publication refuse the write, and unpublished
+  temporary files are cleaned up, including when Pal is killed mid-write. These checks are not an atomic
+  filesystem snapshot: a parent renamed after the final check can carry the write with the original folder,
+  even outside the project. Other programs can also change contents after the last revision check. Reads,
+  listings and searches still resolve paths when they run. Nothing serializes or confines other host processes
+  or the agent's own shell commands, which run as the same user.
 - **Shell commands are not sandboxed.** They run on the host as the user running Pal, starting in the chat's
   working folder. The environment is clean (no Pal secrets or shell profiles). Commands have at most 120 seconds
   and a bounded output, and Stop kills their process group. GNU `timeout` keeps the deadline even if Pal itself
@@ -55,20 +80,30 @@ grants, workspace and command-approval mode immediately before it runs.
   Without rtk, or without an equivalent, the command runs unchanged.
 
 Treat workspace files, web pages and tool results as untrusted input. They can contain instructions meant for the
-model (prompt injection), and Pal does not grant them any authority. Keep Ask mode on for chats that read content
-you do not control.
+model (prompt injection), and Pal never grants them tool permissions or policy authority. AGENTS.md and SKILL.md
+metadata, bodies and references are subordinate to core policy and the current user. Source settings grant bounded
+document reads, not execution or access to the rest of the home directory. References cannot traverse outside their
+skill package or follow source symlinks/hardlinks; Pal's protected paths and retained private inodes remain denied.
+Loading does not run bundled scripts, import code, install dependencies or honor permission claims. Later actions
+still use existing tool policy and approvals. These checks are not an atomic-filesystem guarantee. Keep Ask mode on
+for chats that read content you do not control.
 
 ## Internet tools
 
 - **Network policy.** Remote MCP servers must use HTTPS. Connections to loopback, private, link-local and other
   non-public addresses are refused at connect time, after DNS resolution, unless you opt a server into a private
   endpoint. Redirects are refused, and responses and results are size-limited.
-- **Tool approval.** You approve exact tool definitions. A changed definition is blocked until approved again, and
+- **Tool approval.** You approve exact tool definitions against the displayed catalog digest and connection
+  authority. Stale submissions conflict without changing approvals; the UI keeps the old selection for comparison
+  and requires review of the current definitions. A changed definition is blocked until approved again, and
   disabling a server or revoking a grant stops calls that are already queued or running.
 - **Local MCP programs** are trusted code that runs unsandboxed on the host, like shell commands. Only
   Nix-store executables with exact arguments are accepted, after explicit consent.
 
 ## Browser
+
+The project browser currently requires Linux. Native macOS DOM-policy fixtures do not provide a production
+macOS browser sandbox.
 
 - **Sandbox.** Each project browser runs Chromium with its own sandbox inside bubblewrap, with every namespace
   unshared. It sees only the read-only Nix store, a private `/tmp` and its profile, and has no network at all.
@@ -81,7 +116,40 @@ you do not control.
 - **Agent handoff.**
   - The agent uses the browser only after you hand control over, and you can take it back at any time.
   - It sees bounded page text, not your frames, and acts only on elements it has just inspected.
-  - It cannot type into username, password or one-time-code fields; sign-ins are yours.
+  - Every action still needs exact owner approval, including in Full access mode.
+  - Native password/email inputs and known credential cues (autocomplete, names, labels and placeholders for
+    usernames, passwords, PIN/OTP codes, API keys, tokens and payment-card fields) require owner control. This also
+    covers hidden/offscreen declarations and multi-step email/OTP forms.
+  - Editable/custom textbox widgets, frames/embedded documents, open shadow roots, custom elements and oversized
+    DOMs or field metadata conservatively require the owner. Their page text, title and targets are withheld.
+  - Native input, textarea and select values are not read for observations. Public text fields remain available
+    through freshly inspected targets; privacy and target metadata are rechecked before a DOM action.
+
+These are bounded, English-cue/DOM heuristics, **not universal credential recognition or data-loss prevention**.
+Canvas controls, closed shadow roots on ordinary elements, unusual/localized semantics and secrets copied into
+ordinary page text may not be recognized. Closed/inaccessible widget interiors are not inspected or offered as
+input targets. Keep sensitive pages under owner control; do not hand them to the agent based only on a detection
+result. Privacy heuristics are separate from the enforced network/process isolation above.
+
+### macOS adapter gate
+
+No macOS browser adapter is qualified yet. Keep the feature unavailable rather than substitute a proxy-only
+browser or remove Chromium's sandbox. The candidates have different proof obligations:
+
+- **Native helper:** prove restricted filesystem visibility, broker-only egress, whole-process-tree resource bounds
+  and cleanup after controller death. Chromium's own sandbox alone does not establish these outer guarantees.
+- **Optional hardware VM:** requires a virtualization-capable native test host. Prove per-project storage, no host
+  data/key mounts, broker-only guest I/O, bounded host resources and orphan cleanup; a guest RAM setting is not an
+  aggregate host-memory limit. Native framework eligibility is only a prerequisite, not security evidence.
+- **QEMU software emulation:** [TCG runs on macOS](https://www.qemu.org/docs/master/system/introduction.html), but
+  QEMU's [security policy](https://www.qemu.org/docs/master/system/security.html) explicitly excludes TCG guest
+  isolation guarantees. Do not use it alone as the security boundary. QEMU also documents effectively unbounded
+  worst-case host memory and privileged monitor interfaces; neither fixed guest RAM nor an exposed monitor is an
+  acceptable replacement for host policy.
+
+Choose an adapter only after native tests demonstrate the same confinement, approvals, resource limits and crash
+recovery as Linux, and measure its startup/memory/install cost. Chat, DOM-policy or VM boot fixtures alone cannot
+qualify it. Any VM experiment needs a reviewed plan before it starts; no mechanism is selected by this comparison.
 
 ## Not covered
 

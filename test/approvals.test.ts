@@ -239,7 +239,13 @@ describe("command approval modes", () => {
       cleanups.push(() => rm(dataRoot, { recursive: true, force: true }));
       const process_ = spawn(
         process.execPath,
-        [join(import.meta.dirname, "fixtures/approvals-child.ts"), dataRoot, command, approve ? "approve" : ""],
+        [
+          ...process.execArgv,
+          join(import.meta.dirname, "fixtures/approvals-child.ts"),
+          dataRoot,
+          command,
+          approve ? "approve" : "",
+        ],
         { stdio: ["ignore", "pipe", "inherit"] },
       );
       cleanups.push(async () => {

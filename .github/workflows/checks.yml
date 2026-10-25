@@ -1,0 +1,273 @@
+---
+name: Checks
+
+"on":
+  push:
+    branches: [development]
+  pull_request:
+    branches: [development]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: Portable (${{ matrix.system }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            system: x86_64-linux
+          - runner: macos-15
+            system: aarch64-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+          enable_kvm: false
+      - name: Verify native target and record identity
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          native=$(nix eval --impure --raw --expr builtins.currentSystem)
+          test "$native" = "$SYSTEM"
+          git rev-parse HEAD 'HEAD^{tree}' | tee identity.txt
+          uname -srm | tee -a identity.txt
+          nix --version | tee -a identity.txt
+          if [ "$RUNNER_OS" = macOS ]; then
+            /usr/bin/swift -e '
+              import Virtualization
+              let supported = VZVirtualMachine.isSupported
+              print("virtualization_supported=\(supported)")
+            ' | tee -a identity.txt
+          fi
+      - name: Static checks, portable tests and build
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link result \
+            ".#checks.$SYSTEM.portable"
+          cp result/summary.json summary.json
+      - name: Packaged core and backup CLI smoke
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link smoke-result \
+            ".#checks.$SYSTEM.smoke"
+          readlink smoke-result | tee -a identity.txt
+          mkdir smoke
+          cp smoke-result/*.json smoke-result/*.jsonl smoke/
+      - name: Native process acceptance outside the build sandbox
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link native-runner \
+            ".#packages.$SYSTEM.native-check"
+          readlink native-runner | tee -a identity.txt
+          ./native-runner/bin/pal-native-check "$PWD/native-process"
+      - name: Independent development-task grading controls
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link grading \
+            ".#checks.$SYSTEM.evaluation"
+          cp grading/summary.json grading-summary.json
+      - name: Native macOS chat UI subset
+        if: runner.os == 'macOS'
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link ui-runner \
+            ".#packages.$SYSTEM.ui-check"
+          readlink ui-runner | tee -a identity.txt
+          ./ui-runner/bin/pal-ui-check "$PWD/native-ui"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 0ac668e4996e56a4bfc1725a37ab9a4a31c6b6f1
+          path: benchmark-baseline
+          persist-credentials: false
+      - name: Packaged startup measurements, not model evaluations
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link baseline-package \
+            "./benchmark-baseline#packages.$SYSTEM.default"
+          nix build --max-jobs 2 --cores 2 -L --out-link candidate-package \
+            ".#packages.$SYSTEM.default"
+          nix build --max-jobs 2 --cores 2 -L --out-link startup-benchmark \
+            ".#packages.$SYSTEM.startup-benchmark"
+          ./startup-benchmark/bin/pal-benchmark-startup \
+            "$PWD/baseline-package" 7 > startup-baseline.json
+          ./startup-benchmark/bin/pal-benchmark-startup \
+            "$PWD/candidate-package" 7 > startup-candidate.json
+      - name: Loopback MCP cache measurements, not provider latency
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link mcp-benchmark \
+            ".#packages.$SYSTEM.mcp-benchmark"
+          ./mcp-benchmark/bin/pal-benchmark-mcp 7 > mcp-candidate.json
+      - name: Optional capability activation measurements, not provider latency
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link activation-benchmark \
+            ".#packages.$SYSTEM.activation-benchmark"
+          for capability in search terminal; do
+            ./activation-benchmark/bin/pal-benchmark-activation \
+              "$capability" 7 > "activation-$capability.json"
+          done
+      # Hosted Ubuntu 24.04 disallows the user namespaces Chromium's sandbox
+      # needs; Linux transcripts run in the Ubuntu 22.04 job below instead.
+      - name: Long-chat transcript measurements, not model evaluations
+        if: runner.os == 'macOS'
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link transcript-benchmark \
+            ".#packages.$SYSTEM.transcript-benchmark"
+          for name in baseline candidate; do
+            ./transcript-benchmark/bin/pal-benchmark-transcript \
+              "$PWD/$name-package/lib/pal/dist/public" 7 \
+              > "transcript-$name.json"
+          done
+      - name: Check measured-host performance budgets
+        env:
+          SYSTEM: ${{ matrix.system }}
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link performance-check \
+            ".#packages.$SYSTEM.performance-check"
+          ./performance-check/bin/pal-check-performance \
+            core "$PWD" > performance-core.json
+          if test -f transcript-candidate.json; then
+            ./performance-check/bin/pal-check-performance \
+              transcript "$PWD" > performance-transcript.json
+          fi
+      - name: Publish bounded coverage summary
+        run: |
+          printf '### Native core checks\n\n' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n\n' 'Not a full browser/security/release parity gate.' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < identity.txt
+          tee -a "$GITHUB_STEP_SUMMARY" < summary.json
+          printf '\n### Host process acceptance\n\n' >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < native-process/summary.json
+          printf '\n### Packaged core and backup smoke\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < smoke/restore-check.json
+          printf '\n### Grading controls, not model evaluations\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < grading-summary.json
+          printf '\n### Packaged startup; warm filesystem caches\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < startup-baseline.json
+          tee -a "$GITHUB_STEP_SUMMARY" < startup-candidate.json
+          printf '\n### Loopback MCP cache; scripted model\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < mcp-candidate.json
+          printf '\n### Optional capability activation; main-process RSS\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < activation-search.json
+          tee -a "$GITHUB_STEP_SUMMARY" < activation-terminal.json
+          printf '\n### Measured-host performance budgets\n\n' \
+            >> "$GITHUB_STEP_SUMMARY"
+          tee -a "$GITHUB_STEP_SUMMARY" < performance-core.json
+          if test -f transcript-candidate.json; then
+            printf '\n### Long-chat transcript; selected web bundles\n\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            tee -a "$GITHUB_STEP_SUMMARY" < transcript-baseline.json
+            tee -a "$GITHUB_STEP_SUMMARY" < transcript-candidate.json
+            tee -a "$GITHUB_STEP_SUMMARY" < performance-transcript.json
+          fi
+          if test -f native-ui/summary.json; then
+            printf '\n### Native chat UI subset\n\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            tee -a "$GITHUB_STEP_SUMMARY" < native-ui/summary.json
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: portable-${{ matrix.system }}
+          path: |
+            identity.txt
+            summary.json
+            grading-summary.json
+            native-process/summary.json
+            smoke/
+            startup-baseline.json
+            startup-candidate.json
+            mcp-candidate.json
+            activation-search.json
+            activation-terminal.json
+            performance-core.json
+            performance-transcript.json
+            transcript-baseline.json
+            transcript-candidate.json
+            native-ui/summary.json
+            native-ui/screenshots/
+          retention-days: 7
+          if-no-files-found: error
+
+  linux:
+    name: Linux packaged checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.34.9/install
+          enable_kvm: false
+      - name: Package, smoke, full unit, browser and e2e
+        run: |
+          git rev-parse HEAD 'HEAD^{tree}'
+          nix build --max-jobs 2 --cores 2 --no-link --print-out-paths -L \
+            .#checks.x86_64-linux.package .#checks.x86_64-linux.smoke \
+            .#checks.x86_64-linux.tests .#checks.x86_64-linux.browser \
+            .#checks.x86_64-linux.e2e
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 0ac668e4996e56a4bfc1725a37ab9a4a31c6b6f1
+          path: benchmark-baseline
+          persist-credentials: false
+      - name: Long-chat transcript measurements, not model evaluations
+        run: |
+          nix build --max-jobs 2 --cores 2 -L --out-link baseline-package \
+            ./benchmark-baseline#packages.x86_64-linux.default
+          nix build --max-jobs 2 --cores 2 -L --out-link candidate-package \
+            .#packages.x86_64-linux.default
+          nix build --max-jobs 2 --cores 2 -L --out-link transcript-benchmark \
+            .#packages.x86_64-linux.transcript-benchmark
+          for name in baseline candidate; do
+            ./transcript-benchmark/bin/pal-benchmark-transcript \
+              "$PWD/$name-package/lib/pal/dist/public" 7 \
+              > "transcript-$name.json"
+          done
+          nix build --max-jobs 2 --cores 2 -L --out-link performance-check \
+            .#packages.x86_64-linux.performance-check
+          ./performance-check/bin/pal-check-performance \
+            transcript "$PWD" > performance-transcript.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: linux-transcript
+          path: |
+            transcript-baseline.json
+            transcript-candidate.json
+            performance-transcript.json
+          retention-days: 7
+          if-no-files-found: error

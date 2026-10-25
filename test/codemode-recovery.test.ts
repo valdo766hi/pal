@@ -37,8 +37,12 @@ async function startService() {
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests, writeInFlight };
 }
 
-function runChild(args: string[]): { process: ChildProcess; output: () => Promise<string> } {
-  const proc = spawn(process.execPath, [child, ...args], { stdio: ["ignore", "pipe", "inherit"] });
+function runChild(args: string[]): {
+  process: ChildProcess;
+  checkpoint: Promise<unknown[]>;
+  output: () => Promise<string>;
+} {
+  const proc = spawn(process.execPath, [child, ...args], { stdio: ["ignore", "pipe", "inherit", "ipc"] });
   cleanups.push(async () => {
     if (proc.exitCode === null && proc.signalCode === null) {
       proc.kill("SIGKILL");
@@ -50,6 +54,7 @@ function runChild(args: string[]): { process: ChildProcess; output: () => Promis
   const exited = once(proc, "exit");
   return {
     process: proc,
+    checkpoint: once(proc, "message"),
     output: async () => {
       const [code] = await exited;
       if (code !== 0) throw new Error(`child exited ${code}`);
@@ -59,18 +64,20 @@ function runChild(args: string[]): { process: ChildProcess; output: () => Promis
 }
 
 /** Kill a first process while its non-replay-safe write is in flight, then resume in a second one. */
-async function crashDuringWrite(resumeArgs: string[] = []) {
+async function crashDuringWrite(resumeArgs: string[] = [], scenario?: "budget" | "budget-journal") {
   const service = await startService();
   const dataRoot = await mkdtemp(join(tmpdir(), "pal-codemode-recovery-"));
   cleanups.push(() => rm(dataRoot, { recursive: true, force: true }));
 
-  const first = runChild(["start", dataRoot, service.url]);
+  const mode = scenario === undefined ? [] : [scenario];
+  const first = runChild(["start", dataRoot, service.url, ...mode]);
   await service.writeInFlight;
+  if (scenario === "budget-journal") expect((await first.checkpoint)[0]).toBe("budget-journaled");
   first.process.kill("SIGKILL");
   await once(first.process, "exit");
   const beforeResume = [...service.requests];
 
-  const resumed = runChild(["resume", dataRoot, service.url, ...resumeArgs]);
+  const resumed = runChild(["resume", dataRoot, service.url, ...mode, ...resumeArgs]);
   const results = JSON.parse((await resumed.output()).trim()) as {
     isError?: boolean;
     text?: string;
@@ -92,6 +99,71 @@ describe("code mode recovery", () => {
     expect(script?.text).toMatch(/"b":"unknown: [^"]*interrupted/i);
     expect(script?.text).toContain('"c":"value of c"');
     expect(results.at(-1)).toEqual({ answer: "Done." });
+  });
+
+  it("retains the evaluation turn allowance and deadline across SIGKILL without refilling or replaying effects", async () => {
+    const service = await startService();
+    const dataRoot = await mkdtemp(join(tmpdir(), "pal-evaluation-crash-budget-"));
+    cleanups.push(() => rm(dataRoot, { recursive: true, force: true }));
+    const args = [dataRoot, service.url, "evaluation", String(Date.now() + 60_000)];
+    const first = runChild(["start", ...args]);
+    await service.writeInFlight;
+    first.process.kill("SIGKILL");
+    await once(first.process, "exit");
+    expect(service.requests).toEqual(["GET /read?key=a", "POST /write?key=b"]);
+    const resumed = runChild(["resume", ...args]);
+    const report = JSON.parse((await resumed.output()).trim()) as {
+      results: { isError?: boolean; text?: string; answer?: string }[];
+      turns: number;
+      exceeded: boolean;
+      modelCallsAfterRestart: number;
+      budgetChangeRefused: boolean;
+    };
+    expect(report).toMatchObject({
+      turns: 1,
+      exceeded: true,
+      modelCallsAfterRestart: 0,
+      budgetChangeRefused: true,
+    });
+    expect(service.requests).toEqual(["GET /read?key=a", "POST /write?key=b", "GET /read?key=c"]);
+    const script = report.results.find((result) => result.text !== undefined);
+    expect(script?.isError).toBe(false);
+    expect(script?.text).toMatch(/"b":"unknown: [^"]*interrupted/i);
+    expect(script?.text).toContain('"c":"value of c"');
+    expect(report.results.some((result) => result.answer === "Done.")).toBe(false);
+  });
+
+  it("keeps the shared discovery/tool budget across SIGKILL without charging replayed calls twice", async () => {
+    const { requests, beforeResume, results } = await crashDuringWrite([], "budget");
+    expect(beforeResume).toEqual(["GET /read?key=a", "POST /write?key=b"]);
+    expect(requests).toEqual(beforeResume);
+    const script = results.find((result) => result.text !== undefined);
+    expect(script?.isError).toBe(false);
+    expect(script?.text).toContain('"a":"value of a"');
+    expect(script?.text).toMatch(/"b":"unknown: [^"]*interrupted/i);
+    expect(script?.text).toMatch(/"discovery":"[^"]*script call limit of 3 reached/);
+    expect(script?.text).toMatch(/"c":"[^"]*script call limit of 3 reached/);
+    expect(results.at(-1)).toEqual({ answer: "Done." });
+  });
+
+  it("replays a journaled over-budget rejection while an earlier allowed call is interrupted", async () => {
+    const { requests, beforeResume, results } = await crashDuringWrite([], "budget-journal");
+    expect(beforeResume).toHaveLength(2);
+    expect(beforeResume).toEqual(expect.arrayContaining(["GET /read?key=a", "POST /write?key=b"]));
+    expect(requests).toEqual(beforeResume);
+    const script = results.find((result) => result.text !== undefined);
+    expect(script?.isError).toBe(false);
+    expect(script?.text).toContain('"a":"value of a"');
+    expect(script?.text).toMatch(/"b":"unknown: [^"]*interrupted/i);
+    expect(script?.text).toMatch(/"discovery":"[^"]*script call limit of 3 reached/);
+  });
+
+  it("refuses to resume an unfinished script under a different call budget", async () => {
+    const { requests, results } = await crashDuringWrite(["4"], "budget");
+    expect(requests).toEqual(["GET /read?key=a", "POST /write?key=b"]);
+    const script = results.find((result) => result.text !== undefined);
+    expect(script?.isError).toBe(true);
+    expect(script?.text).toMatch(/cannot resume: the sandbox changed/);
   });
 
   it("stops visibly instead of resuming on a changed sandbox", async () => {

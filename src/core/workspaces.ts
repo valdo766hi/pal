@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
+import type { HelperLinks } from "./delegation.ts";
 import type { FolderLease } from "./folders.ts";
 import { FileAccessError } from "./files.ts";
 import { HttpError } from "./http.ts";
@@ -57,13 +58,20 @@ export class Workspaces {
   readonly #database: SqliteDatabase;
   readonly #projects: Projects;
   readonly #files: WorktreeFiles;
+  readonly #links: Pick<HelperLinks, "chat"> | undefined;
   readonly #jobs = new Map<string, { controller: AbortController; promise: Promise<Workspace> }>();
   #closing = false;
 
-  private constructor(database: SqliteDatabase, projects: Projects, files: WorktreeFiles) {
+  private constructor(
+    database: SqliteDatabase,
+    projects: Projects,
+    files: WorktreeFiles,
+    links: Pick<HelperLinks, "chat"> | undefined,
+  ) {
     this.#database = database;
     this.#projects = projects;
     this.#files = files;
+    this.#links = links;
   }
 
   static async open(
@@ -71,11 +79,13 @@ export class Workspaces {
     projects: Projects,
     dataRoot: string,
     installRoot: string,
+    links?: Pick<HelperLinks, "chat">,
   ): Promise<Workspaces> {
     const service = new Workspaces(
       database,
       projects,
       new WorktreeFiles(dataRoot, [dataRoot, installRoot, "/nix/store"]),
+      links,
     );
     const legacy = await database.all<{ id: string; project_id: string; intent: string }>(
       "SELECT c.id, c.project_id, c.intent FROM pal_chats c JOIN pal_projects p ON p.id = c.project_id LEFT JOIN pal_workspaces w ON w.chat_id = c.id WHERE c.state = 'ready' AND c.deleted_at IS NULL AND p.removed_at IS NULL AND p.state = 'ready' AND w.id IS NULL",
@@ -160,10 +170,11 @@ export class Workspaces {
     return row === undefined ? undefined : view(row);
   }
 
+  /** A helper conversation uses its parent chat's workspace. */
   async forConversation(conversation: ConversationId): Promise<Workspace | undefined> {
     const row = await this.#database.get<Row>(
       `SELECT w.* FROM pal_workspaces w ${LIVE} AND c.conversation_id = ?`,
-      conversation,
+      (await this.#links?.chat(conversation)) ?? conversation,
     );
     return row === undefined ? undefined : view(row);
   }

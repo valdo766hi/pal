@@ -178,6 +178,8 @@ export async function signInWithChatGPT(options: SignInOptions): Promise<ChatGPT
     if (token.idToken === undefined)
       throw new ChatGPTAuthError("invalid_response", "the token response has no ID token");
     const identity = await verifyIdToken(endpoints, token.idToken, clientId, nonce);
+    // Verification can outlast a cancellation; a cancelled attempt never yields a credential.
+    interaction.signal.throwIfAborted();
     if (registration !== undefined && identity.accountId !== registration.accountId) {
       throw new ChatGPTAuthError("account_changed", "ChatGPT signed in a different account than this connection's");
     }
@@ -302,6 +304,8 @@ export class ChatGPTConnection {
   readonly #store: SqliteCredentialStore;
   readonly #options: { endpoints: ChatGPTEndpoints; installationId: string; agentName: string };
   #signingIn = false;
+  /** Advanced by sign-out and forget, so an attempt that started before either can never save its credential. */
+  #generation = 0;
 
   constructor(
     store: SqliteCredentialStore,
@@ -319,6 +323,7 @@ export class ChatGPTConnection {
   async signIn(interaction: ProviderAuthInteraction): Promise<ChatGPTAccount> {
     if (this.#signingIn) throw new ChatGPTAuthError("busy", "a ChatGPT sign-in is already in progress");
     this.#signingIn = true;
+    const generation = this.#generation;
     try {
       const retained = await this.#store.retained(CHATGPT_PROVIDER);
       let registration: ChatGPTRegistration | undefined;
@@ -346,6 +351,9 @@ export class ChatGPTConnection {
         throw error;
       }
       await this.#store.modify(CHATGPT_PROVIDER, async (existing) => {
+        // Decided under the store lock, where sign-out and forget also write, so no late attempt slips past them.
+        if (interaction.signal.aborted || generation !== this.#generation)
+          throw new ChatGPTAuthError("cancelled", "ChatGPT sign-in was cancelled");
         const holder = existing?.type === "oauth" ? (existing as ChatGPTCredential).accountId : undefined;
         if (holder !== undefined && holder !== signedIn.accountId) {
           throw new ChatGPTAuthError("account_changed", "another ChatGPT account is already connected");
@@ -360,11 +368,13 @@ export class ChatGPTConnection {
 
   /** Drop the tokens; the registration stays for the next sign-in. */
   async signOut(): Promise<void> {
+    this.#generation++;
     await this.#store.delete(CHATGPT_PROVIDER);
   }
 
   /** Forget the registration too, so the next sign-in may choose another account. */
   async forget(): Promise<void> {
+    this.#generation++;
     await this.#store.forget(CHATGPT_PROVIDER);
   }
 }

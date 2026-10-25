@@ -364,6 +364,63 @@ describe("API-key model providers", () => {
     expect(await send(chatId)).toMatchObject({ status: 409, error: "provider_unavailable" });
   });
 
+  it("binds the compatible endpoint's key and enablement to its destination", async () => {
+    const fixture = await setup();
+    const { api, send, provider } = fixture;
+    const other = await startProviderFixture();
+    cleanups.push(other.close);
+    const endpoint = {
+      name: "Local models",
+      baseUrl: `${provider.origin}/compat/v1`,
+      models: ["local-a"],
+      contextWindow: 32_768,
+      maxTokens: 4096,
+      images: false,
+      keyless: false,
+    };
+    const state = async () =>
+      (await api("GET", "providers")).body.providers.find((entry: { id: string }) => entry.id === "compatible");
+    await api("PUT", "providers/compatible/config", endpoint);
+    await api("PUT", "providers/compatible/key", { key: GOOD });
+    await api("PUT", "providers/compatible/enabled", { enabled: true });
+    const chatId = await fixture.chat("compatible-destination");
+    await api("PUT", `chats/${chatId}/model`, { provider: "compatible", model: "local-a" });
+
+    // The same destination, however written, and edits that do not move it keep the key and the consent.
+    for (const baseUrl of [`${provider.origin}/compat/v1/`, `${provider.origin.toUpperCase()}/compat/v1//`]) {
+      await api("PUT", "providers/compatible/config", { ...endpoint, baseUrl, name: "Renamed", models: ["local-a"] });
+      expect(await state(), baseUrl).toMatchObject({ enabled: true, hasKey: true, name: "Renamed" });
+    }
+    expect((await send(chatId)).status).toBe(200);
+
+    // Another origin, or another path on the same origin, is a new destination: off, and without the old key.
+    for (const baseUrl of [`${other.origin}/compat/v1`, `${provider.origin}/elsewhere/v1`]) {
+      await api("PUT", "providers/compatible/config", { ...endpoint, baseUrl });
+      expect(await state(), baseUrl).toMatchObject({ enabled: false, hasKey: false });
+      expect(await send(chatId)).toMatchObject({ status: 409, error: "provider_unavailable" });
+      expect((await api("POST", "providers/compatible/check")).body.error, baseUrl).toBe("provider_config");
+      expect((await api("PUT", "providers/compatible/enabled", { enabled: true })).body.error).toBe("provider_config");
+      // Back to the approved destination: it still needs its key saved and enabling again.
+      await api("PUT", "providers/compatible/config", { ...endpoint, baseUrl: `${provider.origin}/compat/v1` });
+      await api("PUT", "providers/compatible/key", { key: GOOD });
+      await api("PUT", "providers/compatible/enabled", { enabled: true });
+    }
+    expect(other.requests).toEqual([]);
+
+    // A keyless endpoint needs no key at its new destination, only the owner's explicit enablement.
+    await api("PUT", "providers/compatible/config", { ...endpoint, keyless: true });
+    await api("PUT", "providers/compatible/config", {
+      ...endpoint,
+      keyless: true,
+      baseUrl: `${other.origin}/compat/v1`,
+    });
+    expect(await state()).toMatchObject({ enabled: false });
+    expect((await api("PUT", "providers/compatible/enabled", { enabled: true })).status).toBe(200);
+    expect((await send(chatId)).status).toBe(200);
+    // A keyless endpoint gets the placeholder; the key saved for the earlier destination never reaches this one.
+    expect(other.requests.map((request) => request.headers.authorization)).not.toContain(`Bearer ${GOOD}`);
+  });
+
   it("starts new chats on the owner's chosen default provider model", async () => {
     const fixture = await setup();
     const { api } = fixture;

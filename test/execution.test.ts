@@ -124,7 +124,12 @@ describe("trusted host commands", () => {
     const dataRoot = join(root, "data");
     const child = spawn(
       process.execPath,
-      [join(import.meta.dirname, "fixtures/execution-child.ts"), dataRoot, JSON.stringify(fixture.endpoints)],
+      [
+        ...process.execArgv,
+        join(import.meta.dirname, "fixtures/execution-child.ts"),
+        dataRoot,
+        JSON.stringify(fixture.endpoints),
+      ],
       { stdio: ["ignore", "pipe", "inherit"] },
     );
     cleanups.push(async () => {
@@ -308,26 +313,77 @@ describe("compact command output", () => {
     const started = Date.now();
     expect(await bounded.rewrite(root, "slow deadline")).toBeUndefined();
     expect(Date.now() - started).toBeLessThan(3_000);
-    const late = await rtk.slowPid();
-    expect(late).toBeDefined();
-    await expect.poll(() => running(late ?? 0)).toBe(false);
+    const late = await rtk.slowPids();
+    if (late === undefined) throw new Error("rewrite never started");
+    for (const pid of late) await expect.poll(() => running(pid)).toBe(false);
 
     const commands = new HostCommands({ rewriteMs: 60_000 });
-    const pid = async (previous: number | undefined) => {
-      await expect.poll(async () => (await rtk.slowPid()) !== previous).toBe(true);
-      return (await rtk.slowPid()) ?? 0;
+    cleanups.push(() => commands.close());
+    const pids = async (previous: readonly [number, number]) => {
+      await expect
+        .poll(async () => {
+          const current = await rtk.slowPids();
+          return current !== undefined && current.every((pid, i) => pid !== previous[i]);
+        })
+        .toBe(true);
+      const current = await rtk.slowPids();
+      if (current === undefined) throw new Error("rewrite never started");
+      return current;
     };
     const controller = new AbortController();
     const stopped = commands.rewrite(root, "slow stop", controller.signal);
-    const first = await pid(late);
+    const first = await pids(late);
     controller.abort();
     await expect(stopped).rejects.toThrow(/stopped before dispatch/);
-    await expect.poll(() => running(first)).toBe(false);
+    for (const pid of first) await expect.poll(() => running(pid)).toBe(false);
 
-    const closing = commands.rewrite(root, "slow close");
-    const second = await pid(first);
+    const closing = expect(commands.rewrite(root, "slow close")).rejects.toThrow(/stopped before dispatch/);
+    const second = await pids(first);
     await commands.close();
-    await expect(closing).rejects.toThrow(/stopped before dispatch/);
-    await expect.poll(() => running(second)).toBe(false);
+    await closing;
+    for (const pid of second) await expect.poll(() => running(pid)).toBe(false);
   });
+
+  it.each([undefined, 2_000])(
+    "bounds orphaned rewrites and descendants after parent SIGKILL (override: %s)",
+    async (rewriteMs) => {
+      const { root, commands } = await setup();
+      const rtk = await fakeRtk();
+      cleanups.push(rtk.cleanup);
+      expect(await commands.rewrite(root, "printf warm")).toBeUndefined();
+      const child = spawn(
+        process.execPath,
+        [
+          join(import.meta.dirname, "fixtures/rtk-rewrite-child.ts"),
+          root,
+          ...(rewriteMs === undefined ? [] : [String(rewriteMs)]),
+        ],
+        { stdio: "ignore" },
+      );
+      const exited = once(child, "exit");
+      cleanups.push(async () => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        await exited;
+        for (const pid of (await rtk.slowPids()) ?? []) {
+          if (!(await running(pid))) continue;
+          for (const target of [-pid, pid]) {
+            try {
+              process.kill(target, "SIGKILL");
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+            }
+          }
+        }
+      });
+      await expect.poll(() => rtk.slowPids(), { timeout: 5000 }).toBeDefined();
+      const pids = await rtk.slowPids();
+      if (pids === undefined) throw new Error("rewrite never started");
+      for (const pid of pids) expect(await running(pid)).toBe(true);
+      child.kill("SIGKILL");
+      expect((await exited)[1]).toBe("SIGKILL");
+      await expect
+        .poll(() => Promise.all(pids.map(running)), { timeout: (rewriteMs ?? 5_000) + 2_500 })
+        .toEqual([false, false]);
+    },
+  );
 });

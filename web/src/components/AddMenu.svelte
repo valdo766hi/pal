@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import Icon from "../lib/Icon.svelte";
 
-  let { onFiles }: { onFiles: (files: File[]) => void } = $props();
+  let { onFiles, onSchedule }: { onFiles: (files: File[]) => void; onSchedule: () => void } = $props();
   let open = $state(false);
   let container: HTMLDivElement | undefined;
   let opener: HTMLButtonElement | undefined;
@@ -31,9 +31,12 @@
   function onMenuKey(event: KeyboardEvent) {
     if (event.key === "Tab") close(false);
     else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
-      // A single item: movement keys keep focus on it rather than scrolling the page.
       event.preventDefault();
-      container?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+      const items = [...(container?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])];
+      const at = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next =
+        { ArrowDown: at + 1, ArrowUp: at - 1 + items.length, Home: 0, End: items.length - 1 }[event.key] ?? 0;
+      items[next % items.length]?.focus();
     }
   }
 </script>
@@ -77,6 +80,17 @@
       <button class="opt" role="menuitem" onclick={pick}>
         <span class="row"><Icon name="clip" />Add file from this device</span>
         <span class="optd">Uploads a copy for this chat. It doesn't give Pal access to your folders.</span>
+      </button>
+      <button
+        class="opt"
+        role="menuitem"
+        onclick={() => {
+          close(false);
+          onSchedule();
+        }}
+      >
+        <span class="row"><Icon name="clock" />Schedule a message</span>
+        <span class="optd">Sends this chat a message at set times, with its current model and approvals.</span>
       </button>
     </div>
   {/if}

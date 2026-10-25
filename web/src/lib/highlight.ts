@@ -15,6 +15,7 @@ type Spec = {
 type Grammar = { pattern: RegExp; kinds: string[]; words: Map<string, string>; names: boolean; caseless: boolean };
 
 const LIMIT = 200_000;
+const LINE_LIMIT = 2048;
 const END = String.raw`(?![\s\S])`;
 const C_COMMENT: Rule = ["c", String.raw`\/\/.*|\/\*[\s\S]*?(?:\*\/|${END})`];
 const HASH: Rule = ["c", "#.*"];
@@ -86,7 +87,13 @@ const SPECS: Record<string, Spec> = {
   },
   json: { rules: [C_COMMENT, ["p", String.raw`"(?:\\.|[^"\\\n])*"(?=\s*:)`], DQ, NUMBER], literals: "true false null" },
   yaml: {
-    rules: [SPACED_HASH, ["p", String.raw`(?<=^[ \t]*(?:-[ \t]+)?)[\w.\/-]+(?=[ \t]*:(?:[ \t]|$))`], DQ, SQ, NUMBER],
+    rules: [
+      SPACED_HASH,
+      ["p", String.raw`[\w.\/-]+(?=[ \t]*:(?:[ \t]|$))(?<=^[ \t]*(?:-[ \t]+)?[\w.\/-]+)`],
+      DQ,
+      SQ,
+      NUMBER,
+    ],
     literals: "true false null yes no on off",
   },
   toml: {
@@ -96,7 +103,7 @@ const SPECS: Record<string, Spec> = {
       DQ,
       SQ,
       ["t", String.raw`^[ \t]*\[\[?[^\]\n]*\]\]?`],
-      ["p", String.raw`(?<=^[ \t]*)[\w.\-"]+(?=[ \t]*=)`],
+      ["p", String.raw`[\w.\-"]+(?=[ \t]*=)(?<=^[ \t]*[\w.\-"]+)`],
       NUMBER,
     ],
     literals: "true false",
@@ -288,6 +295,12 @@ export function escapeHtml(text: string): string {
 export function highlight(code: string, language: string): string {
   const rules = code.length > LIMIT ? undefined : grammar(language.toLowerCase());
   if (rules === undefined) return escapeHtml(code);
+  // Bound per-line prefix scans and failed token matches, not just total input.
+  let lineStart = 0;
+  for (let at = 0; at < code.length; at++) {
+    if (code[at] === "\n") lineStart = at + 1;
+    else if (at - lineStart >= LINE_LIMIT) return escapeHtml(code);
+  }
   let html = "";
   let last = 0;
   for (const match of code.matchAll(rules.pattern)) {

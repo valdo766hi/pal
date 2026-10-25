@@ -70,12 +70,14 @@ export async function startMcpFixture() {
     tools: typeof TOOLS;
     status: number | undefined;
     beforeCall: ((call: Call) => Promise<void>) | undefined;
+    beforeList: (() => Promise<void>) | undefined;
     result: CallToolResult | undefined;
     headers: Record<string, string>;
   } = {
     tools: structuredClone(TOOLS),
     status: undefined,
     beforeCall: undefined,
+    beforeList: undefined,
     result: undefined,
     headers: {},
   };
@@ -111,6 +113,7 @@ export async function startMcpFixture() {
         serverInfo: { name: "fixture", version: "1.0.0" },
       };
     } else if (message.method === "tools/list") {
+      await state.beforeList?.();
       result = { tools: state.tools };
     } else if (message.method === "tools/call") {
       const call = message.params as Call;

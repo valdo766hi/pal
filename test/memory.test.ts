@@ -111,6 +111,67 @@ describe("source-linked curated memory", () => {
     });
   });
 
+  it("retrieval-rank-v1 keeps an older relevant constraint ahead of recent distractors across compaction and reopen", async () => {
+    const f = await setup();
+    const body = "Preserve the zircon quorum ledger; the unresolved step is to repair the planner.";
+    const id = await f.pal.memory.save(
+      f.project.id,
+      "rank-relevant",
+      { title: "Zircon quorum ledger", body, source: { kind: "owner" } },
+      context,
+    );
+    await f.pal.store.database.run("UPDATE pal_memory_versions SET updated_at = 1 WHERE id = ?", id);
+    for (let index = 0; index < 20; index++) {
+      const distractor = await f.pal.memory.save(
+        f.project.id,
+        `rank-distractor-${index}`,
+        { title: `Recent note ${index}`, body: "Zircon unrelated housekeeping.", source: { kind: "owner" } },
+        context,
+      );
+      await f.pal.store.database.run(
+        "UPDATE pal_memory_versions SET updated_at = ? WHERE id = ?",
+        index + 2,
+        distractor,
+      );
+    }
+    const ranked = await f.pal.store.database.all<{ id: string }>(
+      "SELECT id FROM pal_memory_fts WHERE pal_memory_fts MATCH ? ORDER BY rank LIMIT 30",
+      '"zircon" OR "quorum" OR "ledger"',
+    );
+    expect(ranked).toHaveLength(21);
+    expect(ranked[0]?.id).toBe(id);
+    const check = async (a: Awaited<ReturnType<typeof f.agent>>) => {
+      const result = await a.run("zircon quorum ledger");
+      expect(result.text).toContain(body);
+      const lookup = (await f.pal.context.inspect(a.chat, context)).lookups.at(-1);
+      expect(lookup?.candidates[0]).toEqual({ id, revision: 1 });
+      expect(lookup?.candidates.length).toBeLessThanOrEqual(10);
+      expect(lookup?.truncated).toBe(true);
+    };
+    const a = await f.agent();
+    await check(a);
+    await (
+      await a.conversation.submit(
+        {
+          type: "write",
+          entry: {
+            kind: "fixture.context",
+            model: [{ role: "user", content: "irrelevant history ".repeat(12_000), timestamp: 0 }],
+          },
+        },
+        context,
+      )
+    ).wait(context);
+    f.faux.setResponses([fauxAssistantMessage("Only unrelated housekeeping remains in this summary.")]);
+    const compaction = await a.conversation.compact("Summarize the fixture history", context);
+    await f.pal.harness.waitForTask(compaction, context);
+    await a.conversation.waitForIdle(context);
+    expect((await a.conversation.context(context)).head).toBeDefined();
+    await check(a);
+    await f.reopen();
+    await check(await f.agent());
+  });
+
   it("keeps chat sources across real compaction and restart, and suppresses a removed source chat", async () => {
     const f = await setup();
     const a = await f.agent();

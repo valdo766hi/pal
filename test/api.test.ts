@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { watchEvents } from "@earendil-works/pi-durable";
+import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { commentFeedback } from "../src/core/feedback.ts";
 import { afterEach, describe, expect, it } from "vitest";
 import { startMcpFixture } from "./fixtures/mcp-server.ts";
 import { STDIO_FIXTURE } from "./fixtures/stdio-server.ts";
@@ -16,6 +18,7 @@ import { startServer } from "../src/core/server.ts";
 import { browse, startOpenAIFixture } from "./fixtures/openai-server.ts";
 import { fakeReleaseControl } from "./fixtures/releases.ts";
 import type { ReleaseRpc } from "../src/core/release-rpc.ts";
+import { MIGRATIONS } from "../src/storage/migrations.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -97,6 +100,29 @@ async function signedIn(publicOrigin?: string) {
   return app;
 }
 
+/** Signs in to the ChatGPT fixture, then chooses its model as the default explicitly, as the owner must. */
+async function connectChatGPT(api: Awaited<ReturnType<typeof start>>["api"]) {
+  const started = await api("POST", "chatgpt/sign-in");
+  await browse(started.body.attempt.authUrl);
+  await eventually(
+    () => api("GET", "chatgpt"),
+    (state) => state.body.models.length > 0,
+  );
+  expect((await api("PUT", "default-model", { provider: "openai", model: "gpt-5.5" })).status).toBe(200);
+}
+
+async function fakeChatModel(pal: Awaited<ReturnType<typeof openPal>>, chatId: string) {
+  const faux = fauxProvider();
+  (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage("ok")]);
+  const model = faux.getModel();
+  await pal.chats.configure(
+    chatId,
+    { model: { provider: model.provider, modelId: model.id }, thinkingLevel: "off" },
+    context,
+  );
+}
+
 async function putBytes(base: string, cookie: string, id: string, bytes: Uint8Array) {
   const response = await fetch(`${base}/api/uploads/${id}`, {
     method: "PUT",
@@ -107,6 +133,143 @@ async function putBytes(base: string, cookie: string, id: string, bytes: Uint8Ar
 }
 
 describe("API", () => {
+  it("persists owner-only model setup deferral without selecting a provider or changing credentials", async () => {
+    const { api, pal, dataRoot, fixture, base, cookie } = await start();
+    expect((await api("GET", "model-setup")).status).toBe(401);
+    expect((await api("PUT", "model-setup", { deferred: true })).status).toBe(401);
+    await api("POST", "setup", { token: pal.owner.setupToken, passphrase: "correct horse battery" });
+    expect(await api("GET", "model-setup")).toEqual({ status: 200, body: { deferred: false } });
+    const providers = await pal.providers.list();
+    expect((await api("PUT", "model-setup", { deferred: "yes" })).status).toBe(400);
+    expect((await api("PUT", "model-setup", { deferred: true, provider: "openai" })).status).toBe(400);
+    expect(
+      (
+        await fetch(`${base}/api/model-setup`, {
+          method: "PUT",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify({ deferred: true }),
+        })
+      ).status,
+    ).toBe(403);
+    expect((await api("GET", "model-setup")).body).toEqual({ deferred: false });
+    for (let i = 0; i < 2; i++)
+      expect(await api("PUT", "model-setup", { deferred: true })).toEqual({ status: 200, body: { deferred: true } });
+    expect(await pal.settings.defaultModel()).toBeUndefined();
+    expect(await pal.providers.list()).toEqual(providers);
+    expect(await pal.chatgpt.account()).toBeUndefined();
+    expect(fixture.authorizations).toEqual([]);
+    expect(fixture.tokenRequests).toEqual([]);
+    expect(fixture.apiRequests).toEqual([]);
+    await pal.close();
+    const reopened = await openPal(
+      { dataRoot, installRoot: "/nonexistent-install", endpoints: fixture.endpoints },
+      context,
+    );
+    cleanups.push(() => reopened.close());
+    expect(
+      await reopened.store.database.get("SELECT value FROM pal_settings WHERE key = 'setup:model-deferred'"),
+    ).toEqual({ value: "true" });
+    expect(await reopened.settings.defaultModel()).toBeUndefined();
+  });
+
+  it("stores an owner-only working goal without choosing a model, starting work or dropping stale edits", async () => {
+    const { api, pal, fixture, base, cookie } = await signedIn();
+    const project = await pal.projects.create("working-project", { name: "Working state" });
+    const chat = await pal.chats.createChat("working-chat", { projectId: project.id }, context);
+    const path = `chats/${chat.id}/context/working-state`;
+    expect((await fetch(`${base}/api/${path}`)).status).toBe(401);
+    const reviewPath = `chats/${chat.id}/context/working-review`;
+    expect((await fetch(`${base}/api/${reviewPath}`, { method: "POST", headers: { origin: base } })).status).toBe(401);
+    expect(
+      (
+        await fetch(`${base}/api/${reviewPath}`, {
+          method: "POST",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify({ digest: "a".repeat(64) }),
+        })
+      ).status,
+    ).toBe(403);
+    expect((await api("POST", reviewPath, { digest: "not-a-digest" })).status).toBe(400);
+    expect((await api("POST", reviewPath, { digest: "a".repeat(64), completed: true })).status).toBe(400);
+    const initial = await api("GET", path);
+    expect(initial.status).toBe(200);
+    expect(initial.body.goal).toEqual({ revision: 0, text: "", constraints: [], acceptance: [] });
+    const goal = {
+      revision: 0,
+      text: "Fix receipt rounding",
+      constraints: ["Round each unit before multiplying"],
+      acceptance: ["The independent rounding cases pass"],
+    };
+    expect(
+      (
+        await fetch(`${base}/api/${path}`, {
+          method: "PUT",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify(goal),
+        })
+      ).status,
+    ).toBe(403);
+    const conversation = await pal.harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing working-state conversation");
+    const before = await conversation.entries({}, 100, undefined, context);
+    const saved = await api("PUT", path, goal);
+    expect(saved.status).toBe(200);
+    expect(saved.body.goal).toEqual({ ...goal, revision: 1 });
+    expect(saved.body.checkpoint).toBeNull();
+    expect((await api("GET", path)).body).toEqual(saved.body);
+    expect((await api("PUT", path, { ...goal, text: "stale overwrite" })).status).toBe(409);
+    expect((await api("PUT", path, { ...goal, revision: 1, provider: "openai" })).status).toBe(400);
+    expect((await api("PUT", path, { ...goal, revision: 1, text: "界".repeat(2000) })).status).toBe(400);
+    expect((await api("GET", path)).body).toEqual(saved.body);
+    const allowancePath = `chats/${chat.id}/context/working-allowance`;
+    const allowance = { revision: 0, goalRevision: 1, limits: { steps: 2, calls: 8 } };
+    expect((await fetch(`${base}/api/${allowancePath}`, { method: "PUT", headers: { origin: base } })).status).toBe(
+      401,
+    );
+    expect(
+      (
+        await fetch(`${base}/api/${allowancePath}`, {
+          method: "PUT",
+          headers: { cookie: cookie(), origin: "https://attacker.example", "content-type": "application/json" },
+          body: JSON.stringify(allowance),
+        })
+      ).status,
+    ).toBe(403);
+    for (const limits of [
+      { steps: 0, calls: 8 },
+      { steps: 65, calls: 8 },
+      { steps: 2, calls: 257 },
+      { steps: 1.5, calls: 8 },
+    ])
+      expect((await api("PUT", allowancePath, { ...allowance, limits })).status).toBe(400);
+    expect((await api("PUT", allowancePath, { ...allowance, used: { steps: 0, calls: 0 } })).status).toBe(400);
+    const configured = await api("PUT", allowancePath, allowance);
+    expect(configured.status).toBe(200);
+    expect(configured.body.allowance).toMatchObject({
+      revision: 1,
+      goalRevision: 1,
+      limits: allowance.limits,
+      used: { steps: 0, calls: 0 },
+    });
+    expect((await api("PUT", allowancePath, allowance)).body.allowance).toEqual(configured.body.allowance);
+    const cleared = await api("PUT", path, { revision: 1, text: "", constraints: [], acceptance: [] });
+    expect(cleared.body.allowance.state).toBe("goal-changed");
+    expect((await api("PUT", allowancePath, { revision: 1, goalRevision: 2, limits: null })).body.allowance.state).toBe(
+      "disabled",
+    );
+    expect(cleared.body.goal).toEqual({
+      revision: 2,
+      text: "",
+      constraints: [],
+      acceptance: [],
+    });
+    expect((await conversation.entries({}, 100, undefined, context)).items).toEqual(before.items);
+    expect(await pal.settings.defaultModel()).toBeUndefined();
+    expect(fixture.authorizations).toEqual([]);
+    expect(fixture.tokenRequests).toEqual([]);
+    expect(fixture.apiRequests).toEqual([]);
+  });
+
   it("keeps release observation and exact-digest consent owner-only and validates before forwarding private IPC", async () => {
     const control = fakeReleaseControl();
     const { api, pal, base, cookie } = await start(undefined, control.access);
@@ -294,7 +457,9 @@ describe("API", () => {
     expect(tested.body.server).toMatchObject({ state: "ready", tools: [{ name: "inspect", approved: false }] });
     expect(await readFile(marker, "utf8")).toBe("start\n");
     expect(JSON.stringify((await api("GET", "mcp")).body)).not.toContain(key);
-    expect((await api("PUT", `${path}/tools`, { tools: ["inspect"] })).status).toBe(200);
+    expect(
+      (await api("PUT", `${path}/tools`, { tools: ["inspect"], catalog: tested.body.server.catalog })).status,
+    ).toBe(200);
     expect((await api("PUT", `${path}/enabled`, { enabled: true })).status).toBe(200);
     const revoked = await api("PUT", `${path}/program`, { ...approval, approved: false });
     expect(revoked.body.server).toMatchObject({ enabled: false, state: "approval_required", tools: [] });
@@ -323,7 +488,11 @@ describe("API", () => {
     const created = await api("POST", "chats", body);
     expect(created.status).toBe(200);
     const chat = created.body.chat;
-    expect(chat.workspace).toMatchObject({ mode: "worktree", state: "ready", source: project.root });
+    expect(chat.workspace, JSON.stringify(chat.workspace)).toMatchObject({
+      mode: "worktree",
+      state: "ready",
+      source: project.root,
+    });
     expect(chat.workspace.root).not.toBe(project.root);
     expect((await api("POST", "chats", body)).body.chat).toEqual(chat);
     expect((await api("POST", "chats", { ...body, workspace: "local" })).status).toBe(409);
@@ -349,7 +518,19 @@ describe("API", () => {
       .comment;
     expect(
       (await api("POST", `${path}/comments/sent`, { ids: [comment.id], workspace: chat.workspace.id })).status,
+    ).toBe(404);
+    expect((await api("GET", `${path}/changes?${query}`)).body.comments[0].sent).toBe(false);
+    await fakeChatModel(pal, chat.id);
+    expect(
+      (
+        await api("POST", `chats/${chat.id}/inputs`, {
+          requestId: "worktree-feedback-input",
+          text: commentFeedback(comment),
+          feedback: { ids: [comment.id], scope: "normal" },
+        })
+      ).status,
     ).toBe(200);
+    await pal.harness.waitForIdle(context);
     expect((await api("GET", `${path}/changes`)).body.comments).toEqual([]);
     expect((await api("GET", `${path}/changes?${query}`)).body.comments[0].sent).toBe(true);
     expect((await api("POST", `${path}/discard`, review)).status).toBe(200);
@@ -426,10 +607,32 @@ describe("API", () => {
     expect(added.status).toBe(200);
     expect((await api("GET", `${path}/changes`)).body.comments).toEqual([]);
     expect((await api("GET", `${path}/changes?scope=include-ignored`)).body.comments).toHaveLength(1);
-    expect((await api("POST", `${path}/comments/sent`, { ids: [added.body.comment.id] })).status).toBe(403);
+    expect((await api("POST", `${path}/comments/sent`, { ids: [added.body.comment.id] })).status).toBe(404);
+    const chat = (await api("POST", "chats", { requestId: "ignored-feedback-chat", projectId: project.id })).body.chat;
+    await fakeChatModel(pal, chat.id);
+    const input = { requestId: "ignored-feedback-input", text: commentFeedback(added.body.comment) };
     expect(
-      (await api("POST", `${path}/comments/sent`, { ids: [added.body.comment.id], scope: "include-ignored" })).status,
+      (
+        await api("POST", `chats/${chat.id}/inputs`, {
+          ...input,
+          feedback: { ids: [added.body.comment.id], scope: "normal" },
+        })
+      ).status,
+    ).toBe(403);
+    expect((await api("GET", `${path}/changes?scope=include-ignored`)).body.comments[0].sent).toBe(false);
+    expect(await pal.store.database.get("SELECT count(*) AS n FROM pal_admissions WHERE chat_id = ?", chat.id)).toEqual(
+      { n: 0 },
+    );
+    expect(
+      (
+        await api("POST", `chats/${chat.id}/inputs`, {
+          ...input,
+          feedback: { ids: [added.body.comment.id], scope: "include-ignored" },
+        })
+      ).status,
     ).toBe(200);
+    await pal.harness.waitForIdle(context);
+    expect((await api("GET", `${path}/changes?scope=include-ignored`)).body.comments[0].sent).toBe(true);
     expect((await fetch(`${base}/api/${path}/changes?scope=include-ignored`)).status).toBe(401);
     expect(
       (
@@ -581,7 +784,7 @@ describe("API", () => {
       409,
     );
     const other = (await api("POST", "projects", { requestId: "other-comments-api", name: "Other" })).body.project;
-    await api("POST", `projects/${other.id}/comments/sent`, { ids: [id] });
+    expect((await api("POST", `projects/${other.id}/comments/sent`, { ids: [id] })).status).toBe(404);
     await api("DELETE", `projects/${other.id}/comments/${id}`);
     expect((await api("GET", `projects/${project.id}/changes`)).body.comments).toHaveLength(1);
     expect((await api("GET", `projects/${project.id}/changes`)).body.comments[0].sent).toBe(false);
@@ -646,19 +849,79 @@ describe("API", () => {
     expect((await api("GET", "projects")).status).toBe(401);
   });
 
+  it.each(["description", "input", "output", "removed", "added"])(
+    "rejects stale MCP catalog consent after a %s change without altering approvals",
+    async (change) => {
+      const { pal, api } = await signedIn();
+      const fixture = await startMcpFixture();
+      cleanups.push(fixture.close);
+      const { server } = (
+        await api("POST", "mcp/servers", {
+          name: "Reviewed catalog",
+          url: fixture.url,
+          auth: { kind: "none" },
+          private: true,
+        })
+      ).body;
+      const path = `mcp/servers/${server.id}`;
+      const a = (await api("POST", `${path}/test`)).body.server;
+      expect((await api("PUT", `${path}/tools`, { tools: ["fetch"], catalog: a.catalog })).status).toBe(200);
+      const before = await pal.store.database.get("SELECT approved FROM pal_mcp_servers WHERE id = ?", server.id);
+      const search = fixture.state.tools[0];
+      if (search === undefined) throw new Error("missing fixture tool");
+      if (change === "description") search.description = "A changed search definition";
+      if (change === "input") search.inputSchema.required = ["query", "scope"];
+      if (change === "output" && search.outputSchema !== undefined)
+        search.outputSchema.required = ["results", "source"];
+      if (change === "removed") fixture.state.tools = fixture.state.tools.filter((tool) => tool.name !== "search");
+      if (change === "added") fixture.state.tools.push({ ...search, name: "another_search" });
+      const b = (await api("POST", `${path}/test`)).body.server;
+      const stale = await api("PUT", `${path}/tools`, { tools: ["search"], catalog: a.catalog });
+      expect(stale.status).toBe(409);
+      expect(stale.body.message).toMatch(/catalog.*changed/);
+      expect(await pal.store.database.get("SELECT approved FROM pal_mcp_servers WHERE id = ?", server.id)).toEqual(
+        before,
+      );
+      expect(b.catalog).toMatch(/^[a-f0-9]{64}$/);
+      expect(b.catalog).not.toBe(a.catalog);
+      expect((await api("PUT", `${path}/tools`, { tools: ["fetch"], catalog: b.catalog })).status).toBe(200);
+      expect((await api("PUT", `${path}/tools`, { tools: [], catalog: b.catalog })).status).toBe(200);
+      expect((await pal.mcp.get(server.id)).tools.every((tool) => !tool.approved)).toBe(true);
+      expect(fixture.calls).toEqual([]);
+    },
+  );
+
+  it("requires a reviewed MCP catalog and accepts unchanged rediscovery without widening consent", async () => {
+    const { api } = await signedIn();
+    const fixture = await startMcpFixture();
+    cleanups.push(fixture.close);
+    const { server } = (
+      await api("POST", "mcp/servers", {
+        name: "Same catalog",
+        url: fixture.url,
+        auth: { kind: "none" },
+        private: true,
+      })
+    ).body;
+    const path = `mcp/servers/${server.id}`;
+    const a = (await api("POST", `${path}/test`)).body.server;
+    expect((await api("PUT", `${path}/tools`, { tools: ["search"] })).status).toBe(400);
+    fixture.state.tools.reverse();
+    const b = (await api("POST", `${path}/test`)).body.server;
+    expect(b.catalog).toBe(a.catalog);
+    expect((await api("PUT", `${path}/tools`, { tools: ["search"], catalog: a.catalog })).status).toBe(200);
+    expect((await api("PUT", `${path}/tools`, { tools: ["missing"], catalog: a.catalog })).status).toBe(400);
+    expect(fixture.calls).toEqual([]);
+  });
+
   it("keeps MCP discovery and execution scoped to actual durable conversations", async () => {
     const { pal, api, fixture: openai } = await signedIn();
-    const started = await api("POST", "chatgpt/sign-in");
-    await browse(started.body.attempt.authUrl);
-    await eventually(
-      () => api("GET", "chatgpt"),
-      (state) => state.body.model !== null,
-    );
+    await connectChatGPT(api);
     const fixture = await startMcpFixture();
     cleanups.push(fixture.close);
     const server = await pal.mcp.add({ name: "Scoped", url: fixture.url, auth: { kind: "none" }, private: true });
     await pal.mcp.test(server.id);
-    await pal.mcp.approve(server.id, ["search", "fetch"]);
+    await pal.mcp.approve(server.id, ["search", "fetch"], (await pal.mcp.get(server.id)).catalog);
     await pal.mcp.setEnabled(server.id, true);
     const a = (await api("POST", "projects", { requestId: "scoped-project-a", name: "A" })).body.project;
     const b = (await api("POST", "projects", { requestId: "scoped-project-b", name: "B" })).body.project;
@@ -875,11 +1138,21 @@ describe("API", () => {
       () => api("GET", "chatgpt"),
       (state) => state.body.attempt.state === "connected" && state.body.models.length > 0,
     );
-    expect(connected.body).toMatchObject({ account: { accountId: "user-1" }, model: "gpt-5.5" });
+    // Connecting lists models but chooses none: the default exists only after the owner's explicit selection.
+    expect(connected.body).toMatchObject({ account: { accountId: "user-1" }, model: null, default: null });
     // No token ever reaches the browser.
     expect(JSON.stringify(connected.body)).not.toMatch(/access-|refresh-|eyJ/);
-
     const project = (await api("POST", "projects", { requestId: "project-request-1", name: "Notes" })).body.project;
+    const unset = (await api("POST", "chats", { requestId: "chat-request-0", projectId: project.id })).body.chat;
+    expect((await api("GET", `chats/${unset.id}`)).body.model).toBeNull();
+    expect((await api("PUT", "model-setup", { deferred: true })).body).toEqual({ deferred: true });
+    expect((await api("PUT", "default-model", { provider: "openai", model: "gpt-5.5" })).status).toBe(200);
+    expect((await api("GET", "model-setup")).body).toEqual({ deferred: false });
+    expect((await api("GET", "chatgpt")).body).toMatchObject({
+      model: "gpt-5.5",
+      default: { provider: "openai", modelId: "gpt-5.5" },
+    });
+
     const chat = (await api("POST", "chats", { requestId: "chat-request-1", projectId: project.id })).body.chat;
     expect((await api("GET", `chats/${chat.id}`)).body.model).toBe("gpt-5.5");
 
@@ -903,7 +1176,60 @@ describe("API", () => {
     await reader.cancel();
 
     const projects = (await api("GET", "projects")).body.projects;
-    expect(projects[0].chats).toEqual([expect.objectContaining({ id: chat.id, title: "hi" })]);
+    expect(projects[0].chats).toContainEqual(expect.objectContaining({ id: chat.id, title: "hi" }));
+  });
+
+  it("schedules messages only after opt-in, against the cost and effects the owner reviewed", async () => {
+    const { api } = await signedIn();
+    await connectChatGPT(api);
+    const project = (await api("POST", "projects", { requestId: "schedule-project", name: "Notes" })).body.project;
+    const chat = (await api("POST", "chats", { requestId: "schedule-chat", projectId: project.id })).body.chat;
+    // Off unless the owner turns it on; chats work without it.
+    expect((await api("GET", "scheduler")).body).toEqual({ enabled: false, schedules: [] });
+    const ask = (await api("GET", `chats/${chat.id}/schedules`)).body;
+    expect(ask).toMatchObject({
+      enabled: false,
+      schedules: [],
+      notice: {
+        mode: "ask",
+        model: { provider: "openai", providerName: "ChatGPT", modelId: "gpt-5.5" },
+        cost: expect.stringContaining("ChatGPT plan's usage limits"),
+      },
+    });
+    expect(ask.notice.effects).toContainEqual(expect.stringContaining("Ask for approval"));
+    const body = {
+      requestId: "schedule-request-1",
+      text: "Summarize yesterday's changes",
+      timezone: "UTC",
+      rule: { kind: "daily", time: "09:00" },
+      missed: "skip",
+      configuration: ask.notice.configuration,
+      mode: ask.notice.mode,
+      acknowledged: true,
+    };
+    expect((await api("POST", `chats/${chat.id}/schedules`, body)).body.error).toBe("scheduler_disabled");
+    expect((await api("PUT", "scheduler", { enabled: true })).body.enabled).toBe(true);
+
+    // Full access changes what a run may do, so the notice reviewed for Ask no longer authorizes a schedule.
+    await api("PUT", `chats/${chat.id}/command-mode`, { mode: "full" });
+    expect(await api("POST", `chats/${chat.id}/schedules`, body)).toMatchObject({
+      status: 409,
+      body: { error: "schedule_stale" },
+    });
+    const full = (await api("GET", `chats/${chat.id}/schedules`)).body.notice;
+    expect(full.effects).toContainEqual(expect.stringContaining("Full access"));
+    const created = await api("POST", `chats/${chat.id}/schedules`, { ...body, mode: "full" });
+    expect(created.status).toBe(200);
+    const id = created.body.schedule.id;
+    expect((await api("GET", "scheduler")).body.schedules).toMatchObject([
+      { id, chatId: chat.id, chat: null, state: "active", binding: { mode: "full" } },
+    ]);
+    const path = `chats/${chat.id}/schedules/${id}`;
+    expect((await api("POST", `${path}/pause`, {})).body.schedule.state).toBe("paused");
+    const resume = { configuration: full.configuration, mode: "full", acknowledged: true };
+    expect((await api("POST", `${path}/resume`, resume)).body.schedule.state).toBe("active");
+    expect((await api("POST", `${path}/cancel`, {})).body.schedule.state).toBe("cancelled");
+    expect((await api("POST", `chats/missing-chat/schedules/${id}/pause`, {})).status).toBe(404);
   });
 
   it("persists per-chat reasoning effort, clamps model switches, and rejects invalid choices", async () => {
@@ -945,12 +1271,7 @@ describe("API", () => {
 
   it("deletes chats and removes projects without deleting files or Pi history", async () => {
     const { api, pal, fixture, dataRoot } = await signedIn();
-    const started = await api("POST", "chatgpt/sign-in");
-    await browse(started.body.attempt.authUrl);
-    await eventually(
-      () => api("GET", "chatgpt"),
-      (state) => state.body.model !== null,
-    );
+    await connectChatGPT(api);
     const folder = await realpath(await mkdtemp(join(tmpdir(), "pal-keep-files-")));
     cleanups.push(() => rm(folder, { recursive: true, force: true }));
     await writeFile(join(folder, "keep.txt"), "owner work");
@@ -1003,12 +1324,7 @@ describe("API", () => {
 
   it("receives device uploads exactly, then attaches them to a message", async () => {
     const { base, api, cookie, fixture, pal } = await signedIn();
-    const started = await api("POST", "chatgpt/sign-in");
-    await browse(started.body.attempt.authUrl);
-    await eventually(
-      () => api("GET", "chatgpt"),
-      (state) => state.body.model !== null,
-    );
+    await connectChatGPT(api);
     const project = (await api("POST", "projects", { requestId: "project-request-1", name: "Notes" })).body.project;
     const other = (await api("POST", "projects", { requestId: "project-request-2", name: "Other" })).body.project;
     const text = new TextEncoder().encode("The launch is on Tuesday.");
@@ -1070,5 +1386,90 @@ describe("API", () => {
     cleanups.push(() => reopened.close());
     expect(await reopened.uploads.get(pending.id)).toBeUndefined();
     expect(await reopened.uploads.get(admitted.id)).toMatchObject({ state: "ready" });
+  });
+
+  it("exports owner-only diagnostics that link inputs and effect outcomes without secrets or contents", async () => {
+    const { api, pal, base, cookie } = await signedIn();
+    const key = "key-for-fixture-42";
+    await pal.providers.setKey("openrouter", key);
+    const project = await pal.projects.create("diagnostics-project", { name: "Diagnostics" });
+    const chat = await pal.chats.createChat("diagnostics-chat", { projectId: project.id }, context);
+    await fakeChatModel(pal, chat.id);
+    await pal.chats.submit(chat.id, "diagnostics-input", { text: "SECRET_CHAT_TEXT" }, context);
+    await pal.harness.waitForIdle(context);
+    const conversation = await pal.harness.conversation(chat.conversationId, context);
+    const shell = { command: "echo SECRET_COMMAND", cwd: project.root };
+    const failures = [
+      "Incorrect API key provided: sk-proj-abcdef1234567890; Bearer abc.def; request req_42",
+      `Incorrect API key provided: ${key}`,
+      `Rate limit exceeded for SECRET_CHAT_TEXT in ${project.root}`,
+      "Maximum context length exceeded: SECRET_FILE_CONTENT",
+      "Request failed: https://private.example/?token=small-secret; correct horse battery",
+    ];
+    for (const entry of [
+      { kind: "pal.shell", data: { shell: { ...shell, callId: "lost-call", status: "started" } } },
+      { kind: "pal.shell", data: { shell: { ...shell, callId: "done-call", status: "started" } } },
+      {
+        kind: "pal.shell",
+        data: { shell: { ...shell, callId: "done-call", status: "finished", output: "SECRET_OUTPUT", exitCode: 3 } },
+      },
+      ...failures.map((errorMessage) => ({
+        kind: "pi.assistant",
+        model: [fauxAssistantMessage("", { stopReason: "error", errorMessage })],
+      })),
+    ])
+      await conversation?.submit({ type: "write", entry }, context);
+    await pal.store.database.run(
+      "UPDATE pal_workspaces SET state = 'failed', error = ? WHERE chat_id = ?",
+      `Workspace failure in ${project.root}: SECRET_FILE_CONTENT`,
+      chat.id,
+    );
+
+    expect((await fetch(`${base}/api/chats/${chat.id}/diagnostics`)).status).toBe(401);
+    expect((await fetch(`${base}/api/diagnostics`)).status).toBe(401);
+    const { status, body } = await api("GET", `chats/${chat.id}/diagnostics`);
+    expect(status).toBe(200);
+    expect(body.installation).toMatchObject({
+      format: 1,
+      pal: { status: "ready", schema: MIGRATIONS.at(-1)?.version },
+      providers: expect.arrayContaining([{ id: "openrouter", enabled: false, hasKey: true }]),
+      chatgpt: { connected: false },
+      unfinished: { tasks: 0, approvals: 0 },
+    });
+    expect(body.chat).toMatchObject({
+      chat: chat.id,
+      workspace: { mode: "local", state: "failed" },
+      running: false,
+      inputs: [{ requestId: "diagnostics-input", state: "admitted", submissionId: expect.any(Number) }],
+      commands: [{ callId: "done-call", exitCode: 3 }],
+      unknownEffects: [{ callId: "lost-call" }],
+      modelFailures: [
+        { cause: "credentials-rejected" },
+        { cause: "credentials-rejected" },
+        { cause: "rate-limit" },
+        { cause: "context-limit" },
+        { cause: "model-request-failed" },
+      ],
+    });
+    const exported = JSON.stringify(body);
+    for (const secret of [
+      key,
+      "correct horse battery",
+      cookie().split("=")[1] ?? "missing",
+      "SECRET_CHAT_TEXT",
+      "SECRET_COMMAND",
+      "SECRET_OUTPUT",
+      "SECRET_FILE_CONTENT",
+      "private.example",
+      "small-secret",
+      "sk-proj-",
+      "abc.def",
+      project.root,
+    ])
+      expect(exported).not.toContain(secret);
+    expect((await api("GET", "diagnostics")).body).toMatchObject({
+      format: 1,
+      pal: { release: body.installation.pal.release },
+    });
   });
 });

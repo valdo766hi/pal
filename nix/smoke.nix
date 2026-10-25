@@ -27,6 +27,23 @@ runCommand "pal-smoke-${pal.version}"
     JS
     pal probe | tee probe.jsonl
     test "$(grep -c '"ok":true' probe.jsonl)" -eq 5
+    pal doctor --data-dir "$TMPDIR/doctor/new/data" --json > doctor.json
+    test ! -e "$TMPDIR/doctor"
+    ${nodejs_24}/bin/node --input-type=module <<'JS'
+    import assert from 'node:assert/strict';
+    import { createHash } from 'node:crypto';
+    import { readFile } from 'node:fs/promises';
+    const report = JSON.parse(await readFile('doctor.json', 'utf8'));
+    const manifest = JSON.parse(await readFile('${pal}/lib/pal/release.json', 'utf8'));
+    assert.equal(report.format, 1);
+    assert.equal(report.core, 'ok');
+    assert.equal(report.identity.version, '${pal.version}');
+    assert.equal(report.identity.package, '${pal}');
+    assert.equal(report.identity.release, createHash('sha256').update('${pal}').digest('hex'));
+    assert.equal(report.identity.supportedSchema, manifest.schema);
+    for (const name of ['sqlite', 'codemode', 'git', 'timeout', 'bash'])
+      assert(report.checks.some(check => check.check === name && check.kind === 'core' && check.ok));
+    JS
 
     pal --port 0 --data-dir "$TMPDIR/data" > server.log 2>&1 &
     server=$!
@@ -42,12 +59,44 @@ runCommand "pal-smoke-${pal.version}"
       exit 1
     fi
     grep -F 'is in use by another Pal process' second.log
+    if pal backup --data-dir "$TMPDIR/data" --output "$TMPDIR/running-backup" 2> running-backup.log; then
+      echo "backed up a running store" >&2
+      exit 1
+    fi
+    grep -F 'Pal is running' running-backup.log
     kill -TERM "$server"
     wait "$server"
     test "$(stat -c %a "$TMPDIR/data")" = 700
+
+    # Stopped-state backup, verification and in-place restore with the packaged CLI; the key is kept separately.
+    pal backup --data-dir "$TMPDIR/data" --output "$TMPDIR/backup" | tee backup.json
+    pal restore --from "$TMPDIR/backup" --check | tee restore-check.json
+    grep -F '"integrity":"ok"' restore-check.json
+    grep -F '"credentialKey":"missing"' restore-check.json
+    ${nodejs_24}/bin/node --input-type=module <<'JS'
+    import assert from 'node:assert/strict';
+    import { createHash } from 'node:crypto';
+    import { readFile } from 'node:fs/promises';
+    const backup = JSON.parse(await readFile('backup.json', 'utf8'));
+    const checked = JSON.parse(await readFile('restore-check.json', 'utf8'));
+    assert.equal(backup.format, 2);
+    assert.equal(backup.build, createHash('sha256').update('${pal}').digest('hex'));
+    assert.equal(checked.build, backup.build);
+    JS
+    install -m 600 "$TMPDIR/data/credentials.key" "$TMPDIR/kept.key"
+    mv "$TMPDIR/data" "$TMPDIR/data-before"
+    pal restore --from "$TMPDIR/backup" --data-dir "$TMPDIR/data" --credential-key "$TMPDIR/kept.key" | tee restored.json
+    grep -F '"remappedIdentities":0' restored.json
+    test "$(stat -c %a "$TMPDIR/data")" = 700
+    test "$(stat -c %a "$TMPDIR/data/credentials.key")" = 600
+    if pal restore --from "$TMPDIR/backup" --data-dir "$TMPDIR/data" --credential-key "$TMPDIR/kept.key" 2> replace.log; then
+      echo "restore replaced an existing data directory" >&2
+      exit 1
+    fi
+    grep -F 'already exists' replace.log
     ${nodejs_24}/bin/node ${pal}/lib/pal/release-source/test/fixtures/supervised-serve.ts \
       ${pal}/lib/pal/dist/main.js "$TMPDIR/supervised"
 
     mkdir -p $out
-    cp probe.jsonl health.json $out/
+    cp probe.jsonl doctor.json health.json backup.json restore-check.json restored.json $out/
   ''

@@ -50,6 +50,7 @@
   let handoff: { epoch: number; url: string; chat: string } | undefined = $state();
   let busy = $state(false);
   let addressFocused = false;
+  let addressDirty = false;
   let socket: WebSocket | undefined;
   let image: HTMLImageElement | undefined = $state();
   let keyboard: HTMLInputElement | undefined = $state();
@@ -72,6 +73,9 @@
     view = undefined;
     titles = {};
     handoff = undefined;
+    address = "";
+    addressFocused = false;
+    addressDirty = false;
   }
 
   async function check() {
@@ -120,8 +124,10 @@
         | { type: "titles"; titles: { id: string; title: string }[] }
         | { type: "error"; message: string };
       if (message.type === "state") {
+        const tab = message.tabs.find((tab) => tab.active);
+        const changed = tab?.id !== active?.id;
         if (
-          message.tabs.find((tab) => tab.active)?.id !== active?.id ||
+          changed ||
           message.viewport.width !== view?.viewport.width ||
           message.viewport.height !== view?.viewport.height
         ) {
@@ -130,7 +136,10 @@
         }
         view = message;
         error = undefined;
-        if (!addressFocused) address = message.tabs.find((tab) => tab.active)?.url ?? "";
+        if (changed || !message.control || (!addressFocused && !addressDirty)) {
+          address = tab?.url ?? "";
+          addressDirty = false;
+        }
       } else if (message.type === "titles") {
         titles = Object.fromEntries(message.titles.map((entry) => [entry.id, entry.title]));
       } else {
@@ -140,8 +149,9 @@
   }
 
   function send(message: Record<string, unknown>) {
-    if (socket?.readyState !== WebSocket.OPEN || view === undefined) return;
+    if (socket?.readyState !== WebSocket.OPEN || view === undefined) return false;
     socket.send(JSON.stringify(message.type === "take" ? message : { ...message, epoch: view.epoch }));
+    return true;
   }
 
   /** Page coordinates for a point on the shown frame, which may be scaled to fit the panel. */
@@ -231,8 +241,8 @@
     if (view?.control && text !== "") send({ type: "text", text });
   }
   function go() {
-    if (address.trim() === "") return;
-    send({ type: "navigate", url: address.trim() });
+    const url = address.trim();
+    if (url !== "" && send({ type: "navigate", url })) addressDirty = false;
   }
   async function stop(clear: boolean) {
     busy = true;
@@ -253,7 +263,9 @@
 
 <div class="browser">
   {#if status === "unavailable"}
-    <p class="note">This Pal build has no browser runtime.</p>
+    <p class="note">
+      This Pal build has no browser runtime. The project browser is not supported on macOS yet; use a Linux Pal host.
+    </p>
   {:else if status === "closed" || status === "checking"}
     <div class="note">
       <p>
@@ -295,6 +307,7 @@
         disabled={!view?.control}
         autocomplete="off"
         spellcheck="false"
+        oninput={() => (addressDirty = true)}
         onfocus={() => (addressFocused = true)}
         onblur={() => (addressFocused = false)}
         onkeydown={(event) => event.key === "Enter" && go()}

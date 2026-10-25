@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { FileFinder } from "@ff-labs/fff-node";
+import { NativeFinder } from "../src/core/native-finder.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { ChatService } from "../src/core/chats.ts";
@@ -80,6 +80,7 @@ async function results(conversation: Awaited<ReturnType<typeof agent>>["conversa
 
 describe("reference folder grants", () => {
   it("persists explicit read-only/index-off authority without copying, trusting or deleting files", async () => {
+    const native = vi.spyOn(NativeFinder, "open");
     const fixture = await setup();
     const granted = await fixture.add();
     expect(granted).toMatchObject({
@@ -95,7 +96,6 @@ describe("reference folder grants", () => {
       text: "reference needle\n",
     });
     const lease = await fixture.pal.folders.owner(fixture.project.id, granted.id);
-    const native = vi.spyOn(FileFinder, "create");
     await expect(searchFolder(fixture.pal.search, lease, "needle", "text")).rejects.toThrow(/indexing is off/);
     expect(native).not.toHaveBeenCalled();
     const reopened = await fixture.reopen();
@@ -166,8 +166,11 @@ describe("reference folder grants", () => {
     const lease = await pal.folders.owner(project.id, granted.id);
     const entered = Promise.withResolvers<undefined>();
     const finish = Promise.withResolvers<undefined>();
-    const original = FileFinder.prototype.waitForScan;
-    vi.spyOn(FileFinder.prototype, "waitForScan").mockImplementationOnce(async function (this: FileFinder, timeout) {
+    const original = NativeFinder.prototype.waitForScan;
+    vi.spyOn(NativeFinder.prototype, "waitForScan").mockImplementationOnce(async function (
+      this: NativeFinder,
+      timeout,
+    ) {
       const result = await original.call(this, timeout);
       entered.resolve(undefined);
       await finish.promise;
@@ -175,11 +178,21 @@ describe("reference folder grants", () => {
     });
     const searching = searchFolder(pal.search, lease, "needle", "text").catch((error: unknown) => error);
     await entered.promise;
-    await pal.folders.remove(project.id, granted.id);
-    expect(pal.search.size).toBe(0);
-    finish.resolve(undefined);
-    expect(await searching).toBeInstanceOf(Error);
-    expect(pal.search.size).toBe(0);
+    let revoked = false;
+    const revoking = pal.folders.remove(project.id, granted.id).then(() => {
+      revoked = true;
+    });
+    try {
+      await expect.poll(() => revoked, { timeout: 5000 }).toBe(true);
+      expect(pal.search.size).toBe(0);
+      finish.resolve(undefined);
+      expect(await searching).toBeInstanceOf(Error);
+      expect(pal.search.size).toBe(0);
+    } finally {
+      finish.resolve(undefined);
+      await revoking;
+      await searching;
+    }
   });
 
   it("rechecks after search starts late, when revocation already forgot the earlier index", async () => {

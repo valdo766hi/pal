@@ -11,18 +11,21 @@
   } from "../lib/api.ts";
   import Icon from "../lib/Icon.svelte";
   import ConfirmRemoval from "./ConfirmRemoval.svelte";
+  import { commentFeedback, type ReviewFeedback } from "../../../src/core/feedback.ts";
 
   let {
     project,
     workspace,
     initialPath,
     onFeedback,
+    composed,
     onStatus,
   }: {
     project: Project;
     workspace?: Workspace | null | undefined;
     initialPath?: string | undefined;
-    onFeedback?: (text: string) => void;
+    onFeedback?: (text: string, feedback: ReviewFeedback) => boolean;
+    composed?: (id: string) => boolean;
     /** What the panel header shows: whether a scan is running and the totals of the last one. */
     onStatus?: (status: { busy: boolean; files: number | undefined; add: number; del: number }) => void;
   } = $props();
@@ -60,11 +63,31 @@
     }
     return parsed;
   });
-  let composing: number | undefined = $state();
+  type CommentTarget = {
+    project: string;
+    workspace: string | undefined;
+    scope: "normal" | "include-ignored";
+    path: string;
+    revision: string;
+    line: number;
+    text: string;
+  };
+  let composing: CommentTarget | undefined = $state.raw();
+  let retarget: CommentTarget | undefined = $state.raw();
   let draft = $state("");
   const listed = $derived(new Set(changes?.files.map((candidate) => candidate.path)));
   const displayed = $derived(rows.slice(0, 5000));
   const visibleLines = $derived(new Set(displayed.flatMap((row) => (row.line === undefined ? [] : [row.line]))));
+  const draftVisible = $derived(
+    composing !== undefined &&
+      composing.project === project.id &&
+      composing.workspace === workspace?.id &&
+      composing.scope === scope &&
+      composing.path === file?.path &&
+      composing.revision === file.revision &&
+      visibleLines.has(composing.line),
+  );
+  const draftHidden = $derived(composing?.scope === "include-ignored" && !includeIgnored);
   const current = $derived(
     (changes?.comments ?? []).reduce<Record<number, ChangeComment[]>>((byLine, comment) => {
       if (comment.path === file?.path && !comment.outdated) (byLine[comment.line] ??= []).push(comment);
@@ -80,6 +103,7 @@
   );
   const outdatedCount = $derived(unplaced.filter((comment) => comment.outdated).length);
   const pending = $derived(changes?.comments.filter((comment) => !comment.sent) ?? []);
+  const copied = $derived(pending.some((comment) => composed?.(comment.id) === true));
 
   /** Added and removed lines in one file's patch, counted inside its hunks. */
   function counts(patch: string): { add: number; del: number } {
@@ -122,10 +146,9 @@
   function changeScope(checked: boolean) {
     includeIgnored = checked;
     changes = undefined;
-    composing = undefined;
+    retarget = undefined;
     discarding = undefined;
     chosen = undefined;
-    draft = "";
     void refresh();
   }
   async function review() {
@@ -168,37 +191,83 @@
       busy = false;
     }
   }
-  function open(line: number) {
-    composing = composing === line ? undefined : line;
+  function clearDraft() {
+    composing = undefined;
+    retarget = undefined;
     draft = "";
   }
-  const add = (target: Change, line: number) =>
-    act(async () => {
-      await api.comment(project.id, target.path, target.revision, line, draft, scope, workspace?.id);
-      composing = undefined;
+  function open(file: Change, line: number, text: string) {
+    if (draftHidden) {
+      error = "Re-enable ignored-file review or cancel its draft before choosing another target.";
+      return;
+    }
+    if (draftVisible && composing?.line === line) {
+      if (draft.trim() === "") clearDraft();
+      return;
+    }
+    const target: CommentTarget = {
+      project: project.id,
+      workspace: workspace?.id,
+      scope,
+      path: file.path,
+      revision: file.revision,
+      line,
+      text: text.slice(0, 1000),
+    };
+    if (composing !== undefined && draft.trim() !== "") retarget = target;
+    else {
+      composing = target;
+      retarget = undefined;
       draft = "";
+    }
+  }
+  async function add() {
+    const target = composing,
+      text = draft;
+    if (target === undefined || busy || draftHidden) return;
+    await act(async () => {
+      try {
+        await api.comment(
+          target.project,
+          target.path,
+          target.revision,
+          target.line,
+          text,
+          target.scope,
+          target.workspace,
+        );
+      } catch (failure) {
+        if (failure instanceof ApiError && failure.code === "changes_stale") {
+          await refresh();
+          throw new Error(
+            "The original file changed. Your draft is kept; review the latest diff, choose a line and retarget it explicitly.",
+            { cause: failure },
+          );
+        }
+        throw failure;
+      }
+      if (composing === target && draft === text) clearDraft();
     });
-  async function feedback() {
+  }
+  function feedback() {
     const sending = pending;
-    onFeedback?.(
+    const added = onFeedback?.(
       [
         "Review feedback:",
         `Workspace: ${root}${workspace == null ? "" : ` (${workspace.mode}, ${workspace.id})`}.`,
-        ...sending.map(
-          (comment) =>
-            `${comment.path} (revision ${comment.revision.slice(0, 12)}), line ${comment.line}${comment.outdated ? " (outdated)" : ""}: ${comment.lineText.trim()}\n${comment.body}`,
-        ),
+        ...sending.map(commentFeedback),
       ].join("\n\n"),
+      { ids: sending.map((comment) => comment.id), scope },
     );
-    await act(() =>
-      api.commentsSent(
-        project.id,
-        sending.map((comment) => comment.id),
-        scope,
-        workspace?.id,
-      ),
-    );
-    if (error === undefined) done = "Feedback is in the composer. Edit it if needed, then send.";
+    if (added !== true) {
+      done = undefined;
+      error =
+        "Feedback could not be added to the draft. Your comments are kept; make room in the composer and copy again.";
+      return;
+    }
+    error = undefined;
+    done =
+      "Feedback is in the composer, not yet admitted. Send it there, or copy again from here. Edited feedback stays recoverable in this panel.";
   }
   /** Only by the owner's choice: a commit by itself never moves the baseline, so it can't hide changes from review. */
   async function moveBaseline() {
@@ -249,7 +318,7 @@
             aria-current={file?.path === candidate.path ? "true" : undefined}
             onclick={() => {
               chosen = candidate.path;
-              composing = undefined;
+              retarget = undefined;
             }}
           >
             <span class="name"
@@ -312,6 +381,14 @@
       {#each unplaced as comment (comment.id)}{@render card(comment, true)}{/each}
     </div>
   {/if}
+  {#if composing && draftHidden}
+    <div class="cm out">
+      <p>Your ignored-file draft is kept. Re-enable ignored-file review to continue.</p>
+      <button class="b sm q" onclick={clearDraft}>Cancel draft</button>
+    </div>
+  {:else if composing && !draftVisible}
+    {@render editor(composing)}
+  {/if}
   {#if file}
     {#if file.problem}<p class="notice" role="status">{file.problem}</p>
     {:else}
@@ -330,8 +407,8 @@
                 <button
                   class="ln lnb"
                   aria-label={`Comment on line ${line}`}
-                  aria-pressed={composing === line}
-                  onclick={() => open(line)}>{line}</button
+                  aria-pressed={draftVisible && composing?.line === line}
+                  onclick={() => open(target, line, row.text)}>{line}</button
                 >
               {/if}
               <span class="sg">{row.kind === "add" ? "+" : row.kind === "del" ? "-" : " "}</span><span class="tx"
@@ -341,24 +418,8 @@
             {#if row.line !== undefined}
               {@const line = row.line}
               {#each current[line] ?? [] as comment (comment.id)}{@render card(comment)}{/each}
-              {#if composing === line}
-                <div class="cm">
-                  <label for="change-comment">Comment on line {line}</label>
-                  <textarea
-                    id="change-comment"
-                    class="f"
-                    rows="3"
-                    maxlength="4000"
-                    placeholder="Leave a review comment"
-                    bind:value={draft}
-                    {@attach (node) => node.focus()}></textarea>
-                  <div class="actions">
-                    <button class="b sm q" onclick={() => (composing = undefined)}>Cancel</button>
-                    <button class="b sm p" disabled={busy || draft.trim() === ""} onclick={() => add(target, line)}
-                      >Add comment</button
-                    >
-                  </div>
-                </div>
+              {#if composing && draftVisible && composing.line === line}
+                {@render editor(composing)}
               {/if}
             {/if}
           {/if}
@@ -390,11 +451,55 @@
       {/if}
       <span class="grow"></span>
       {#if onFeedback}<button class="b" disabled={busy || pending.length === 0} onclick={feedback}
-          >Send feedback to chat{pending.length > 0 ? ` (${pending.length})` : ""}</button
+          >{copied ? "Copy feedback again" : "Send feedback to chat"}{pending.length > 0
+            ? ` (${pending.length})`
+            : ""}</button
         >{/if}
     </div>
   {/if}
 </div>
+
+{#snippet editor(target: CommentTarget)}
+  <div class="cm" class:out={!draftVisible}>
+    <div class="cmhead" title={`Workspace ${target.workspace ?? target.project}; revision ${target.revision}`}>
+      Original target: {target.path} · {target.revision.slice(0, 12)} · line {target.line}
+    </div>
+    <code class="mono quote">{target.text}</code>
+    {#if !draftVisible}<p class="warning">
+        Viewing another file or revision. This draft still belongs to its original target.
+      </p>{/if}
+    <label for="change-comment">Comment on line {target.line}</label>
+    <textarea
+      id="change-comment"
+      class="f"
+      rows="3"
+      maxlength="4000"
+      placeholder="Leave a review comment"
+      bind:value={draft}
+      {@attach (node) => node.focus()}></textarea>
+    {#if retarget}
+      <div class="callout wa">
+        <p>Move this text to {retarget.path} · {retarget.revision.slice(0, 12)} · line {retarget.line}?</p>
+        <code class="mono quote">{retarget.text}</code>
+        <div class="actions">
+          <button class="b sm q" onclick={() => (retarget = undefined)}>Keep original target</button>
+          <button
+            class="b sm"
+            onclick={() => {
+              composing = retarget;
+              retarget = undefined;
+              error = undefined;
+            }}>Retarget draft</button
+          >
+        </div>
+      </div>
+    {/if}
+    <div class="actions">
+      <button class="b sm q" onclick={clearDraft}>Cancel</button>
+      <button class="b sm p" disabled={busy || draft.trim() === ""} onclick={add}>Add comment</button>
+    </div>
+  </div>
+{/snippet}
 
 {#snippet card(comment: ChangeComment, detached = false)}
   <div class="cm" class:out={detached}>
@@ -403,7 +508,9 @@
         >You · {comment.path === file?.path ? "" : `${comment.path} · `}line {comment.line}</span
       >
       {#if comment.outdated}<span class="warning">Outdated</span>{/if}
-      <span>·</span><span>{comment.sent ? "Added to composer" : "Not sent"}</span>
+      <span>·</span><span
+        >{comment.sent ? "Admitted to chat" : composed?.(comment.id) ? "In composer · not admitted" : "Not sent"}</span
+      >
       <span class="grow"></span>
       <button
         class="b i q sm tip end"

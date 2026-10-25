@@ -1,11 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, ModelThinkingLevel, TextContent } from "@earendil-works/pi-ai";
 import {
+  type Agent,
   type AgentChange,
+  configure,
   type ConversationId,
   defineDocFamily,
   type Harness,
+  InboxDoc,
+  LiveDoc,
+  type ModelRef,
   type SubmissionId,
 } from "@earendil-works/pi-durable";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
@@ -13,6 +18,8 @@ import { type Static, Type } from "typebox";
 import { InvalidRequest, normalize, RequestConflict, validate } from "./requests.ts";
 import { extensionScope, selectedExtensions, type ExtensionScope } from "./extensions.ts";
 import { WorkspaceMode, workspaceMode } from "./workspaces.ts";
+import { HttpError } from "./http.ts";
+import type { Changes } from "./changes.ts";
 
 export const MAX_INPUT_CHARS = 100_000;
 
@@ -31,12 +38,22 @@ const RenameBody = Type.Object(
   },
   { additionalProperties: false },
 );
+export const ConfigurationRevision = Type.String({ pattern: "^[a-f0-9]{64}$" });
+const FeedbackBody = Type.Object(
+  {
+    ids: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { minItems: 1, maxItems: 200, uniqueItems: true }),
+    scope: Type.Union([Type.Literal("normal"), Type.Literal("include-ignored")]),
+  },
+  { additionalProperties: false },
+);
 export const InputBody = Type.Object(
   {
     text: Type.String({ minLength: 1, maxLength: MAX_INPUT_CHARS }),
     whenBusy: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer")])),
     /** Upload IDs from this chat's project, in the order shown. */
     attachments: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 10 })),
+    configuration: Type.Optional(ConfigurationRevision),
+    feedback: Type.Optional(FeedbackBody),
   },
   { additionalProperties: false },
 );
@@ -50,7 +67,7 @@ export class ProjectUnavailable extends Error {}
 export class AdmissionStopped extends Error {}
 
 /** Crash points between Pal's and Pi's commits, for deterministic recovery tests. */
-export type Barrier = "chat-recorded" | "chat-created" | "input-recorded" | "input-submitted";
+export type Barrier = "chat-recorded" | "chat-created" | "input-recorded" | "input-submitted" | "input-admitted";
 
 export type Chat = { readonly id: string; readonly conversationId: ConversationId };
 export type ChatSummary = Chat & {
@@ -87,6 +104,8 @@ export type ChatServiceOptions = {
   ) => Promise<AgentChange | undefined>;
   /** Frozen with the chat record, before Pi conversation creation, so recovery cannot adopt newer defaults. */
   readonly extensions?: () => Promise<string>;
+  /** Validate new inputs without changing already admitted receipts or reconciliation. */
+  readonly checkExtensions?: (selected: ExtensionScope["selected"]) => void;
   /** Device uploads a message may attach: checked before admission, turned into model content at submission. */
   readonly attachments?: {
     check(
@@ -95,8 +114,11 @@ export type ChatServiceOptions = {
     ): Promise<readonly { id: string; name: string; size: number; mediaType: string }[]>;
     content(projectId: string, ids: readonly string[]): Promise<(TextContent | ImageContent)[]>;
   };
+  readonly feedback?: Pick<Changes, "checkFeedback" | "admitFeedback">;
   /** Host authority frozen with the admission, not recomputed during retry or restart. */
   readonly folderScope?: (projectId: string, chatId: string) => Promise<string>;
+  /** Notify the owning host once admission requires restart and reconciliation. */
+  readonly onStopped?: () => void;
   readonly barrier?: (point: Barrier) => void | Promise<void>;
 };
 
@@ -107,7 +129,8 @@ export type ChatServiceOptions = {
  */
 export class ChatService {
   readonly #options: ChatServiceOptions;
-  #failure: unknown;
+  readonly #configurations = new Map<string, Promise<unknown>>();
+  #stopped = false;
 
   private constructor(options: ChatServiceOptions) {
     this.#options = options;
@@ -128,12 +151,12 @@ export class ChatService {
         "SELECT a.chat_id, a.request_id, a.intent FROM pal_admissions a JOIN pal_chats c ON c.id = a.chat_id WHERE a.state = 'admitting' AND c.deleted_at IS NULL ORDER BY a.seq",
       ),
     );
-    for (const row of inputs) await service.#admit(row.chat_id, row.request_id, JSON.parse(row.intent), context);
+    for (const row of inputs) await service.#admit(row.chat_id, row.request_id, service.#input(row.intent), context);
     return service;
   }
 
   get stopped(): boolean {
-    return this.#failure !== undefined;
+    return this.#stopped;
   }
 
   async list(projectId: string): Promise<ChatSummary[]> {
@@ -237,6 +260,10 @@ export class ChatService {
       throw new ProjectUnavailable(`project ${projectId} does not exist or is not ready`);
     }
     const extensions = await this.#options.extensions?.();
+    if (extensions !== undefined && this.#options.checkExtensions !== undefined) {
+      const existing = await this.#guard((db) => db.get("SELECT id FROM pal_chats WHERE request_id = ?", key));
+      if (existing === undefined) this.#options.checkExtensions(selectedExtensions(extensions));
+    }
     const storedIntent =
       extensions === undefined ? intent : JSON.stringify({ ...chatIntent(body as ChatBody), extensions });
     const row = await this.#guard((db) =>
@@ -267,12 +294,58 @@ export class ChatService {
     return this.#provision(row.id, context);
   }
 
+  async configure(
+    chatId: string,
+    selection: { model: ModelRef; thinkingLevel: ModelThinkingLevel; expected?: string },
+    context: Context,
+  ): Promise<string> {
+    return this.#withConfiguration(chatId, async () => {
+      const chat = await this.get(chatId);
+      const conversation =
+        chat === undefined ? undefined : await this.#options.harness.conversation(chat.conversationId, context);
+      if (conversation === undefined) throw new ChatNotFound("no such chat");
+      const current = chatConfiguration(await conversation.agent(context));
+      if (selection.expected !== undefined && selection.expected !== current) throw configurationChanged();
+      const next = chatConfiguration(selection);
+      if (next === current) return current;
+      await conversation.commit(async (tx) => {
+        const live = await tx.doc(LiveDoc, conversation.id);
+        const inbox = await tx.doc(InboxDoc, conversation.id);
+        if (live.run !== undefined || (live.compactions?.length ?? 0) > 0 || inbox.items.length > 0)
+          throw new HttpError(
+            409,
+            "configuration_busy",
+            "Wait for this chat's pending work to finish before changing models.",
+          );
+        await configure(tx, conversation.id, { model: selection.model, thinkingLevel: selection.thinkingLevel });
+      }, context);
+      return next;
+    });
+  }
+
   /** Admit one input; repeating a request ID with the same body returns the same submission. */
   async submit(chatId: string, requestId: unknown, body: unknown, context: Context): Promise<Admission> {
+    return this.#withConfiguration(chatId, () => this.#submit(chatId, requestId, body, context));
+  }
+
+  async #withConfiguration<T>(chatId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.#configurations.get(chatId) ?? Promise.resolve();
+    const job = previous.catch(() => {}).then(work);
+    this.#configurations.set(chatId, job);
+    try {
+      return await job;
+    } finally {
+      if (this.#configurations.get(chatId) === job) this.#configurations.delete(chatId);
+    }
+  }
+
+  async #submit(chatId: string, requestId: unknown, body: unknown, context: Context): Promise<Admission> {
     const { key, intent, digest } = normalize(requestId, InputBody, body, (value) => ({
       text: value.text,
       whenBusy: value.whenBusy ?? "followUp",
       attachments: value.attachments ?? [],
+      configuration: value.configuration,
+      feedback: value.feedback === undefined ? undefined : { ids: value.feedback.ids, scope: value.feedback.scope },
     }));
     const attached = (body as InputBody).attachments ?? [];
     if (attached.length > 0) {
@@ -296,6 +369,18 @@ export class ChatService {
     if (previous !== undefined && previous.digest !== digest)
       throw new RequestConflict(`request ${key} was admitted with a different body`);
     if (previous?.submission_id != null) return { chatId, requestId: key, submissionId: previous.submission_id };
+    if (previous === undefined) this.#options.checkExtensions?.(chat.extensions);
+    const expected = (body as InputBody).configuration;
+    if (expected !== undefined) {
+      const conversation = await this.#options.harness.conversation(chat.conversationId, context);
+      if (conversation === undefined) throw new ChatNotFound("the chat's conversation is missing");
+      if (chatConfiguration(await conversation.agent(context)) !== expected) throw configurationChanged();
+    }
+    const feedback = (body as InputBody).feedback;
+    if (previous === undefined && feedback !== undefined) {
+      if (this.#options.feedback === undefined) throw new InvalidRequest("review feedback is not available");
+      await this.#options.feedback.checkFeedback(chatId, feedback, (body as InputBody).text);
+    }
     const scope = previous === undefined ? await this.#options.folderScope?.(chat.projectId, chatId) : undefined;
     const row = await this.#guard((db) =>
       db.transaction(async (tx) => {
@@ -326,7 +411,22 @@ export class ChatService {
     if (row.digest !== digest) throw new RequestConflict(`request ${key} was admitted with a different body`);
     if (row.submission_id !== null) return { chatId, requestId: key, submissionId: row.submission_id };
     await this.#options.barrier?.("input-recorded");
-    return this.#admit(chatId, key, JSON.parse(row.intent), context);
+    return this.#admit(chatId, key, this.#input(row.intent), context);
+  }
+
+  #stop() {
+    if (this.#stopped) return;
+    this.#stopped = true;
+    this.#options.onStopped?.();
+  }
+
+  #input(intent: string): InputBody {
+    try {
+      return validate(InputBody, JSON.parse(intent));
+    } catch (error) {
+      this.#stop();
+      throw new AdmissionStopped("a saved input is corrupt; admission cannot safely resume", { cause: error });
+    }
   }
 
   /** Create the chat's conversation unless an earlier attempt did, then record the mapping. */
@@ -368,7 +468,7 @@ export class ChatService {
   }
 
   /** Submit under the same request ID, which Pi deduplicates per conversation, then record the acknowledgement. */
-  async #admit(chatId: string, requestId: string, intent: Required<InputBody>, context: Context): Promise<Admission> {
+  async #admit(chatId: string, requestId: string, intent: InputBody, context: Context): Promise<Admission> {
     if ((await this.get(chatId)) === undefined) throw new ChatNotFound("this chat was deleted before admission");
     const submissionId = await this.#guard(async (db) => {
       const row = await db.get<{ conversation_id: ConversationId; project_id: string }>(
@@ -402,7 +502,7 @@ export class ChatService {
               },
             };
       const submission = await conversation.submit(
-        { type: "input", requestId, content: intent.text, whenBusy: intent.whenBusy, ...withFiles },
+        { type: "input", requestId, content: intent.text, whenBusy: intent.whenBusy ?? "followUp", ...withFiles },
         context,
       );
       return submission.id;
@@ -420,6 +520,10 @@ export class ChatService {
           chatId,
           requestId,
         );
+        if (intent.feedback !== undefined) {
+          if (this.#options.feedback === undefined) throw new Error("saved review feedback has no receipt handler");
+          await this.#options.feedback.admitFeedback(tx, chatId, intent.feedback, submissionId);
+        }
         await tx.run(
           "UPDATE pal_chats SET title = ? WHERE id = ? AND title IS NULL",
           untitledName(intent.text),
@@ -427,6 +531,7 @@ export class ChatService {
         );
       }),
     );
+    await this.#options.barrier?.("input-admitted");
     return { chatId, requestId, submissionId };
   }
 
@@ -435,14 +540,28 @@ export class ChatService {
    * closes its Session on one. Restarting reconciles, since every step is keyed and safe to complete again.
    */
   async #guard<T>(work: (db: SqliteDatabase) => Promise<T>): Promise<T> {
-    if (this.#failure !== undefined) throw new AdmissionStopped("admission stopped after a storage failure");
+    if (this.#stopped) throw new AdmissionStopped("admission stopped after a storage failure");
     try {
       return await work(this.#options.database);
     } catch (error) {
-      this.#failure ??= error;
+      this.#stop();
       throw new AdmissionStopped("admission stopped after a storage failure", { cause: error });
     }
   }
+}
+
+export function chatConfiguration(agent: Pick<Agent, "model" | "thinkingLevel">): string {
+  return createHash("sha256")
+    .update(JSON.stringify([agent.model?.provider ?? null, agent.model?.modelId ?? null, agent.thinkingLevel]))
+    .digest("hex");
+}
+
+function configurationChanged(): HttpError {
+  return new HttpError(
+    409,
+    "configuration_stale",
+    "Chat settings changed elsewhere. Reload the saved settings before trying again.",
+  );
 }
 
 function chatIntent(value: ChatBody) {

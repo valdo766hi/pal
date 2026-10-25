@@ -107,10 +107,12 @@ describe("versioned built-in contributions", () => {
     expect((await conversation.context(context)).messages.at(-1)).toMatchObject({ role: "assistant" });
     expect(await readFile(join(f.project.root, "extension-marker"), "utf8").catch(() => undefined)).toBeUndefined();
     expect((await f.pal.approvals.view(chat.id)).approvals).toEqual([]);
+    const release = (await f.pal.extensions.view()).release;
+    expect(release).toMatch(/^[a-f0-9]{64}$/);
     expect(await f.pal.extensions.pins(chat.conversationId, f.pal.harness, context)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          release: "development",
+          release,
           selected: [{ id: "memory", version: 1 }],
           task: expect.any(Number),
         }),
@@ -252,7 +254,7 @@ describe("versioned built-in contributions", () => {
         (tool) => tool.name,
       ),
     ).toContain("files_list");
-    expect(await releaseIdentity("/nonexistent-install")).toBe("development");
+    expect(await releaseIdentity("/nonexistent-install")).toBe((await f.pal.extensions.view()).release);
   });
 
   it("serves selection only to the owner at Pal's own origin", async () => {

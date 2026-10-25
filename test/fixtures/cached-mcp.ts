@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { openPal, type Pal } from "../../src/core/app.ts";
 import type { ChatGPTEndpoints } from "../../src/pi/chatgpt.ts";
@@ -8,7 +9,12 @@ import { startMcpFixture } from "./mcp-server.ts";
 export async function startCachedMcp(dataRoot: string, endpoints?: ChatGPTEndpoints, preset = "exa") {
   const fixture = await startMcpFixture();
   let pal: Pal | undefined;
-  const options = { dataRoot, installRoot: "/nonexistent-install", ...(endpoints === undefined ? {} : { endpoints }) };
+  const options = {
+    dataRoot,
+    installRoot: "/nonexistent-install",
+    guidanceHome: join(dataRoot, "home"),
+    ...(endpoints === undefined ? {} : { endpoints }),
+  };
   try {
     fixture.state.tools = fixture.state.tools.map((tool) => ({
       ...tool,

@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { MIGRATIONS } from "../storage/migrations.ts";
+import { descriptorPath } from "./release-files.ts";
 
 // Widening this list is an owner-reviewed evaluator upgrade, never a candidate's own policy change.
 export const RELEASE_CONTRIBUTIONS = [
@@ -101,13 +102,12 @@ export async function readSource(
       const before = await file.stat();
       if (!before.isFile() || before.size > MAX_FILE_BYTES || (rejectHardlinks && before.nlink !== 1))
         throw new Error("release source file is linked, special or too large");
-      if (
-        rejectHardlinks &&
-        (process.platform !== "linux" || (await realpath(`/proc/self/fd/${file.fd}`)) !== join(canonical, path))
-      )
-        throw new Error("candidate source requires Linux and an unchanged, confined file descriptor");
+      if (rejectHardlinks && (await descriptorPath(file)) !== join(canonical, path))
+        throw new Error("release source requires an unchanged, confined file descriptor");
       const content = Buffer.alloc(before.size + 1);
       const read = await file.read(content, 0, content.length, 0);
+      if (rejectHardlinks && (await descriptorPath(file)) !== join(canonical, path))
+        throw new Error("release source requires an unchanged, confined file descriptor");
       const after = await file.stat();
       if (
         read.bytesRead !== before.size ||

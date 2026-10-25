@@ -6,8 +6,10 @@ import { FileFinder, type WatchBatchCallback } from "@ff-labs/fff-node";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ConversationId, ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
 import { fileTools } from "../src/core/files.ts";
+import { PrivateFiles } from "../src/core/file-policy.ts";
 import { ProjectSearch, SearchError } from "../src/core/search.ts";
 
+const publicFiles = await PrivateFiles.open([]);
 const cleanups: (() => unknown)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -25,7 +27,7 @@ async function folder(files: Record<string, string | Buffer>): Promise<string> {
 }
 
 function searcher(deny: string[] = []): ProjectSearch {
-  const search = new ProjectSearch(deny);
+  const search = new ProjectSearch(deny, publicFiles, (options) => FileFinder.create(options));
   cleanups.push(() => search.close());
   return search;
 }
@@ -206,7 +208,8 @@ describe("project search", () => {
   it("serves the model's files_search tool from the same indexes, reporting zero matches plainly", async () => {
     const root = await folder({ "src/app.ts": "const x = 1;\nconsole.log('needle here');\n" });
     const search = searcher();
-    const tools = fileTools({ root: async () => root, deny: [], search }).tools ?? [];
+    const privateFiles = await PrivateFiles.open([]);
+    const tools = fileTools({ root: async () => root, deny: [], privateFiles, search }).tools ?? [];
     const tool = tools.find((candidate) => candidate.name === "files_search") as ToolRegistration;
     const api = { conversationId: 1 as ConversationId } as ToolExecutionApi;
     const run = async (args: Record<string, unknown>) =>
@@ -217,7 +220,9 @@ describe("project search", () => {
     expect(await run({ query: "nedle" })).toBe("No matches.");
     expect(tool).toMatchObject({ callers: ["tools"], replay: "safe" });
     expect(
-      fileTools({ root: async () => root, deny: [] }).tools?.some((candidate) => candidate.name === "files_search"),
+      fileTools({ root: async () => root, deny: [], privateFiles }).tools?.some(
+        (candidate) => candidate.name === "files_search",
+      ),
     ).toBe(false);
   });
 });

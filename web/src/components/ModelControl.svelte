@@ -26,6 +26,7 @@
     current,
     effort,
     busy,
+    disabled,
     connected,
     isDefault,
     usable,
@@ -38,6 +39,7 @@
     current: Choice | undefined;
     effort: Effort;
     busy: boolean;
+    disabled: boolean;
     connected: boolean;
     isDefault: boolean;
     usable: boolean;
@@ -137,6 +139,7 @@
     aria-label={`Model and reasoning: ${modelName}, reasoning ${LABELS[effort].toLowerCase()}`}
     title={providerName === undefined ? modelName : `${modelName} · ${providerName}`}
     aria-expanded={open}
+    {disabled}
     onclick={() => (open ? close(false) : show("effort"))}
   >
     <span class="name">{modelName}</span>{#if current !== undefined && steps.length > 1}<span class="level"
@@ -151,7 +154,7 @@
       aria-label={view === "models" ? "Choose model" : "Model and reasoning"}
     >
       {#if view === "effort"}
-        <button class="head" aria-label={`Choose model (${modelName})`} onclick={() => show("models")}>
+        <button class="head" aria-label={`Choose model (${modelName})`} {disabled} onclick={() => show("models")}>
           <Icon name="bolt" />
           <span class="title">
             <span class="hname">{modelName}</span>{#if adjustable}<span class="hlevel">{levelName(shown)}</span>{/if}
@@ -178,7 +181,7 @@
             max={Math.max(0, steps.length - 1)}
             step="1"
             value={index}
-            disabled={!adjustable}
+            disabled={disabled || !adjustable}
             aria-label="Reasoning effort"
             aria-valuetext={LABELS[shown]}
             oninput={(event) => (preview = Number(event.currentTarget.value))}
@@ -203,7 +206,7 @@
         </p>
         <div class="defaults">
           {#if isDefault}<span class="optd">New chats start with this model.</span>
-          {:else}<button class="b sm" disabled={effective === null || !usable} onclick={onDefault}
+          {:else}<button class="b sm" disabled={disabled || effective === null || !usable} onclick={onDefault}
               >Use for new chats</button
             >{/if}
         </div>
@@ -237,7 +240,13 @@
             <div role="radiogroup" aria-label={`${group.name} models`}>
               {#each group.choices.slice(0, SHOWN_PER_PROVIDER) as choice (choice.id)}
                 {@const chosen = choice.provider === effective?.provider && choice.id === effective.modelId}
-                <button class="opt" role="radio" aria-checked={chosen} disabled={busy} onclick={() => choose(choice)}>
+                <button
+                  class="opt"
+                  role="radio"
+                  aria-checked={chosen}
+                  disabled={busy || disabled}
+                  onclick={() => choose(choice)}
+                >
                   <span>{choice.name}</span>
                   <span class="mono optd">{choice.id}</span>
                   {#if chosen}<Icon name="check" />{/if}

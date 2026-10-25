@@ -112,9 +112,13 @@ export type McpServerView = {
   } | null;
   readonly state: McpState;
   readonly detail: string | null;
+  readonly catalog: string | null;
   readonly tools: readonly {
     readonly name: string;
     readonly description: string;
+    readonly fingerprint: string;
+    readonly definition: McpToolDefinition | null;
+    readonly available: boolean;
     readonly approved: boolean;
     /** Approved, but the server now describes it differently: not callable until approved again. */
     readonly changed: boolean;
@@ -380,6 +384,7 @@ export class McpManager {
     if (server.private && enabled) throw new McpConfigError("private endpoints do not need fake-IP routing");
     if (server.fakeIp === enabled) return this.#view(server);
     Object.assign(server, { fakeIp: enabled, enabled: false, approved: {}, authority: server.authority + 1 });
+    this.#state(id).discovered = undefined;
     await this.#save(server);
     await this.#drop(id);
     this.#install();
@@ -395,6 +400,7 @@ export class McpManager {
     try {
       // Invalidate project approvals durably before a different credential can be committed.
       server.authority++;
+      live.discovered = undefined;
       await this.#save(server);
       await this.#drop(id);
       if (key === null) await this.#credentials.delete(`mcp:${id}`);
@@ -433,6 +439,7 @@ export class McpManager {
         await this.approve(
           id,
           listed.flatMap((tool) => (preset.tools.includes(tool.name) ? [tool.name] : [])),
+          this.#catalog(server),
         );
       }
     }
@@ -448,12 +455,16 @@ export class McpManager {
     return this.#view(server);
   }
 
-  /** Approve exactly these tools as last listed; tools not named lose approval. */
-  async approve(id: string, names: readonly string[]): Promise<McpServerView> {
+  /** Approve only the reviewed catalog; tools not named lose approval. */
+  async approve(id: string, names: readonly string[], catalog: string | null): Promise<McpServerView> {
     const server = this.#require(id);
     if (this.#state(id).changing !== 0) throw new RequestConflict("this connection is changing; retry shortly");
+    if (catalog === null || catalog !== this.#catalog(server))
+      throw new RequestConflict("the MCP catalog or connection changed; test and review its tools before approving");
     const listed = this.#live.get(id)?.discovered;
     if (listed === undefined) throw new McpConfigError("test the connection first, so its tools are listed");
+    if (names.some((name) => !listed.some((tool) => tool.name === name)))
+      throw new McpConfigError("select only tools in the reviewed catalog");
     const approved = Object.fromEntries(
       listed.flatMap((tool) => (names.includes(tool.name) ? [[tool.name, approval(tool)]] : [])),
     );
@@ -715,6 +726,7 @@ export class McpManager {
           throw new McpConfigError(`the server lists ${tools.length} tools; Pal takes at most ${MAX_TOOLS}`);
         if (key !== undefined && JSON.stringify(tools).includes(JSON.stringify(key).slice(1, -1)))
           throw new McpConfigError("MCP catalog contains the saved credential; refusing its tool definitions");
+        current();
         live.discovered = tools;
         this.#refreshState(server);
         return client;
@@ -1006,8 +1018,18 @@ export class McpManager {
       // The latest connection outcome, even for a disabled server the owner is testing; otherwise idle or disabled.
       state,
       detail: live?.detail ?? null,
+      catalog: this.#catalog(server),
       tools: this.#toolViews(server),
     };
+  }
+
+  #catalog(server: Server): string | null {
+    const live = this.#live.get(server.id);
+    if (live?.discovered === undefined || live.changing !== 0) return null;
+    const definitions = live.discovered.map((tool) => approval(tool).fingerprint).sort((a, b) => a.localeCompare(b));
+    return createHash("sha256")
+      .update(stable([server.id, server.authority, definitions]))
+      .digest("hex");
   }
 
   #toolViews(server: Server) {
@@ -1015,12 +1037,15 @@ export class McpManager {
     return [...new Set([...(listed ?? []).map((tool) => tool.name), ...Object.keys(server.approved)])].map((name) => {
       const current = listed?.find((tool) => tool.name === name),
         approved = Object.hasOwn(server.approved, name);
+      const definition = current === undefined ? server.approved[name] : approval(current);
       return {
         name,
-        description: current?.description ?? server.approved[name]?.description ?? "",
+        description: definition?.description ?? "",
+        definition: definition ?? null,
+        fingerprint: definition?.fingerprint ?? "",
+        available: current !== undefined,
         approved,
         changed: approved && this.#changed(server, name),
-        fingerprint: current === undefined ? (server.approved[name]?.fingerprint ?? "") : approval(current).fingerprint,
       };
     });
   }
