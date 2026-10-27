@@ -151,6 +151,33 @@ Choose an adapter only after native tests demonstrate the same confinement, appr
 recovery as Linux, and measure its startup/memory/install cost. Chat, DOM-policy or VM boot fixtures alone cannot
 qualify it. Any VM experiment needs a reviewed plan before it starts; no mechanism is selected by this comparison.
 
+#### Evidence: a Seatbelt outer sandbox disables Chromium's own
+
+An outer Seatbelt profile (`sandbox-exec`, the native helper's obvious mechanism) cannot wrap Chromium with its
+sandbox enabled, so it cannot serve as the native helper. Measured on macOS 26.5.2 (25F84), arm64, with the
+pinned `chrome-headless-shell` revision 1217 (147.0.7727.15) from nixpkgs, rendering a `data:` page:
+
+| Outer sandbox | Chromium sandbox on | Chromium `--no-sandbox` (control only) |
+| ------------------------------------------ | ------------------------------------------------------------- | --------------------------------------- |
+| none | renders | — |
+| `(version 1)(allow default)` | every child fails: `sandbox initialization failed: Operation not permitted` | renders |
+| `(allow default)(deny network*)`, or one `file-read*` denial | same failure | — |
+
+The cause is below Chromium. A process already confined by Seatbelt may still apply an allow-default profile,
+but applying a deny-default profile fails with `EPERM`, even when the outer profile allows everything:
+
+| `sandbox_compile_string` + `sandbox_apply` of | Unconfined | Inside `sandbox-exec` with `(allow default)` |
+| ---------------------------------------------------------------- | ---------- | -------------------------------------------- |
+| `(version 1)(allow default)` | 0 | 0 |
+| `(version 1)(deny default)(allow process*)(allow file-read*)` | 0 | -1, `Operation not permitted` |
+
+Chromium's macOS child profiles are deny-default, so the only way to run Chromium under an outer Seatbelt profile is
+`--no-sandbox`, which this gate forbids. Remaining native-helper candidates must confine Chromium without applying
+Seatbelt to it, for example a dedicated unprivileged account with per-user packet filtering and launchd resource
+limits; that needs host administration and its own reviewed plan, and is untested here. The hardware-VM row is
+unaffected. To reproduce: compile a few lines of C that call `sandbox_compile_string` and `sandbox_apply` (from
+`libsandbox`) with each profile above, and run them directly and under `sandbox-exec` with an allow-default profile.
+
 ## Not covered
 
 - Other processes running as the same user can read Pal's data directory.
