@@ -196,12 +196,16 @@ async function main(args: readonly string[]) {
       sizes.closureSize >= sizes.narSize,
     "Nix did not report valid install sizes.",
   );
+  // A freshly realized package's first launch also pays one-time host costs: macOS assesses new executables and
+  // native modules, and nothing is cached yet. It is measured and reported on its own, so the samples are the
+  // warm-cache launches this report describes rather than one cold launch setting their p95.
+  const firstLaunch = await sampleStartup(packagePath);
   const samples = [];
   for (let i = 0; i < count; i++) samples.push(await sampleStartup(packagePath));
   return {
-    format: 2,
+    format: 3,
     scenario: "provider-unconfigured-http-startup",
-    cache: "fresh process, home and store per sample; filesystem caches are not flushed",
+    cache: "fresh process, home and store per sample after one reported first launch; caches are not flushed",
     rss: "launched Node process after HTTP readiness, via IPC; not peak or aggregate worker memory",
     observer: "trusted Node preload included in both startup and RSS; not an untrusted-code evaluator",
     identity: { package: packagePath, release: createHash("sha256").update(packagePath).digest("hex") },
@@ -215,6 +219,7 @@ async function main(args: readonly string[]) {
       node: process.version,
     },
     install: { narBytes: sizes.narSize, closureNarBytes: sizes.closureSize },
+    firstLaunch,
     samples,
     summary: {
       readyMs: distribution(samples.map((sample) => sample.readyMs)),

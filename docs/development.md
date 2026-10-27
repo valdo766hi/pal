@@ -180,7 +180,15 @@ the main process RSS at readiness, then stops its own process group and removes 
 fails the run. JSON retains every sample, nearest-rank p50/p95, package/release and host identity, package NAR bytes
 and closure NAR bytes. NAR size is not compressed download size or filesystem allocation.
 
-Format 2 measures RSS through a fixed Node IPC preload rather than host process inspection (which Darwin's Nix
+Format 3 first launches the package once and reports it apart as `firstLaunch`, before the measured samples. A
+freshly realized package's first launch also pays one-time host costs, notably macOS assessing new executables and
+native modules, with nothing cached yet. With seven samples the nearest-rank p95 is the slowest one, so that single
+cold launch used to set the p95. In all 16 startup reports from 8 native macOS CI runs, the first sample was the
+slowest; in run 40039985822 it was 1869 ms against 541–806 ms for the rest, failing the 1500 ms p95 budget. A fresh
+local package showed the same: 1418 ms first, then 278–336 ms, and 260–302 ms once launched. The first launch is
+still measured, retained and held to the runner's 5000 ms startup deadline; it is just not a warm-cache sample.
+
+Formats 2 and 3 measure RSS through a fixed Node IPC preload rather than host process inspection (which Darwin's Nix
 sandbox denies). The observer's cost is included for both packages; compare only like instrumentation, not old
 format-1 measurements. It overwrites inherited Node preload options, runs no provider calls and does not extend
 the measured process lifetime. These are explicitly trusted packages: self-reported memory is not tamper-proof
@@ -285,6 +293,7 @@ host before changing a limit. MiB/GiB below mean powers of 1024; paired limits u
 | Candidate metric | Maximum |
 | --- | --- |
 | Startup readiness p50 / p95 | baseline p50 × 1.35 + 50 ms / 1500 ms |
+| Startup first launch (one, reported apart) | 5000 ms |
 | Startup main RSS p50 / p95 | baseline p50 × 1.15 + 8 MiB / 192 MiB |
 | Package NAR / closure NAR | min(160 MiB, baseline × 1.10) / min(2 GiB Linux or 3 GiB Darwin, baseline × 1.05) |
 | MCP round trip p95, first / cached / forced live | 1500 / 750 / 750 ms |
