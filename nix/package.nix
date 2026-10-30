@@ -76,6 +76,8 @@ let
         (root + "/eslint.config.js")
         (root + "/.prettierrc.json")
         (root + "/.prettierignore")
+        (root + "/.github/workflows/security.yml")
+        (root + "/.github/workflows/security-comment.yml")
       ]
     );
   };
@@ -113,7 +115,7 @@ stdenv.mkDerivation (finalAttrs: {
     };
     pnpm = pnpm_11;
     fetcherVersion = 4;
-    hash = "sha256-M6edxwWiErXj/N2xQ5ni4McRyK1Rj2NFJav05f67kjY=";
+    hash = "sha256-aNRDjTHp4JoJt0015vRuHx5MPR03TFM3IuwJo4jFWEo=";
   };
 
   nativeBuildInputs = [
