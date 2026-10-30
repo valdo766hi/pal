@@ -96,8 +96,8 @@ All rows must pass on the same released artifact before full Linux/macOS support
 
 ### CI and coverage boundaries
 
-`.github/workflows/checks.yml` checks pushes and pull requests targeting `development`, using the exact
-pushed or PR-head commit, not an implicit merge commit. Dependencies come from the frozen lockfiles through
+`.github/workflows/checks.yml` checks pushes and pull requests targeting `main` or `development`, using the
+exact pushed or PR-head commit, not an implicit merge commit. Dependencies come from the frozen lockfiles through
 Nix. Hosted portable jobs currently use Ubuntu 24.04 x86-64 and macOS 15 Apple Silicon; the packaged Linux job
 uses Ubuntu 22.04. These are CI profiles, not minimum OS versions or acceptance of the owner's current Mac.
 Required branch-protection checks must be configured by the repository owner.
