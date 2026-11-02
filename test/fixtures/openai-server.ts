@@ -17,6 +17,8 @@ export type FixtureBehavior = {
   responses: "ok" | "truncated" | "usage_limit" | "script";
   /** In `script` mode, the first response calls `codemode` with this script; the follow-up answers in text. */
   script: string;
+  /** In `script` mode, a direct call the first response makes instead of the script. */
+  call?: { name: string; arguments: Record<string, unknown> };
   /** The assistant's text answer. */
   reply: string;
   /** While set, JWKS responses wait for it, which holds ID-token verification mid-sign-in. */
@@ -174,8 +176,8 @@ export async function startOpenAIFixture() {
           id: `fc_${counter}`,
           type: "function_call",
           call_id: `call_script_${++counter}`,
-          name: "codemode",
-          arguments: JSON.stringify({ code: behavior.script }),
+          name: behavior.call?.name ?? "codemode",
+          arguments: JSON.stringify(behavior.call?.arguments ?? { code: behavior.script }),
           status: "completed",
         };
         events.push(

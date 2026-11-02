@@ -1246,13 +1246,54 @@ describe("Pal in a browser", () => {
     const chat = (await pal.chats.list(project.id))[0];
     if (chat === undefined) throw new Error("missing chat");
     const agent = await (await pal.harness.conversation(chat.conversationId, context))?.agent(context);
-    expect(agent?.tools.map((tool) => tool.name)).toEqual(["codemode"]);
-    for (const name of ["files_write", "files_edit", "shell_run"])
-      expect(agent?.callable.find((tool) => tool.name === name)).toMatchObject({
-        replay: "unsafe",
-        callers: ["tools"],
-      });
+    expect(agent?.tools.map((tool) => tool.name)).toEqual(["codemode", "shell_run"]);
+    for (const [name, callers] of [
+      ["files_write", ["tools"]],
+      ["files_edit", ["tools"]],
+      ["shell_run", ["model", "tools"]],
+    ] as const)
+      expect(agent?.callable.find((tool) => tool.name === name)).toMatchObject({ replay: "unsafe", callers });
     await shoot("host-command-1440");
+    fixture.behavior.responses = "ok";
+  });
+
+  it("runs a long direct command with live progress once the owner raises the limit", async () => {
+    const project = (await pal.projects.list())[0];
+    if (project === undefined) throw new Error("missing project");
+    await page.goto(`${base}/#/settings/general`);
+    await page.getByLabel("Longest agent command").selectOption("300");
+    await expect.poll(() => pal.settings.commandTimeout()).toBe(300);
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate("document.documentElement.scrollWidth <= innerWidth")).toBe(true);
+      await shoot(`settings-command-${width}`);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(chatUrl);
+    fixture.behavior.responses = "script";
+    fixture.behavior.call = {
+      name: "shell_run",
+      arguments: { command: "echo started; while [ ! -e release ]; do sleep 0.1; done; echo finished", timeout: 300 },
+    };
+    await page.getByLabel("Message").fill("run the long check");
+    await page.getByRole("button", { name: "Send" }).click();
+    const request = page.getByRole("group", { name: "Approval request" }).filter({ hasText: "-e release" });
+    await request.getByText("timeout 300 s", { exact: false }).waitFor();
+    await request.getByRole("button", { name: "Approve once" }).click();
+    const receipt = page.locator("details.activity").filter({ hasText: "-e release" });
+    await receipt.locator("summary").filter({ hasText: "Running" }).click();
+    await receipt.getByText("started", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "1 command, running" }).waitFor();
+    await shoot("long-command-1440");
+    await writeFile(join(project.root, "release"), "");
+    await receipt.getByText("Exit 0", { exact: true }).waitFor();
+    await receipt
+      .locator("pre.out")
+      .filter({ hasText: /started\s+finished/ })
+      .waitFor();
+    await page.getByRole("button", { name: "Ran 1 command" }).waitFor();
+    await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+    delete fixture.behavior.call;
     fixture.behavior.responses = "ok";
   });
 

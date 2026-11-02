@@ -171,6 +171,9 @@ Settings → **MCP servers**:
 
 - **Command approval** is set per chat with the composer's **Ask** / **Full access** pill. Ask is the default for
   every chat.
+- **Longest agent command** (Settings → General) bounds one command the model runs directly: 2 minutes by default,
+  at most 30. Commands from its scripts stay within 2 minutes. Stop ends a command and its process group. A command
+  cut off by a restart is reported as interrupted and never rerun; GNU `timeout` still ends it at its deadline.
 - **Workspace mode** is chosen when you start a chat:
   - **Local** works in the project folder.
   - **Worktree** works in a separate Git worktree from `HEAD`.

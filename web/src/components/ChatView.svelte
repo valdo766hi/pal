@@ -714,9 +714,21 @@
     return "Outcome unconfirmed";
   }
 
-  /** One quiet line for an assistant turn's scripts, counted from the tool calls that came back. */
+  /** A command's live slot while it runs, model-issued or from a script; its receipt names the tool task. */
+  function runningCommand(receipt: ShellReceipt) {
+    return [...(stream?.tools ?? []), ...(stream?.nested ?? [])].find(
+      (slot) => slot.status === "running" && String(slot.taskId) === receipt.callId,
+    );
+  }
+
+  /** One quiet line for an assistant turn's tool calls: its scripts and the calls that came back, or direct calls. */
   function summary(steps: Step[], live: boolean): string {
-    const calls = steps.flatMap((step) => step.result?.calls ?? []);
+    const scripts = steps.filter((step) => step.name === "codemode").length;
+    // A direct call counts like a call a script made.
+    const calls = [
+      ...steps.filter((step) => step.name !== "codemode"),
+      ...steps.flatMap((step) => step.result?.calls ?? []),
+    ];
     const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
     const commands = calls.filter((call) => call.name === "shell_run").length;
     const edits = calls.filter((call) => call.name === "files_write" || call.name === "files_edit").length;
@@ -729,14 +741,18 @@
     if (steps.some((step) => step.result?.isError)) did.push("with errors");
     const unresolved = steps.map((step) => phase(step, live)).find((state) => state !== "Done" && state !== "Failed");
     if (unresolved !== undefined) did.push(unresolved.toLowerCase());
+    if (scripts === 0) {
+      const line = did.join(", ");
+      return unresolved === undefined && commands > 0 ? `Ran ${line}` : line.charAt(0).toUpperCase() + line.slice(1);
+    }
     const ran =
       unresolved === undefined
-        ? steps.length === 1
+        ? scripts === 1
           ? "Ran a script"
-          : `Ran ${steps.length} scripts`
-        : steps.length === 1
+          : `Ran ${scripts} scripts`
+        : scripts === 1
           ? "Script"
-          : `${steps.length} scripts`;
+          : `${scripts} scripts`;
     return did.length > 0 ? `${ran} · ${did.join(", ")}` : ran;
   }
 
@@ -894,6 +910,7 @@
               </div>
             {/if}
           {:else if item.kind === "shell"}
+            {@const running = item.receipt.status === "finished" ? undefined : runningCommand(item.receipt)}
             <details class="activity">
               <summary class="acth"
                 >Host command · not sandboxed ·
@@ -902,7 +919,11 @@
                     ? "Timed out"
                     : item.receipt.exitCode !== undefined
                       ? `Exit ${item.receipt.exitCode}`
-                      : "Outcome unconfirmed"}
+                      : running !== undefined
+                        ? stream?.connected
+                          ? "Running"
+                          : "Last observed running"
+                        : "Outcome unconfirmed"}
                 </span><Icon name="chevR" size={13} />
               </summary>
               <div class="small dim mono ellipsis" title={item.receipt.callId}>Call {item.receipt.callId}</div>
@@ -912,8 +933,9 @@
                   Ran as <code>{item.receipt.executed}</code>; output condensed by rtk.
                 </p>{/if}
               {#if item.receipt.output !== undefined}<pre class="out">{item.receipt.output}</pre>{/if}
+              {#if running?.output !== undefined}<pre class="out">{running.output}</pre>{/if}
               {#if item.receipt.truncated}<p class="small dim">Output truncated to the last 64 KiB.</p>{/if}
-              {#if item.receipt.status !== "finished"}<p class="small dim">
+              {#if item.receipt.status !== "finished" && running === undefined}<p class="small dim">
                   No completion receipt yet. If interrupted, inspect the workspace before retrying.
                 </p>{/if}
             </details>

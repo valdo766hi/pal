@@ -403,6 +403,8 @@ export const api = {
     call<{ helpers: import("../../../src/core/delegation.ts").HelperView[] }>("GET", `chats/${chat}/helpers`),
   scheduler: () => call<Scheduler>("GET", "scheduler"),
   setScheduler: (enabled: boolean) => call<Scheduler>("PUT", "scheduler", { enabled }),
+  commandTimeout: () => call<{ seconds: number }>("GET", "command-timeout"),
+  setCommandTimeout: (seconds: number) => call<{ seconds: number }>("PUT", "command-timeout", { seconds }),
   schedules: (chat: string) =>
     call<{ enabled: boolean; notice: ScheduleNotice; schedules: ScheduleView[] }>("GET", `chats/${chat}/schedules`),
   /** Sending it is the owner's approval of the notice's cost and effects for every run. */

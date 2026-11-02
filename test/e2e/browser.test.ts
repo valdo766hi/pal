@@ -258,7 +258,7 @@ describe("agent browser", () => {
   it("requires explicit per-chat control and excludes owner inputs, hidden text and page prototypes", async () => {
     const { pal, project, chat, client, handoff, conversation } = await agentFixture();
     const other = await pal.chats.createChat("browser-other-chat", { projectId: project.id }, context);
-    expect((await conversation.agent(context)).tools.map((tool) => tool.name)).toEqual(["codemode"]);
+    expect((await conversation.agent(context)).tools.map((tool) => tool.name)).toEqual(["codemode", "shell_run"]);
     expect(pal.browsers.allows(chat.conversationId)).toBe(false);
     await expect(pal.browsers.observe(chat.conversationId)).rejects.toMatchObject({ code: "browser_not_granted" });
     client.send({ type: "mode", mode: "private-login" });

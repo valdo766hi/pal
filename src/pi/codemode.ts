@@ -42,7 +42,7 @@ export const DEFAULT_CODEMODE_CAPS: CodemodeCaps = {
 };
 
 /** The kernel's list of tools the model may call directly; every other tool is reachable only from scripts. */
-export const MODEL_TOOLS: ReadonlySet<string> = new Set([CODEMODE_TOOL_NAME, "agents_delegate"]);
+export const MODEL_TOOLS: ReadonlySet<string> = new Set([CODEMODE_TOOL_NAME, "agents_delegate", "shell_run"]);
 
 /** The host's current decision whether a conversation may call a tool; asked before every call but a script's own. */
 export type ToolPolicy = (conversationId: ConversationId, toolName: string) => boolean | Promise<boolean>;

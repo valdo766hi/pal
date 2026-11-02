@@ -3,6 +3,13 @@ import { once } from "node:events";
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import {
+  createModels,
+  type FauxResponseStep,
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
 import { openPal } from "../src/core/app.ts";
 import { fakeRtk } from "./fixtures/fake-rtk.ts";
 import { startOpenAIFixture } from "./fixtures/openai-server.ts";
@@ -10,7 +17,12 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostCommands, WorkspaceLocks, outputReachesModel, shellTools } from "../src/core/execution.ts";
-import type { ConversationId, ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
+import {
+  type ConversationId,
+  type ToolExecutionApi,
+  type ToolRegistration,
+  watchEvents,
+} from "@earendil-works/pi-durable";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -112,59 +124,68 @@ describe("trusted host commands", () => {
         throw new Error("consumer closed");
       }),
     ).rejects.toThrow("consumer closed");
-    await expect(commands.run(root, "true", 999)).rejects.toThrow(/120/);
+    await expect(commands.run(root, "true", 1801)).rejects.toThrow(/1800/);
   });
-  it("does not replay an unknown host effect after SIGKILL and bounds the orphan command", async () => {
-    const { root } = await setup();
-    const fixture = await startOpenAIFixture();
-    cleanups.push(fixture.close);
-    fixture.behavior.responses = "script";
-    fixture.behavior.script =
-      'return await tools.shell_run({ command: "printf run >> marker; echo $PPID > command.pid; sleep 30", timeout: 1 });';
-    const dataRoot = join(root, "data");
-    const child = spawn(
-      process.execPath,
-      [
-        ...process.execArgv,
-        join(import.meta.dirname, "fixtures/execution-child.ts"),
-        dataRoot,
-        JSON.stringify(fixture.endpoints),
-      ],
-      { stdio: ["ignore", "pipe", "inherit"] },
-    );
-    cleanups.push(async () => {
-      if (child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGKILL");
-        await once(child, "exit");
-      }
-    });
-    const lines = createInterface({ input: child.stdout });
-    const [line] = await Promise.race([
-      once(lines, "line"),
-      once(child, "exit").then(() => {
-        throw new Error("fixture exited before ready");
-      }),
-    ]);
-    const ready = JSON.parse(String(line)) as { root: string; chatId: string };
-    await expect.poll(() => readFile(join(ready.root, "command.pid"), "utf8"), { timeout: 5000 }).toMatch(/^\d+/);
-    const commandPid = Number((await readFile(join(ready.root, "command.pid"), "utf8")).trim());
-    child.kill("SIGKILL");
-    await once(child, "exit");
-    const reopened = await openPal(
-      { dataRoot, installRoot: "/nonexistent-install", endpoints: fixture.endpoints },
-      context,
-    );
-    cleanups.push(() => reopened.close());
-    await reopened.harness.waitForIdle(context);
-    await expect.poll(() => running(commandPid), { timeout: 4000 }).toBe(false);
-    expect(await readFile(join(ready.root, "marker"), "utf8")).toBe("run");
-    const chat = await reopened.chats.get(ready.chatId);
-    if (chat === undefined) throw new Error("missing recovered chat");
-    const history = await (await reopened.harness.conversation(chat.conversationId, context))?.context(context);
-    const intents = history?.entries.filter((entry) => entry.kind === "pal.shell");
-    expect(intents).toHaveLength(1);
-    expect(intents?.[0]?.data).toMatchObject({ shell: { status: "started" } });
-  });
+  it.each(["script", "direct"])(
+    "does not replay an unknown host effect after SIGKILL and bounds the orphan command (%s)",
+    async (caller) => {
+      const { root } = await setup();
+      const fixture = await startOpenAIFixture();
+      cleanups.push(fixture.close);
+      fixture.behavior.responses = "script";
+      const command = { command: "printf run >> marker; echo $PPID > command.pid; sleep 30", timeout: 1 };
+      if (caller === "direct") fixture.behavior.call = { name: "shell_run", arguments: command };
+      else fixture.behavior.script = `return await tools.shell_run(${JSON.stringify(command)});`;
+      const dataRoot = join(root, "data");
+      const child = spawn(
+        process.execPath,
+        [
+          ...process.execArgv,
+          join(import.meta.dirname, "fixtures/execution-child.ts"),
+          dataRoot,
+          JSON.stringify(fixture.endpoints),
+        ],
+        { stdio: ["ignore", "pipe", "inherit"] },
+      );
+      cleanups.push(async () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+          await once(child, "exit");
+        }
+      });
+      const lines = createInterface({ input: child.stdout });
+      const [line] = await Promise.race([
+        once(lines, "line"),
+        once(child, "exit").then(() => {
+          throw new Error("fixture exited before ready");
+        }),
+      ]);
+      const ready = JSON.parse(String(line)) as { root: string; chatId: string };
+      await expect.poll(() => readFile(join(ready.root, "command.pid"), "utf8"), { timeout: 5000 }).toMatch(/^\d+/);
+      const commandPid = Number((await readFile(join(ready.root, "command.pid"), "utf8")).trim());
+      child.kill("SIGKILL");
+      await once(child, "exit");
+      const reopened = await openPal(
+        { dataRoot, installRoot: "/nonexistent-install", endpoints: fixture.endpoints },
+        context,
+      );
+      cleanups.push(() => reopened.close());
+      await reopened.harness.waitForIdle(context);
+      await expect.poll(() => running(commandPid), { timeout: 4000 }).toBe(false);
+      expect(await readFile(join(ready.root, "marker"), "utf8")).toBe("run");
+      const chat = await reopened.chats.get(ready.chatId);
+      if (chat === undefined) throw new Error("missing recovered chat");
+      const history = await (await reopened.harness.conversation(chat.conversationId, context))?.context(context);
+      const intents = history?.entries.filter((entry) => entry.kind === "pal.shell");
+      expect(intents).toHaveLength(1);
+      expect(intents?.[0]?.data).toMatchObject({ shell: { status: "started" } });
+      if (caller === "direct")
+        expect(history?.messages.find((message) => message.role === "toolResult")).toMatchObject({
+          isError: true,
+          content: [{ text: expect.stringContaining("shell_run was interrupted and may have partially run") }],
+        });
+    },
+  );
 
   it("locks overlapping roots and releases them even when work fails", async () => {
     const locks = new WorkspaceLocks();
@@ -182,6 +203,129 @@ describe("trusted host commands", () => {
       }),
     ).rejects.toThrow("failed");
     expect(await locks.run("/workspace", async () => true)).toBe(true);
+  });
+});
+
+describe("direct commands", () => {
+  const command = (args: { command: string; timeout?: number }) =>
+    fauxAssistantMessage(fauxToolCall("shell_run", args), { stopReason: "toolUse" });
+  const script = (code: string) => fauxAssistantMessage(fauxToolCall("codemode", { code }), { stopReason: "toolUse" });
+
+  /** A Full access chat whose faux model makes the given calls, then answers. */
+  async function chat(now?: () => number) {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "pal-direct-")));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const pal = await openPal(
+      {
+        dataRoot: join(dir, "data"),
+        installRoot: "/nonexistent-install",
+        guidanceHome: join(dir, "home"),
+        ...(now === undefined ? {} : { now }),
+      },
+      context,
+    );
+    cleanups.push(() => pal.close());
+    const project = await pal.projects.create("direct-project", { name: "Direct" });
+    const created = await pal.chats.createChat("direct-chat", { projectId: project.id }, context);
+    await pal.approvals.setMode(created.id, "full");
+    const faux = fauxProvider();
+    (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+    const model = faux.getModel();
+    const conversation = await pal.harness.conversation(created.conversationId, context);
+    if (conversation === undefined) throw new Error("fixture conversation missing");
+    await conversation.configure({ model: { provider: model.provider, modelId: model.id } }, context);
+    let inputs = 0;
+    return {
+      pal,
+      root: project.root,
+      chat: created,
+      conversation,
+      async send(...turns: FauxResponseStep[]) {
+        faux.setResponses([...turns, fauxAssistantMessage("done")]);
+        await pal.chats.submit(created.id, `direct-input-${++inputs}`, { text: "go" }, context);
+      },
+      /** The snapshot a newly opened chat page gets; the watch ends at once, as a closed tab's does. */
+      async snapshot() {
+        const watch = await watchEvents(pal.harness, created.conversationId, context);
+        await watch.stop();
+        return watch.snapshot;
+      },
+      async results() {
+        await conversation.waitForIdle(context);
+        return (await conversation.context(context)).messages.flatMap((message) =>
+          message.role === "toolResult"
+            ? [message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n")]
+            : [],
+        );
+      },
+    };
+  }
+
+  it("runs past the script deadline with live progress, and only the command ends it", async () => {
+    let clock = Date.now();
+    const f = await chat(() => clock);
+    await f.pal.settings.setCommandTimeout(300);
+    await f.send(
+      command({ command: "echo started; while [ ! -e release ]; do sleep 0.05; done; echo finished", timeout: 300 }),
+    );
+    await expect.poll(async () => (await f.snapshot()).tools[0]?.output ?? "", { timeout: 5000 }).toContain("started");
+    // Five minutes pass on the Harness clock, which times script deadlines; watchers came and went.
+    clock += 5 * 60_000;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect((await f.snapshot()).tools[0]).toMatchObject({ name: "shell_run", status: "running" });
+    // No result is recorded until the command really ends.
+    expect((await f.conversation.context(context)).entries.some((entry) => entry.kind === "pi.tool-result")).toBe(
+      false,
+    );
+    await writeFile(join(f.root, "release"), "");
+    expect(await f.results()).toEqual(["started\nfinished\n"]);
+    const receipts = (await f.conversation.context(context)).entries.flatMap((entry) =>
+      entry.kind === "pal.shell" ? [entry.data] : [],
+    );
+    expect(receipts).toMatchObject([
+      { shell: { status: "started" } },
+      { shell: { status: "finished", exitCode: 0, timedOut: false } },
+    ]);
+  });
+
+  it("holds direct calls to the owner's limit and script calls to 120 seconds before asking or running", async () => {
+    const f = await chat();
+    await f.pal.approvals.setMode(f.chat.id, "ask");
+    await f.send(
+      command({ command: "printf direct >> marker", timeout: 121 }),
+      script('return await tools.shell_run({ command: "printf script >> marker", timeout: 121 });'),
+    );
+    const [direct, nested] = await f.results();
+    expect(direct).toContain("the owner allows one command at most 120 seconds");
+    expect(nested).toContain("a command from a script may take at most 120 seconds");
+    expect((await f.pal.approvals.view(f.chat.id)).approvals).toEqual([]);
+    await f.pal.settings.setCommandTimeout(1800);
+    await f.pal.approvals.setMode(f.chat.id, "full");
+    await f.send(
+      command({ command: "printf direct >> marker", timeout: 1800 }),
+      script('return await tools.shell_run({ command: "printf script >> marker", timeout: 121 });'),
+    );
+    expect((await f.results()).at(-1)).toContain("a command from a script may take at most 120 seconds");
+    expect(await readFile(join(f.root, "marker"), "utf8")).toBe("direct");
+  });
+
+  it("stops a long command and its descendants and leaves no task running", async () => {
+    const f = await chat();
+    await f.pal.settings.setCommandTimeout(300);
+    await f.send(command({ command: "sleep 300 & echo $! > child.pid; wait", timeout: 300 }));
+    await expect
+      .poll(() => readFile(join(f.root, "child.pid"), "utf8").catch(() => ""), { timeout: 5000 })
+      .toMatch(/^\d+/);
+    const pid = Number((await readFile(join(f.root, "child.pid"), "utf8")).trim());
+    await f.conversation.abort(context);
+    await f.pal.harness.waitForIdle(context);
+    await expect.poll(() => running(pid)).toBe(false);
+    expect((await f.pal.harness.inspect(context)).tasks).toEqual([]);
+    expect((await f.snapshot()).tools).toEqual([]);
+    const receipts = (await f.conversation.context(context)).entries.flatMap((entry) =>
+      entry.kind === "pal.shell" ? [entry.data] : [],
+    );
+    expect(receipts).toMatchObject([{ shell: { status: "started" } }]);
   });
 });
 

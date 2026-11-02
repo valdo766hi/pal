@@ -15,13 +15,14 @@ import {
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
+import { COMMAND_TIMEOUT } from "./execution.ts";
 import { HttpError } from "./http.ts";
 
 export type CommandMode = "ask" | "full";
 export type ApprovalState = "pending" | "approved" | "denied" | "expired" | "stopped";
 export type CommandApproval = {
   readonly id: string;
-  /** The assistant entry whose script asked, so the card sits under that turn. */
+  /** The assistant entry that called the command or the script that asked, so the card sits under that turn. */
   readonly assistant: number | null;
   readonly tool: "shell_run" | "browser_act";
   readonly command: string;
@@ -237,7 +238,7 @@ export class CommandApprovals {
       target = {
         command: call.arguments.command,
         cwd: await this.#cwd(api.conversationId),
-        timeout: call.arguments.timeout ?? 120,
+        timeout: call.arguments.timeout ?? COMMAND_TIMEOUT,
       };
     }
     if (target === undefined) return { block: "invalid arguments or missing browser authority; nothing was run" };
@@ -282,8 +283,7 @@ export class CommandApprovals {
     context: Context,
   ): Promise<{ row: Row } | { refused: string }> {
     if (request.cwd === undefined) return { refused: "this chat has no writable working folder" };
-    const parent = call.parent === undefined ? undefined : await this.#task(call.parent.taskId, context);
-    const input = parent?.input;
+    const input = (await this.#task(call.parent?.taskId ?? request.task, context))?.input;
     return this.#request(chatId, call.id, {
       ...request,
       cwd: request.cwd,

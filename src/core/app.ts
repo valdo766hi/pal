@@ -46,6 +46,7 @@ import { COMPILED_CAPABILITIES } from "../capabilities/compiled.ts";
 import { CompiledCapabilities, type CompiledCapability } from "../capabilities/contract.ts";
 import { HttpError } from "./http.ts";
 import {
+  COMMAND_TIMEOUT,
   COMPACT_EXTENSION,
   compactOutput,
   HostCommands,
@@ -137,6 +138,9 @@ export type Settings = {
   /** Deferring onboarding never chooses a model or grants permission to send. */
   modelSetupDeferred(): Promise<boolean>;
   setModelSetupDeferred(deferred: boolean): Promise<void>;
+  /** The longest timeout, in seconds, the model may give one command it calls directly. */
+  commandTimeout(): Promise<number>;
+  setCommandTimeout(seconds: number): Promise<void>;
 };
 
 // Subscription mode never reads the process environment, so an ambient OPENAI_API_KEY cannot be picked up.
@@ -201,6 +205,16 @@ export async function openPal(
   };
   try {
     const { database } = store;
+    const setting = async (key: string, db: SqliteExecutor = database) =>
+      (await db.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = ?", key))?.value;
+    const save = (key: string, value: string, db: SqliteExecutor = database) =>
+      db.run(
+        "INSERT INTO pal_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        key,
+        value,
+      );
+    // Read by the shell hook, which can run while the Harness opens, before `settings` exists.
+    const commandTimeout = async () => Number((await setting("commands:timeout")) ?? COMMAND_TIMEOUT);
     const links = new HelperLinks(store.storage, database);
     const registry = createRegistry();
     const extensions = await BuiltinExtensions.open(
@@ -395,6 +409,7 @@ export async function openPal(
         commands,
         locks,
         verification: working.checks,
+        limit: commandTimeout,
         // Only calls that ran without an approval: Ask mode binds the owner's decision to the shown command.
         compact: async (conversation, task, ctx) => {
           if (approvals === undefined || (await approvals.asked(task))) return false;
@@ -499,14 +514,6 @@ export async function openPal(
       status = status === "failed" || end.reason === "failed" ? "failed" : "closed";
     });
 
-    const setting = async (key: string, db: SqliteExecutor = database) =>
-      (await db.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = ?", key))?.value;
-    const save = (key: string, value: string, db: SqliteExecutor = database) =>
-      db.run(
-        "INSERT INTO pal_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        key,
-        value,
-      );
     const settings: Settings = {
       model: () => setting("model"),
       setModel: (slug) => save("model", slug),
@@ -524,6 +531,8 @@ export async function openPal(
         }),
       modelSetupDeferred: async () => (await setting("setup:model-deferred")) === "true",
       setModelSetupDeferred: (deferred) => save("setup:model-deferred", String(deferred)),
+      commandTimeout,
+      setCommandTimeout: (seconds) => save("commands:timeout", String(seconds)),
     };
     changes = new Changes(database, openedProjects, options.dataRoot, privateFiles, locks, openedWorkspaces);
     const owner = new Owner(database);

@@ -172,6 +172,15 @@ describe("API", () => {
     expect(await reopened.settings.defaultModel()).toBeUndefined();
   });
 
+  it("keeps the owner's command limit between the default and the ceiling", async () => {
+    const { api, pal } = await signedIn();
+    expect(await api("GET", "command-timeout")).toEqual({ status: 200, body: { seconds: 120 } });
+    for (const seconds of [119, 1801, 300.5, "300"])
+      expect((await api("PUT", "command-timeout", { seconds })).status).toBe(400);
+    expect(await api("PUT", "command-timeout", { seconds: 1800 })).toEqual({ status: 200, body: { seconds: 1800 } });
+    expect(await pal.settings.commandTimeout()).toBe(1800);
+  });
+
   it("stores an owner-only working goal without choosing a model, starting work or dropping stale edits", async () => {
     const { api, pal, fixture, base, cookie } = await signedIn();
     const project = await pal.projects.create("working-project", { name: "Working state" });

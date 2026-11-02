@@ -31,7 +31,7 @@ import {
 } from "./chats.ts";
 import { cookie, HttpError, isOwnOrigin, readJson, sendJson } from "./http.ts";
 import { OwnerError, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS } from "./owner.ts";
-import { WorkspaceBusy } from "./execution.ts";
+import { CommandTimeoutBody, WorkspaceBusy } from "./execution.ts";
 import { AllowanceChange } from "./working-allowance.ts";
 import { FileAccessError, searchFolder } from "./files.ts";
 import { SearchError } from "./search.ts";
@@ -381,6 +381,12 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       if (method === "PUT")
         await pal.settings.setModelSetupDeferred(validate(ModelSetup, await readJson(request)).deferred);
       return send(200, { deferred: await pal.settings.modelSetupDeferred() });
+    }
+
+    if (resource === "command-timeout" && path.length === 1 && (method === "GET" || method === "PUT")) {
+      if (method === "PUT")
+        await pal.settings.setCommandTimeout(validate(CommandTimeoutBody, await readJson(request)).seconds);
+      return send(200, { seconds: await pal.settings.commandTimeout() });
     }
 
     if (resource === "releases") {
