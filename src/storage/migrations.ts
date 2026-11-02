@@ -380,6 +380,33 @@ export const MIGRATIONS: readonly Migration[] = [
         throw new Error("unfinished work needs its retained Pal release; finish it there before upgrading");
     },
   },
+  {
+    version: 24,
+    name: "blocked_admissions",
+    // An input whose attachments cannot be read stays admitting with its reason until the owner retries or withdraws
+    // it. SQLite cannot widen a CHECK in place, so the table is rebuilt with every row kept.
+    up: async (transaction) => {
+      await transaction.exec(`CREATE TABLE pal_admissions_next (
+        seq INTEGER PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        intent TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('admitting', 'admitted', 'withdrawn')),
+        submission_id INTEGER,
+        created_at INTEGER NOT NULL,
+        folder_scope TEXT,
+        blocked TEXT CHECK (blocked IS NULL OR state = 'admitting'),
+        UNIQUE (chat_id, request_id),
+        CHECK ((state = 'admitted') = (submission_id IS NOT NULL))
+      ) STRICT`);
+      await transaction.exec(
+        "INSERT INTO pal_admissions_next (seq, chat_id, request_id, digest, intent, state, submission_id, created_at, folder_scope) SELECT seq, chat_id, request_id, digest, intent, state, submission_id, created_at, folder_scope FROM pal_admissions",
+      );
+      await transaction.exec("DROP TABLE pal_admissions");
+      await transaction.exec("ALTER TABLE pal_admissions_next RENAME TO pal_admissions");
+    },
+  },
 ];
 
 /**

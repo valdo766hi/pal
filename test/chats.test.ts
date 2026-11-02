@@ -13,6 +13,7 @@ import {
   chatConfiguration,
   ChatService,
   InputBlocked,
+  InputHeld,
   MAX_INPUT_CHARS,
   ProjectUnavailable,
 } from "../src/core/chats.ts";
@@ -357,13 +358,18 @@ describe("chats", () => {
       if (damage === "missing") await rm(payload);
       else await writeFile(payload, "NOTES\n");
       const body = { text: "read the notes", attachments: [id] };
-      const refused = (chats: ChatService) =>
-        Promise.all([
-          expect(chats.submit(blocked.id, "blocked-input", body, context)).rejects.toBeInstanceOf(InputBlocked),
-          expect(chats.submit(blocked.id, "later-input", { text: "and then" }, context)).rejects.toBeInstanceOf(
-            InputBlocked,
-          ),
-        ]);
+      const refused = async (chats: ChatService) => {
+        await expect(chats.submit(blocked.id, "blocked-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+        await expect(chats.submit(blocked.id, "later-input", { text: "and then" }, context)).rejects.toBeInstanceOf(
+          InputHeld,
+        );
+        expect((await chats.get(blocked.id))?.blocked).toEqual({
+          requestId: "blocked-input",
+          text: "read the notes",
+          reason: expect.stringMatching(/notes\.txt is missing or damaged/),
+        });
+        expect((await chats.get(other.id))?.blocked).toBeNull();
+      };
 
       await refused(first.chats);
       await first.chats.submit(other.id, "other-input-1", { text: "hello" }, context);
@@ -398,5 +404,78 @@ describe("chats", () => {
     const admission = await second.chats.submit(chat.id, "ack-input", body, context);
     expect(await second.harness.submission(admission.submissionId, context)).toBeDefined();
     expect(await second.userMessages(chat.conversationId)).toBe(1);
+  });
+
+  it("retries a blocked input with its recorded body, or withdraws it so the chat's later inputs proceed", async () => {
+    const dataRoot = await tempDir();
+    const first = await open(dataRoot);
+    const chat = await first.chats.createChat("retry-chat-request", { projectId: "project-1" }, context);
+    const { id, payload } = await attach(first.uploads, dataRoot);
+    const body = { text: "read the notes", attachments: [id] };
+    await rm(payload);
+    await expect(first.chats.submit(chat.id, "retry-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+    await expect(first.chats.retry(chat.id, "retry-input", context)).rejects.toBeInstanceOf(InputBlocked);
+    await writeFile(payload, "notes\n");
+    const admission = await first.chats.retry(chat.id, "retry-input", context);
+    expect(await first.chats.retry(chat.id, "retry-input", context)).toEqual(admission);
+    expect((await first.chats.get(chat.id))?.blocked).toBeNull();
+    await expect(first.chats.withdraw(chat.id, "retry-input", context)).rejects.toBeInstanceOf(RequestConflict);
+
+    // Withdrawn: never sent, never admitted again under its ID, and later inputs go ahead.
+    await rm(payload);
+    await expect(first.chats.submit(chat.id, "withdraw-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+    await first.chats.withdraw(chat.id, "withdraw-input", context);
+    await first.chats.withdraw(chat.id, "withdraw-input", context);
+    expect((await first.chats.get(chat.id))?.blocked).toBeNull();
+    await first.chats.submit(chat.id, "after-withdraw", { text: "next" }, context);
+    await first.harness.close(context);
+
+    const second = await open(dataRoot);
+    await expect(second.chats.submit(chat.id, "withdraw-input", body, context)).rejects.toBeInstanceOf(RequestConflict);
+    await expect(second.chats.retry(chat.id, "withdraw-input", context)).rejects.toBeInstanceOf(RequestConflict);
+    expect(await second.userMessages(chat.conversationId)).toBe(2);
+  });
+
+  it.each(["retry", "withdraw"])(
+    "lets only one of a concurrent retry and withdraw win when %s is first",
+    async (lead) => {
+      const dataRoot = await tempDir();
+      const pal = await open(dataRoot);
+      const chat = await pal.chats.createChat("race-chat-request", { projectId: "project-1" }, context);
+      const { id, payload } = await attach(pal.uploads, dataRoot);
+      await rm(payload);
+      const body = { text: "read the notes", attachments: [id] };
+      await expect(pal.chats.submit(chat.id, "race-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+      await writeFile(payload, "notes\n");
+      const retry = () => pal.chats.retry(chat.id, "race-input", context);
+      const withdraw = () => pal.chats.withdraw(chat.id, "race-input", context);
+      const [won, lost] = await Promise.allSettled(lead === "retry" ? [retry(), withdraw()] : [withdraw(), retry()]);
+      expect([won?.status, lost?.status]).toEqual(["fulfilled", "rejected"]);
+      expect((lost as PromiseRejectedResult).reason).toBeInstanceOf(RequestConflict);
+      expect(await pal.store.database.all("SELECT state FROM pal_admissions")).toEqual([
+        { state: lead === "retry" ? "admitted" : "withdrawn" },
+      ]);
+      expect(await pal.userMessages(chat.conversationId)).toBe(lead === "retry" ? 1 : 0);
+    },
+  );
+
+  it("keeps an input Pi already admitted instead of withdrawing it", async () => {
+    const dataRoot = await tempDir();
+    let lose = true;
+    const lost = new Error("acknowledgement lost");
+    const pal = await open(dataRoot, (point) => {
+      if (point !== "input-submitted" || !lose) return;
+      lose = false;
+      throw lost;
+    });
+    const chat = await pal.chats.createChat("kept-chat-request", { projectId: "project-1" }, context);
+    const { id, payload } = await attach(pal.uploads, dataRoot);
+    await expect(pal.chats.submit(chat.id, "kept-input", { text: "read", attachments: [id] }, context)).rejects.toBe(
+      lost,
+    );
+    await rm(payload);
+    await expect(pal.chats.withdraw(chat.id, "kept-input", context)).rejects.toBeInstanceOf(RequestConflict);
+    expect(await pal.store.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
+    expect(await pal.userMessages(chat.conversationId)).toBe(1);
   });
 });

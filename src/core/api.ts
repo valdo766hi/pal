@@ -25,6 +25,7 @@ import {
   ChatNotFound,
   ConfigurationRevision,
   InputBlocked,
+  InputHeld,
   ProjectUnavailable,
   type ChatSummary,
 } from "./chats.ts";
@@ -874,7 +875,17 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
             ),
           );
       }
-      if (action === "inputs" && method === "POST") {
+      if (action === "inputs" && path.length === 5 && path[4] === "withdraw" && method === "POST") {
+        await pal.chats.withdraw(chat.id, path[3] ?? "", context);
+        return send(200, { withdrawn: true });
+      }
+      if (action === "inputs" && path.length === 5 && path[4] === "retry" && method === "POST") {
+        const chosen = (await conversation.agent(context)).model;
+        const problem = chosen === undefined ? undefined : await pal.providers.problem(chosen);
+        if (problem !== undefined) throw new HttpError(409, problem.code, problem.message);
+        return send(200, { admission: await pal.chats.retry(chat.id, path[3] ?? "", context) });
+      }
+      if (action === "inputs" && path.length === 3 && method === "POST") {
         const { requestId, ...body } = validate(Keyed, await readJson(request));
         // A chat on a disabled provider or a removed model stops here; it is never sent anywhere else instead.
         const chosen = (await conversation.agent(context)).model;
@@ -1037,6 +1048,7 @@ function classify(error: unknown): [number, string] {
   if (error instanceof FolderError) return [422, `folder_${error.code}`];
   if (error instanceof AdmissionStopped) return [503, "admission_stopped"];
   if (error instanceof InputBlocked) return [409, "input_blocked"];
+  if (error instanceof InputHeld) return [409, "input_held"];
   if (error instanceof McpConfigError || error instanceof StdioConfigError) return [400, "mcp_config"];
   if (error instanceof ProviderConfigError) return [400, "provider_config"];
   if (error instanceof FileAccessError) return [403, "file_access"];

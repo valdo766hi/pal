@@ -212,6 +212,8 @@
 
   let stopping = $state(false);
   let stopError: string | undefined = $state();
+  let resolving = $state(false);
+  let resolveError: string | undefined = $state();
   async function stop() {
     stopping = true;
     stopError = undefined;
@@ -473,6 +475,13 @@
         if (writing.pending !== undefined) writing.reject(writing.pending);
         if (epoch === loadEpoch) settingsFailure(failure);
         else writing.error = failure.message;
+      } else if (failure instanceof ApiError && failure.code === "input_blocked") {
+        // Pal keeps this input as blocked; the chat's blocked notice offers Retry and Withdraw.
+        void refreshProjects();
+      } else if (failure instanceof ApiError && failure.code === "input_held") {
+        if (writing.pending !== undefined) writing.reject(writing.pending);
+        writing.error = failure.message;
+        void refreshProjects();
       } else {
         if (
           failure instanceof ApiError &&
@@ -533,6 +542,31 @@
       }
       if (writing.active) await deliver(writing.stage(requestId(), snapshot, selected), epoch);
     });
+  }
+
+  /** Retry or withdraw the input Pal holds as blocked, in turn with this chat's other inputs. */
+  async function resolveBlocked(action: "retry" | "withdraw") {
+    const blocked = chat.blocked;
+    if (blocked === null || resolving) return;
+    const id = chat.id;
+    const pending = writing.pending?.requestId === blocked.requestId ? writing.pending : undefined;
+    resolving = true;
+    resolveError = undefined;
+    try {
+      if (action === "retry") {
+        const { admission } = await api.retryInput(id, blocked.requestId);
+        if (pending !== undefined) writing.confirm(pending, admission);
+      } else {
+        await api.withdrawInput(id, blocked.requestId);
+        // The withdrawn text stays in this chat's draft when it is still there.
+        if (pending !== undefined) writing.reject(pending);
+      }
+    } catch (failure) {
+      resolveError = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      resolving = false;
+      void refreshProjects();
+    }
   }
 
   async function retrySaved() {
@@ -1075,7 +1109,24 @@
         </div>
       {/if}
       {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
-      {#if writing.pending !== undefined && !writing.sending}
+      {#if chat.blocked !== null}
+        <div class="callout er" role="alert">
+          <span class="grow"
+            ><strong>A message couldn't be sent.</strong>
+            {chat.blocked.reason} Later messages in this chat wait until you retry or withdraw it.</span
+          >
+          <button class="b sm" disabled={resolving} onclick={() => resolveBlocked("retry")}>Retry</button>
+          <button class="b sm" disabled={resolving} onclick={() => resolveBlocked("withdraw")}>Withdraw</button>
+        </div>
+        <details class="activity">
+          <summary class="acth" title={`Request ${chat.blocked.requestId}`}
+            >Blocked message<Icon name="chevR" size={13} /></summary
+          >
+          <pre class="out">{chat.blocked.text}</pre>
+        </details>
+        {#if resolveError !== undefined}<div class="callout er" role="alert">{resolveError}</div>{/if}
+      {/if}
+      {#if writing.pending !== undefined && !writing.sending && writing.pending.requestId !== chat.blocked?.requestId}
         <div class="callout wa" role="alert">
           <span class="grow"
             >This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.

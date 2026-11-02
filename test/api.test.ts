@@ -1383,6 +1383,18 @@ describe("API", () => {
       attachments: [lost.id],
     });
     expect([refused.status, refused.body.error]).toEqual([409, "input_blocked"]);
+    const held = await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-held", text: "Then this" });
+    expect([held.status, held.body.error]).toEqual([409, "input_held"]);
+    const listed = (await api("GET", "projects")).body.projects.find((item: { id: string }) => item.id === project.id);
+    expect(listed.chats.find((item: { id: string }) => item.id === blocked.id).blocked).toMatchObject({
+      requestId: "input-lost",
+      text: "Read it",
+    });
+    expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/retry`)).body.error).toBe("input_blocked");
+    expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/withdraw`)).body).toEqual({ withdrawn: true });
+    expect(
+      (await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-after", text: "Now this" })).status,
+    ).toBe(200);
     expect(
       (await api("POST", `chats/${chat.id}/inputs`, { requestId: "input-request-2", text: "Still?" })).status,
     ).toBe(200);

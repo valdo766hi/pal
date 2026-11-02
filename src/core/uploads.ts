@@ -162,7 +162,7 @@ export class Uploads {
         () => undefined,
       );
       if (bytes?.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256)
-        throw new UploadError("unavailable", `${item.name} is missing or damaged on this device; it cannot be sent`);
+        throw new UploadError("unavailable", `${item.name} is missing or damaged on this device.`);
       if (IMAGE_TYPES.has(item.mediaType) && item.size <= MAX_IMAGE_BYTES) {
         blocks.push({ type: "text", text: `<attachment ${label}>image follows</attachment>` });
         blocks.push({ type: "image", data: bytes.toString("base64"), mimeType: item.mediaType });

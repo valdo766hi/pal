@@ -224,7 +224,9 @@ describe("store", () => {
 
     const after = await openChats(dataRoot);
     expect(await after.store.database.all("SELECT version FROM pi_durable_schema")).toEqual([{ version: 2 }]);
-    expect(await after.store.database.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({ n: 23 });
+    expect(await after.store.database.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({
+      n: MIGRATIONS.at(-1)?.version,
+    });
     await after.chats.submit(chat.id, "pi-upgrade-after", { text: "after" }, context);
     await after.harness.waitForIdle(context);
     const { messages } = (await (await after.harness.conversation(chat.conversationId, context))?.context(context)) ?? {
@@ -262,8 +264,31 @@ describe("store", () => {
 
     const store = await openStore(dataRoot);
     expect(await store.database.all("SELECT version FROM pi_durable_schema")).toEqual([{ version: 2 }]);
-    expect(await store.database.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({ n: 23 });
+    expect(await store.database.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({
+      n: MIGRATIONS.at(-1)?.version,
+    });
     await store.close();
+  });
+
+  it("keeps every admission through the schema 24 rebuild and binds a blocked reason to admitting inputs", async () => {
+    const database = await openDatabase(join(await tempDir(), "pal.sqlite"));
+    cleanups.push(() => database.close());
+    await migrate(database, MIGRATIONS.slice(0, 23));
+    const insert =
+      "INSERT INTO pal_admissions (seq, chat_id, request_id, digest, intent, state, submission_id, created_at, folder_scope) VALUES (?, 'chat-one', ?, 'digest', '{}', ?, ?, 100, ?)";
+    await database.run(insert, 7, "admitted-request", "admitted", 3, "scope");
+    await database.run(insert, 9, "admitting-request", "admitting", null, null);
+    const before = await database.all("SELECT * FROM pal_admissions ORDER BY seq");
+    await migrate(database);
+    expect(await database.all("SELECT * FROM pal_admissions ORDER BY seq")).toEqual(
+      before.map((row) => ({ ...row, blocked: null })),
+    );
+    await database.run("UPDATE pal_admissions SET blocked = 'missing' WHERE seq = 9");
+    await expect(database.run("UPDATE pal_admissions SET blocked = 'missing' WHERE seq = 7")).rejects.toThrow(
+      /CHECK constraint/,
+    );
+    await database.run("UPDATE pal_admissions SET state = 'withdrawn', blocked = NULL WHERE seq = 9");
+    expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
   });
 
   it("numbers migrations consecutively from 1", () => {

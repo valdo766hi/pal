@@ -9,8 +9,8 @@ import type { McpServerInput, McpServerView as McpServer } from "../../../src/pi
 export type { McpAuth, McpState } from "../../../src/pi/mcp.ts";
 export type { McpServer, McpServerInput };
 
-import type { Admission } from "../../../src/core/chats.ts";
-export type { Admission };
+import type { Admission, BlockedInput } from "../../../src/core/chats.ts";
+export type { Admission, BlockedInput };
 import type { ScheduleInput, ScheduleNotice, ScheduleView } from "../../../src/core/schedules.ts";
 export type { ScheduleInput, ScheduleNotice, ScheduleView };
 export type { HelperView } from "../../../src/core/delegation.ts";
@@ -61,6 +61,7 @@ export type ChatSummary = {
   workspace?: import("../../../src/core/workspaces.ts").Workspace | null;
   commandMode?: import("../../../src/core/approvals.ts").CommandMode;
   extensions: ExtensionScope["selected"];
+  blocked: BlockedInput | null;
 };
 
 const inWorkspace = (path: string, id?: string) => {
@@ -392,6 +393,11 @@ export const api = {
     }
     return data.upload;
   },
+  /** Send a blocked input again with the body Pal recorded for it. */
+  retryInput: (id: string, requestId: string) =>
+    call<{ admission: Admission }>("POST", `chats/${id}/inputs/${encodeURIComponent(requestId)}/retry`),
+  withdrawInput: (id: string, requestId: string) =>
+    call<{ withdrawn: true }>("POST", `chats/${id}/inputs/${encodeURIComponent(requestId)}/withdraw`),
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
   helpers: (chat: string) =>
     call<{ helpers: import("../../../src/core/delegation.ts").HelperView[] }>("GET", `chats/${chat}/helpers`),
