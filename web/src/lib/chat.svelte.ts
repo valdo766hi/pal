@@ -110,7 +110,7 @@ export class ChatStream {
         apply(data);
       });
     }
-    listen<SnapshotEvent>("snapshot", (snapshot) => this.#reset(snapshot));
+    listen<Partial<SnapshotEvent>>("snapshot", (snapshot) => this.#reset(snapshot));
     listen<AgentEvent>("event", (event) => this.#apply(event));
     listen<ApprovalView>("approvals", (view) => this.showApprovals(view));
     source.addEventListener("open", () => {
@@ -133,17 +133,17 @@ export class ChatStream {
   }
 
   /** Snapshots are authoritative: whatever one leaves out is cleared. */
-  #reset(snapshot: SnapshotEvent): void {
+  #reset(snapshot: Partial<SnapshotEvent>): void {
     // Pal's own entry records, read through their view shape.
-    this.entries = snapshot.entries as unknown as Entry[];
+    this.entries = (snapshot.entries ?? []) as unknown as Entry[];
     this.running = snapshot.run !== undefined;
-    this.tools = snapshot.tools;
-    this.nested = snapshot.nestedTools;
+    this.tools = snapshot.tools ?? [];
+    this.nested = snapshot.nestedTools ?? [];
     this.partial = snapshot.generation?.message as Message | undefined;
     this.retry = snapshot.generation?.retry;
     this.deferredPoll = snapshot.generation?.deferred?.pollAt;
-    this.inbox = snapshot.inbox;
-    this.compactions = snapshot.compactions;
+    this.inbox = snapshot.inbox ?? [];
+    this.compactions = snapshot.compactions ?? [];
     this.compactionFailure = snapshot.compactionFailure;
     this.failure = undefined;
     this.usage = snapshot.usage;

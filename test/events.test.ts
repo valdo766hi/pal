@@ -328,7 +328,8 @@ describe("web projection of native events", () => {
     ]);
     event({ type: "compaction_end", taskId: 20, reason: "threshold", error: "summary failed" });
     expect([stream.compactions, stream.compactionFailure?.error]).toEqual([[], "summary failed"]);
-    source.emit("snapshot", snapshot({ entries: [{ id: 3, kind: "pi.user" }] }));
+    // Even a snapshot that omits fields replaces everything.
+    source.emit("snapshot", { entries: [{ id: 3, kind: "pi.user" }] });
     expect({
       running: stream.running,
       partial: stream.partial,
