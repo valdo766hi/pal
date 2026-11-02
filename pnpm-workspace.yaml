@@ -4,3 +4,7 @@ allowBuilds:
   # Reviewed: uses its bundled prebuild when one matches, otherwise `node-gyp rebuild`.
   node-pty: true
   protobufjs: false
+
+overrides:
+  # GHSA-g3hv-75wg-m249 is fixed only in 11.x; ESLint still requests ^10 and uses only the unchanged API.
+  minimatch: 11.0.3
