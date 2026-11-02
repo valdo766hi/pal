@@ -954,6 +954,21 @@
                           {#if state === "Outcome unconfirmed"}<p class="dim small">
                               No result was recorded. Inspect the workspace before repeating an action.
                             </p>{/if}
+                          {#if tool?.taskId !== undefined}
+                            {#each stream?.nested.filter((call) => call.parentTaskId === tool.taskId) ?? [] as call (call.callId)}
+                              <div class="steprow call">
+                                {#if call.status !== "done"}<span class="ring spin" aria-hidden="true"></span><span
+                                    class="sr">Running</span
+                                  >
+                                {:else if call.summary?.isError !== false}<span class="tick er" aria-hidden="true"
+                                    >✕</span
+                                  ><span class="sr">Failed</span>
+                                {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span
+                                  >{/if}
+                                <span>{toolLabel(call.name)}</span>
+                              </div>
+                            {/each}
+                          {/if}
                         {/if}
                         {#if step.code !== undefined}<pre class="out">{step.code}</pre>{/if}
                         {#each step.result?.calls ?? [] as call (call.id)}
@@ -1074,6 +1089,21 @@
       {/if}
       {#if stream?.retry !== undefined}
         <div class="callout wa" role="status">The model request failed; Pal retries shortly. {stream.retry.error}</div>
+      {:else if stream?.running && stream.deferredPoll !== undefined}
+        <div class="callout wa" role="status">
+          The provider is still preparing its answer; Pal checks again shortly.
+        </div>
+      {/if}
+      {#if (stream?.compactions.length ?? 0) > 0}
+        <div class="callout ac" role="status">Summarizing earlier messages to make room…</div>
+      {:else if stream?.compactionFailure !== undefined}
+        <div class="callout er" role="alert">Summarizing earlier messages failed. {stream.compactionFailure.error}</div>
+      {/if}
+      {#if stream?.failure !== undefined}
+        <div class="callout er" role="alert">
+          <span class="grow">Part of this chat's work failed. {stream.failure.message}</span>
+          {@render diagnosticsButton()}
+        </div>
       {/if}
       {#if stream?.running}
         <div class="running" role="status">
