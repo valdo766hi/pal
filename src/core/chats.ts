@@ -20,7 +20,7 @@ import { extensionScope, selectedExtensions, type ExtensionScope } from "./exten
 import { WorkspaceMode, workspaceMode } from "./workspaces.ts";
 import { HttpError } from "./http.ts";
 import type { Changes } from "./changes.ts";
-import { UploadError } from "./uploads.ts";
+import { type AttachmentLabel, UploadError } from "./uploads.ts";
 
 export const MAX_INPUT_CHARS = 100_000;
 
@@ -121,7 +121,10 @@ export type ChatServiceOptions = {
       projectId: string,
       ids: readonly string[],
     ): Promise<readonly { id: string; name: string; size: number; mediaType: string }[]>;
-    content(projectId: string, ids: readonly string[]): Promise<(TextContent | ImageContent)[]>;
+    content(
+      projectId: string,
+      ids: readonly string[],
+    ): Promise<{ content: (TextContent | ImageContent)[]; labels: AttachmentLabel[] }>;
   };
   readonly feedback?: Pick<Changes, "checkFeedback" | "admitFeedback">;
   /** Host authority frozen with the admission, not recomputed during retry or restart. */
@@ -624,15 +627,11 @@ export class ChatService {
     const uploads = this.#options.attachments;
     if (attached.length === 0 || uploads === undefined) return {};
     try {
-      const content = await uploads.content(projectId, attached);
-      const labels = await uploads.check(projectId, attached);
+      const { content, labels } = await uploads.content(projectId, attached);
       return {
         content: [{ type: "text" as const, text: intent.text }, ...content],
-        // The transcript entry carries the labels the UI shows; the model sees the content above.
-        entry: {
-          kind: "pal.user",
-          data: { attachments: labels.map(({ id, name, size, mediaType }) => ({ id, name, size, mediaType })) },
-        },
+        // The transcript entry carries the labels the UI shows, with what of each the model saw above.
+        entry: { kind: "pal.user", data: { attachments: labels } },
       };
     } catch (error) {
       if (error instanceof UploadError) throw new InputBlocked(error.message, { cause: error });

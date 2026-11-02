@@ -688,6 +688,13 @@
     return bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
   }
 
+  /** What of a sent attachment the message gave the model, when not all of it. */
+  function received(attachment: Attachment): string {
+    const got = attachment.received;
+    if (got?.kind === "binary") return " · contents not sent";
+    return got?.kind === "text" && got.bytes < attachment.size ? ` · first ${size(got.bytes)} sent` : "";
+  }
+
   function onKey(event: KeyboardEvent) {
     // Enter that confirms an input method's composition is not a send.
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && app.sendWithEnter && !phone) {
@@ -839,7 +846,9 @@
                 <div class="chips end">
                   {#each item.attachments as attachment (attachment.id)}
                     <span class="chip plain"
-                      ><Icon name="file" />{attachment.name}<span class="dim">{size(attachment.size)}</span></span
+                      ><Icon name="file" />{attachment.name}<span class="dim"
+                        >{size(attachment.size)}{received(attachment)}</span
+                      ></span
                     >
                   {/each}
                 </div>

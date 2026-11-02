@@ -39,8 +39,8 @@ and package installer are not available yet. See [extension architecture](docs/a
   read-only reference folders and uploads from your device. Each chat runs in **Local** (the folder itself),
   **Worktree** (a separate Git worktree from `HEAD`) or **Read-only** mode.
 - **Agent tools through Code Mode.** The model writes small scripts in a QuickJS sandbox that call host tools: files
-  (list, read, find, search, write, edit), shell commands, project memory, internet tools and the browser. Each tool
-  call is a durable task with its own receipt.
+  (list, read, find, search, write, edit, attachments), shell commands, project memory, internet tools and the
+  browser. Each tool call is a durable task with its own receipt.
 - **Command approval.** Per chat, **Ask** (the default) shows each shell command, its folder and timeout, and waits
   for **Approve once** or **Deny**. **Full access** runs commands without asking.
 - **Internet tools (MCP).** Exa search/fetch and Context7 documentation presets, custom Streamable HTTP servers and

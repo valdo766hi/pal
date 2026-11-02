@@ -42,7 +42,14 @@ export type NestedCall = {
   error?: string;
 };
 
-export type Attachment = { id: string; name: string; size: number; mediaType: string };
+export type Attachment = {
+  id: string;
+  name: string;
+  size: number;
+  mediaType: string;
+  /** What of it the model got with its message; absent on drafts and older messages. */
+  received?: import("../../../src/core/uploads.ts").Received;
+};
 
 export type ShellReceipt = {
   callId: string;

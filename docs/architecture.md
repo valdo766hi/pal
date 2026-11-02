@@ -74,7 +74,9 @@ grants and approvals.
 - `src/core/workspaces.ts`, `worktree-files.ts`: each chat gets a fixed workspace in Local, Worktree or Read-only
   mode. A worktree is materialized from committed `HEAD` without running hooks, filters or network access.
 - `src/core/folders.ts`: read-only reference folders, bound to a run when it starts.
-- `src/core/uploads.ts`: device uploads stored under the data directory, up to 25 MiB each.
+- `src/core/uploads.ts`: device uploads stored under the data directory, up to 25 MiB each. A message gives the
+  model an image up to 8 MiB or a text file's first 100 KiB, and its transcript entry records which. `files_attachment`
+  reads more lines of an attachment the same chat sent, streamed through its recorded length and hash.
 
 ## Instruction sources
 

@@ -390,6 +390,8 @@ export async function openPal(
     sandbox = codemode.sandbox;
     for (const extension of codemode.extensions) registry.install(extension);
     registry.install(extensions.extension);
+    // Before any tool can run: a replay-safe attachment read may resume while the Harness opens.
+    const uploads = await Uploads.open(database, options.dataRoot);
     registry.install(
       fileTools({
         root: projectRoot,
@@ -400,6 +402,15 @@ export async function openPal(
         folders: {
           list: (api, ctx) => folders.forRun(api, ctx),
           open: (api, ctx, id) => folders.forTool(api, ctx, id),
+        },
+        // Only attachments this chat sent with an admitted input, which the model has seen.
+        attachment: async (conversation, id, offset, limit) => {
+          const chat = await database.get<{ project: string }>(
+            "SELECT c.project_id AS project FROM pal_chats c JOIN pal_admissions a ON a.chat_id = c.id WHERE c.conversation_id = ? AND c.deleted_at IS NULL AND a.state = 'admitted' AND EXISTS (SELECT 1 FROM json_each(a.intent, '$.attachments') WHERE value = ?)",
+            conversation,
+            id,
+          );
+          return chat === undefined ? undefined : uploads.read(chat.project, id, offset, limit);
         },
       }),
     );
@@ -552,7 +563,6 @@ export async function openPal(
     });
     browsers = openedBrowsers;
     const humanTerminals = terminals;
-    const uploads = await Uploads.open(database, options.dataRoot);
     const openedChats = await ChatService.open(
       {
         database,

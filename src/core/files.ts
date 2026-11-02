@@ -9,6 +9,7 @@ import { writeTextFile } from "./file-write.ts";
 import { FileAccessError, type PrivateFiles } from "./file-policy.ts";
 import type { ProjectSearch, SearchMode } from "./search.ts";
 import type { FolderLease, GrantedFolder } from "./folders.ts";
+import type { AttachmentPage } from "./uploads.ts";
 import type { Context } from "@earendil-works/chord";
 import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
 import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
@@ -48,6 +49,13 @@ export function fileTools(options: {
     list(api: ToolExecutionApi, context: Context): Promise<GrantedFolder[]>;
     open(api: ToolExecutionApi, context: Context, id?: string): Promise<FolderLease>;
   };
+  /** Lines of an attachment the conversation's chat sent, undefined if it sent none by that ID; without it, no tool. */
+  readonly attachment?: (
+    conversationId: ConversationId,
+    id: string,
+    offset: number,
+    limit: number,
+  ) => Promise<AttachmentPage | undefined>;
 }): Extension {
   const locks = options.locks ?? new WorkspaceLocks();
   const folder = Type.Optional(
@@ -298,6 +306,51 @@ export function fileTools(options: {
                   ...(found.indexing ? ["[index still building; results may be incomplete]"] : []),
                 ];
                 return text([lines.join("\n") || "No matches.", ...notes].join("\n"));
+              },
+            }),
+          ]),
+      ...(options.attachment === undefined
+        ? []
+        : [
+            defineTool({
+              name: "files_attachment",
+              description:
+                "Read a file the owner attached to a message in this chat, by its attachment id. Returns a content block: text as numbered lines like files_read, paged with offset and limit; an image as itself, which image(result) shows; a binary file only described.",
+              parameters: Type.Object({
+                id: Type.String({ minLength: 1, maxLength: 64 }),
+                offset: Type.Optional(Type.Integer({ minimum: 1, description: "First line, default 1" })),
+                limit: Type.Optional(
+                  Type.Integer({ minimum: 1, maximum: MAX_LINES, description: `Lines, default ${MAX_LINES}` }),
+                ),
+              }),
+              callers: ["tools"],
+              replay: "safe",
+              // Scripts get a schema-less tool's text only, never its images.
+              structuredOutputSchema: Type.Union([
+                Type.Object({ type: Type.Literal("text"), text: Type.String() }),
+                Type.Object({ type: Type.Literal("image"), data: Type.String(), mimeType: Type.String() }),
+              ]),
+              execute: async (args, api) => {
+                const first = args.offset ?? 1;
+                const page = await options.attachment?.(api.conversationId, args.id, first, args.limit ?? MAX_LINES);
+                if (page === undefined) throw new FileAccessError(`this chat sent no attachment ${args.id}`);
+                if (page.kind === "image") {
+                  const image = { type: "image" as const, data: page.data, mimeType: page.mimeType };
+                  return { output: [image], structuredOutput: image };
+                }
+                const lines =
+                  page.kind === "binary"
+                    ? [
+                        `${page.name} (${page.mediaType}, ${page.size} bytes) is a binary file; its contents can't be read as text.`,
+                      ]
+                    : [
+                        ...page.lines.map((line, index) => `${first + index}\t${line}`),
+                        page.total === undefined
+                          ? `[more follows; continue at offset ${first + page.lines.length}]`
+                          : `[end of attachment: ${page.total} lines]`,
+                      ];
+                const block = { type: "text" as const, text: lines.join("\n") };
+                return { output: [block], structuredOutput: block };
               },
             }),
           ]),

@@ -1174,6 +1174,7 @@ describe("Pal in a browser", () => {
     await picked.setFiles([
       { name: "plan.txt", mimeType: "text/plain", buffer: Buffer.from("The launch is on Tuesday.") },
       { name: "draft.txt", mimeType: "text/plain", buffer: Buffer.from("Not for this message.") },
+      { name: "long.txt", mimeType: "text/plain", buffer: Buffer.from("z".repeat(120 * 1024)) },
     ]);
     await page.getByRole("button", { name: "Remove draft.txt" }).click();
     await page.getByRole("button", { name: "Remove draft.txt" }).waitFor({ state: "detached" });
@@ -1184,6 +1185,8 @@ describe("Pal in a browser", () => {
     await page.getByRole("button", { name: "Send" }).click();
     // The sent message shows its attachment; the upload reached the model with it.
     await page.locator(".user .chip").filter({ hasText: "plan.txt" }).waitFor();
+    // The owner sees what of each file the model got.
+    await page.locator(".user .chip").filter({ hasText: "long.txt" }).getByText("120 KB · first 100 KB sent").waitFor();
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     const sent = fixture.apiRequests.filter((call) => call.path === "/v1/responses");
     expect(JSON.stringify(sent.map((call) => call.body.input))).toContain("The launch is on Tuesday.");
