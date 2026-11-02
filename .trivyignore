@@ -1,0 +1,2 @@
+# deepmerge 4.3.1, LOW: no patched release; only the build-time Svelte Vite plugin merges Pal's own config with it. #62
+CVE-2026-93753 exp:2027-02-01
