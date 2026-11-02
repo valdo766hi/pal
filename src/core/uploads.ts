@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants } from "node:fs";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
@@ -33,7 +34,7 @@ export type Upload = {
 };
 
 export class UploadError extends Error {
-  readonly code: "not_found" | "too_large" | "size_mismatch" | "not_receiving" | "not_ready";
+  readonly code: "not_found" | "too_large" | "size_mismatch" | "not_receiving" | "not_ready" | "unavailable";
 
   constructor(code: UploadError["code"], message: string) {
     super(message);
@@ -113,10 +114,12 @@ export class Uploads {
         received += chunk.length;
         if (received > row.size) throw new UploadError("size_mismatch", `more than the announced ${row.size} bytes`);
         hash.update(chunk);
-        await file.write(chunk);
+        for (let written = 0; written < chunk.length;)
+          written += (await file.write(chunk, written, chunk.length - written)).bytesWritten;
       }
       if (received !== row.size) throw new UploadError("size_mismatch", `received ${received} of ${row.size} bytes`);
       await file.sync();
+      if ((await file.stat()).size !== row.size) throw new Error("the upload was not stored completely");
     } catch (error) {
       await file.close();
       await rm(partial, { force: true });
@@ -124,6 +127,15 @@ export class Uploads {
     }
     await file.close();
     await rename(partial, join(directory, "data"));
+    // Persist the new entries: the file in its directory, and the directory, created above, in its parent.
+    for (const path of [directory, dirname(directory)]) {
+      const entry = await open(path, constants.O_RDONLY | constants.O_DIRECTORY);
+      try {
+        await entry.sync();
+      } finally {
+        await entry.close();
+      }
+    }
     await this.#database.run("UPDATE pal_uploads SET state = 'ready', sha256 = ? WHERE id = ?", hash.digest("hex"), id);
     return (await this.get(id)) as Upload;
   }
@@ -146,7 +158,11 @@ export class Uploads {
     const blocks: (TextContent | ImageContent)[] = [];
     for (const item of await this.check(projectId, ids)) {
       const label = `name="${item.name.replace(/"/g, "'")}" type="${item.mediaType}" size="${item.size}"`;
-      const bytes = await readFile(join(this.#directory({ id: item.id, project_id: item.projectId }), "data"));
+      const bytes = await readFile(join(this.#directory({ id: item.id, project_id: item.projectId }), "data")).catch(
+        () => undefined,
+      );
+      if (bytes?.length !== item.size || createHash("sha256").update(bytes).digest("hex") !== item.sha256)
+        throw new UploadError("unavailable", `${item.name} is missing or damaged on this device; it cannot be sent`);
       if (IMAGE_TYPES.has(item.mediaType) && item.size <= MAX_IMAGE_BYTES) {
         blocks.push({ type: "text", text: `<attachment ${label}>image follows</attachment>` });
         blocks.push({ type: "image", data: bytes.toString("base64"), mimeType: item.mediaType });

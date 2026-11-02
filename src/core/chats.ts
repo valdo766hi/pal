@@ -20,6 +20,7 @@ import { extensionScope, selectedExtensions, type ExtensionScope } from "./exten
 import { WorkspaceMode, workspaceMode } from "./workspaces.ts";
 import { HttpError } from "./http.ts";
 import type { Changes } from "./changes.ts";
+import { UploadError } from "./uploads.ts";
 
 export const MAX_INPUT_CHARS = 100_000;
 
@@ -65,6 +66,8 @@ export class ChatNotFound extends Error {}
 export class ProjectUnavailable extends Error {}
 /** Admission stopped after a storage failure; the process must restart and reconcile before admitting again. */
 export class AdmissionStopped extends Error {}
+/** A recorded input whose attachments cannot be read; it blocks only its own chat, and later inputs wait behind it. */
+export class InputBlocked extends Error {}
 
 /** Crash points between Pal's and Pi's commits, for deterministic recovery tests. */
 export type Barrier = "chat-recorded" | "chat-created" | "input-recorded" | "input-submitted" | "input-admitted";
@@ -152,7 +155,13 @@ export class ChatService {
         "SELECT a.chat_id, a.request_id, a.intent FROM pal_admissions a JOIN pal_chats c ON c.id = a.chat_id WHERE a.state = 'admitting' AND c.deleted_at IS NULL ORDER BY a.seq",
       ),
     );
-    for (const row of inputs) await service.#admit(row.chat_id, row.request_id, service.#input(row.intent), context);
+    for (const row of inputs) {
+      try {
+        await service.#admit(row.chat_id, row.request_id, service.#input(row.intent), context);
+      } catch (error) {
+        if (!(error instanceof InputBlocked)) throw error;
+      }
+    }
     return service;
   }
 
@@ -348,16 +357,6 @@ export class ChatService {
       configuration: value.configuration,
       feedback: value.feedback === undefined ? undefined : { ids: value.feedback.ids, scope: value.feedback.scope },
     }));
-    const attached = (body as InputBody).attachments ?? [];
-    if (attached.length > 0) {
-      const projectId = await this.#guard((db) =>
-        db.get<{ project_id: string }>("SELECT project_id FROM pal_chats WHERE id = ?", chatId),
-      );
-      if (projectId === undefined || this.#options.attachments === undefined) {
-        throw new ChatNotFound(`chat ${chatId} cannot take attachments`);
-      }
-      await this.#options.attachments.check(projectId.project_id, attached);
-    }
     const chat = await this.get(chatId);
     if (chat === undefined) throw new ChatNotFound(`chat ${chatId} does not exist`);
     const previous = await this.#guard((db) =>
@@ -369,7 +368,13 @@ export class ChatService {
     );
     if (previous !== undefined && previous.digest !== digest)
       throw new RequestConflict(`request ${key} was admitted with a different body`);
+    // An acknowledged request answers from its receipt, even if its attachments are gone since.
     if (previous?.submission_id != null) return { chatId, requestId: key, submissionId: previous.submission_id };
+    const attached = (body as InputBody).attachments ?? [];
+    if (previous === undefined && attached.length > 0) {
+      if (this.#options.attachments === undefined) throw new ChatNotFound(`chat ${chatId} cannot take attachments`);
+      await this.#options.attachments.check(chat.projectId, attached);
+    }
     if (previous === undefined) this.#options.checkExtensions?.(chat.extensions);
     const expected = (body as InputBody).configuration;
     if (expected !== undefined) {
@@ -396,6 +401,9 @@ export class ChatService {
           key,
         );
         if (existing !== undefined) return existing;
+        // Inputs of one chat are admitted in order, so a blocked one holds back every later one.
+        const blocked = await tx.get("SELECT 1 FROM pal_admissions WHERE chat_id = ? AND state = 'admitting'", chatId);
+        if (blocked !== undefined) return "blocked";
         await tx.run(
           "INSERT INTO pal_admissions (chat_id, request_id, digest, intent, folder_scope, state, created_at) VALUES (?, ?, ?, ?, ?, 'admitting', ?)",
           chatId,
@@ -409,6 +417,7 @@ export class ChatService {
       }),
     );
     if (row === undefined) throw new ChatNotFound(`chat ${chatId} does not exist`);
+    if (row === "blocked") throw new InputBlocked("an earlier message in this chat could not be sent yet");
     if (row.digest !== digest) throw new RequestConflict(`request ${key} was admitted with a different body`);
     if (row.submission_id !== null) return { chatId, requestId: key, submissionId: row.submission_id };
     await this.#options.barrier?.("input-recorded");
@@ -471,7 +480,7 @@ export class ChatService {
   /** Submit under the same request ID, which Pi deduplicates per conversation, then record the acknowledgement. */
   async #admit(chatId: string, requestId: string, intent: InputBody, context: Context): Promise<Admission> {
     if ((await this.get(chatId)) === undefined) throw new ChatNotFound("this chat was deleted before admission");
-    const submissionId = await this.#guard(async (db) => {
+    const { conversation, projectId } = await this.#guard(async (db) => {
       const row = await db.get<{ conversation_id: ConversationId; project_id: string }>(
         "SELECT conversation_id, project_id FROM pal_chats WHERE id = ?",
         chatId,
@@ -479,35 +488,25 @@ export class ChatService {
       const conversation =
         row === undefined ? undefined : await this.#options.harness.conversation(row.conversation_id, context);
       if (row === undefined || conversation === undefined) throw new Error(`chat ${chatId} has no conversation`);
-      const attached = intent.attachments ?? [];
-      const uploads = this.#options.attachments;
-      const withFiles =
-        attached.length === 0 || uploads === undefined
-          ? {}
-          : {
-              content: [
-                { type: "text" as const, text: intent.text },
-                ...(await uploads.content(row.project_id, attached)),
-              ],
-              // The transcript entry carries the labels the UI shows; the model sees the content above.
-              entry: {
-                kind: "pal.user",
-                data: {
-                  attachments: (await uploads.check(row.project_id, attached)).map(({ id, name, size, mediaType }) => ({
-                    id,
-                    name,
-                    size,
-                    mediaType,
-                  })),
-                },
-              },
-            };
-      const submission = await conversation.submit(
-        { type: "input", requestId, content: intent.text, whenBusy: intent.whenBusy ?? "followUp", ...withFiles },
-        context,
-      );
-      return submission.id;
+      return { conversation, projectId: row.project_id };
     });
+    // Pi may have admitted it before a crash lost the acknowledgement: adopt that, never resubmit.
+    const admitted = await this.#guard(() =>
+      this.#options.harness.commit((tx) => tx.submissionByRequest(conversation.id, requestId), context),
+    );
+    let submissionId = admitted?.id;
+    if (submissionId === undefined) {
+      const withFiles = await this.#attachments(projectId, intent);
+      submissionId = await this.#guard(
+        async () =>
+          (
+            await conversation.submit(
+              { type: "input", requestId, content: intent.text, whenBusy: intent.whenBusy ?? "followUp", ...withFiles },
+              context,
+            )
+          ).id,
+      );
+    }
     await this.#options.barrier?.("input-submitted");
     if ((await this.get(chatId)) === undefined) {
       await this.abortDeleted(context);
@@ -534,6 +533,29 @@ export class ChatService {
     );
     await this.#options.barrier?.("input-admitted");
     return { chatId, requestId, submissionId };
+  }
+
+  /** The model content of an input's attachments. An unreadable payload blocks this input, not admission. */
+  async #attachments(projectId: string, intent: InputBody) {
+    const attached = intent.attachments ?? [];
+    const uploads = this.#options.attachments;
+    if (attached.length === 0 || uploads === undefined) return {};
+    try {
+      const content = await uploads.content(projectId, attached);
+      const labels = await uploads.check(projectId, attached);
+      return {
+        content: [{ type: "text" as const, text: intent.text }, ...content],
+        // The transcript entry carries the labels the UI shows; the model sees the content above.
+        entry: {
+          kind: "pal.user",
+          data: { attachments: labels.map(({ id, name, size, mediaType }) => ({ id, name, size, mediaType })) },
+        },
+      };
+    } catch (error) {
+      if (error instanceof UploadError) throw new InputBlocked(error.message, { cause: error });
+      this.#stop();
+      throw new AdmissionStopped("admission stopped after a storage failure", { cause: error });
+    }
   }
 
   /**

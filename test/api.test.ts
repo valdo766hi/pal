@@ -1370,6 +1370,23 @@ describe("API", () => {
     expect(JSON.stringify(request?.body.input)).toContain("The launch is on Tuesday.");
     expect(JSON.stringify(request?.body.input)).toContain('name=\\"plan.txt\\"');
 
+    // A payload lost after its upload blocks only the chat that sends it.
+    const lost = (
+      await api("POST", `projects/${project.id}/uploads`, { name: "lost.txt", size: text.length, type: "text/plain" })
+    ).body.upload;
+    await putBytes(base, cookie(), lost.id, text);
+    await rm(join(pal.store.path, "..", "uploads", project.id, lost.id, "data"));
+    const blocked = (await api("POST", "chats", { requestId: "chat-request-3", projectId: project.id })).body.chat;
+    const refused = await api("POST", `chats/${blocked.id}/inputs`, {
+      requestId: "input-lost",
+      text: "Read it",
+      attachments: [lost.id],
+    });
+    expect([refused.status, refused.body.error]).toEqual([409, "input_blocked"]);
+    expect(
+      (await api("POST", `chats/${chat.id}/inputs`, { requestId: "input-request-2", text: "Still?" })).status,
+    ).toBe(200);
+
     // An upload left unfinished is dropped when Pal next opens.
     const pending = (
       await api("POST", `projects/${project.id}/uploads`, { name: "b.txt", size: 5, type: "text/plain" })

@@ -43,7 +43,8 @@ A chat is a Pal record mapped to a Pi conversation (`src/core/chats.ts`).
 1. `POST /api/chats/:id/inputs` carries a client request ID. Admission is bound to that ID and a digest of the
    body, so a retried request is admitted once, and a different body under the same ID is refused.
 2. Pi admits the input. The response is sent only after admission is durable, then a generation task streams the
-   model's answer.
+   model's answer. A recorded input whose attachment is missing or damaged is not sent without it: it holds back
+   only its own chat's later inputs. A storage failure, whose outcome is unknown, stops all admission until restart.
 3. The model has one tool, `codemode`. Its script runs in a QuickJS worker with wall-clock, memory, output and
    call-count caps, and calls host tools as **nested durable tasks**.
 4. Before a tool runs, `beforeTool` hooks decide whether it may: the grant policy (`src/pi/codemode.ts`), then

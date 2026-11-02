@@ -1,6 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
@@ -11,10 +12,12 @@ import {
   ChatNotFound,
   chatConfiguration,
   ChatService,
+  InputBlocked,
   MAX_INPUT_CHARS,
   ProjectUnavailable,
 } from "../src/core/chats.ts";
 import { InvalidRequest, RequestConflict } from "../src/core/requests.ts";
+import { Uploads } from "../src/core/uploads.ts";
 import { openStore } from "../src/storage/store.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -37,12 +40,14 @@ async function open(dataRoot: string, barrier?: (point: Barrier) => void | Promi
   const store = await openStore(dataRoot);
   const harness = await Harness.open(store.storage, { models, registry: createRegistry() }, context);
   cleanups.push(() => harness.close(context).catch(() => {}));
+  const uploads = await Uploads.open(store.database, dataRoot);
   const chats = await ChatService.open(
     {
       database: store.database,
       harness,
       agentFor: async (projectId: string) =>
         projectId === "project-1" ? { model: { provider: model.provider, modelId: model.id } } : undefined,
+      attachments: uploads,
       ...(barrier === undefined ? {} : { barrier }),
     },
     context,
@@ -54,7 +59,7 @@ async function open(dataRoot: string, barrier?: (point: Barrier) => void | Promi
     };
     return messages.filter((message) => message.role === "user").length;
   };
-  return { store, harness, chats, userMessages, faux };
+  return { store, harness, chats, userMessages, faux, uploads };
 }
 
 /** Make the next write that needs a new database page fail with SQLITE_FULL. */
@@ -330,6 +335,67 @@ describe("chats", () => {
     expect(await second.userMessages(chat.conversationId)).toBe(1);
     expect(await second.store.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
     const admission = await second.chats.submit(chat.id, "input-request-1", body, context);
+    expect(await second.harness.submission(admission.submissionId, context)).toBeDefined();
+    expect(await second.userMessages(chat.conversationId)).toBe(1);
+  });
+
+  async function attach(uploads: Uploads, dataRoot: string) {
+    const bytes = Buffer.from("notes\n");
+    const upload = await uploads.admit("project-1", { name: "notes.txt", size: bytes.length, type: "text/plain" });
+    await uploads.receive(upload.id, Readable.from([bytes]));
+    return { id: upload.id, payload: join(dataRoot, "uploads", "project-1", upload.id, "data") };
+  }
+
+  it.each(["missing", "damaged"])(
+    "blocks only its own chat, before and after restart, when an attachment is %s",
+    async (damage) => {
+      const dataRoot = await tempDir();
+      const first = await open(dataRoot);
+      const blocked = await first.chats.createChat("blocked-chat-request", { projectId: "project-1" }, context);
+      const other = await first.chats.createChat("other-chat-request", { projectId: "project-1" }, context);
+      const { id, payload } = await attach(first.uploads, dataRoot);
+      if (damage === "missing") await rm(payload);
+      else await writeFile(payload, "NOTES\n");
+      const body = { text: "read the notes", attachments: [id] };
+      const refused = (chats: ChatService) =>
+        Promise.all([
+          expect(chats.submit(blocked.id, "blocked-input", body, context)).rejects.toBeInstanceOf(InputBlocked),
+          expect(chats.submit(blocked.id, "later-input", { text: "and then" }, context)).rejects.toBeInstanceOf(
+            InputBlocked,
+          ),
+        ]);
+
+      await refused(first.chats);
+      await first.chats.submit(other.id, "other-input-1", { text: "hello" }, context);
+      expect(first.chats.stopped).toBe(false);
+      await first.harness.close(context);
+
+      const second = await open(dataRoot);
+      await refused(second.chats);
+      await second.chats.submit(other.id, "other-input-2", { text: "again" }, context);
+      expect(second.chats.stopped).toBe(false);
+      // Nothing reached Pi in place of the unreadable input.
+      expect(await second.userMessages(blocked.conversationId)).toBe(0);
+      expect(await second.userMessages(other.conversationId)).toBe(2);
+    },
+  );
+
+  it("adopts an input Pi admitted before its acknowledgement was lost, after its payload is gone", async () => {
+    const dataRoot = await tempDir();
+    const lost = new Error("acknowledgement lost");
+    const first = await open(dataRoot, (point) => {
+      if (point === "input-submitted") throw lost;
+    });
+    const chat = await first.chats.createChat("ack-chat-request", { projectId: "project-1" }, context);
+    const { id, payload } = await attach(first.uploads, dataRoot);
+    const body = { text: "read the notes", attachments: [id] };
+    await expect(first.chats.submit(chat.id, "ack-input", body, context)).rejects.toBe(lost);
+    await first.harness.close(context);
+    await rm(payload);
+
+    const second = await open(dataRoot);
+    expect(await second.store.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
+    const admission = await second.chats.submit(chat.id, "ack-input", body, context);
     expect(await second.harness.submission(admission.submissionId, context)).toBeDefined();
     expect(await second.userMessages(chat.conversationId)).toBe(1);
   });

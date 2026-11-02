@@ -24,6 +24,7 @@ import {
   chatConfiguration,
   ChatNotFound,
   ConfigurationRevision,
+  InputBlocked,
   ProjectUnavailable,
   type ChatSummary,
 } from "./chats.ts";
@@ -1035,13 +1036,21 @@ function classify(error: unknown): [number, string] {
   if (error instanceof ProjectUnavailable) return [409, "project_unavailable"];
   if (error instanceof FolderError) return [422, `folder_${error.code}`];
   if (error instanceof AdmissionStopped) return [503, "admission_stopped"];
+  if (error instanceof InputBlocked) return [409, "input_blocked"];
   if (error instanceof McpConfigError || error instanceof StdioConfigError) return [400, "mcp_config"];
   if (error instanceof ProviderConfigError) return [400, "provider_config"];
   if (error instanceof FileAccessError) return [403, "file_access"];
   if (error instanceof SearchError) return [422, "search_unavailable"];
   if (error instanceof WorkspaceBusy) return [409, "workspace_busy"];
   if (error instanceof UploadError) {
-    const status = { not_found: 404, too_large: 413, size_mismatch: 400, not_receiving: 409, not_ready: 409 };
+    const status = {
+      not_found: 404,
+      too_large: 413,
+      size_mismatch: 400,
+      not_receiving: 409,
+      not_ready: 409,
+      unavailable: 409,
+    };
     return [status[error.code], `upload_${error.code}`];
   }
   if (error instanceof ChatGPTAuthError) return [400, `chatgpt_${error.code}`];
