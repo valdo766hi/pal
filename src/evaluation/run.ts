@@ -5,7 +5,7 @@ import type { JsonObject } from "@earendil-works/pi-durable";
 import { chmod, cp, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { arch, platform, release, tmpdir } from "node:os";
 import { join } from "node:path";
-import { authority, grade, initialSnapshot, repositoryDigest } from "./grade.ts";
+import { attachmentFiles, authority, grade, initialSnapshot, repositoryDigest } from "./grade.ts";
 import type { Budget, Harness, ModelChoice, RunOutcome } from "./harnesses.ts";
 import { summarize } from "./report.ts";
 import type { Task } from "./tasks.ts";
@@ -85,6 +85,8 @@ async function runOnce(
       continuations: task.continuations ?? [],
       runId,
       budget: options.budget,
+      requires: task.requires ?? {},
+      attachments: await attachmentFiles(task),
     });
   } catch (failure) {
     outcome = {

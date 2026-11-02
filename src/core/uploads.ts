@@ -10,7 +10,7 @@ import { type Static, Type } from "typebox";
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 /** What of one attachment reaches the model: text inline up to this, images up to the next. */
-const MAX_TEXT_BYTES = 100 * 1024;
+export const MAX_TEXT_BYTES = 100 * 1024;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 /** Characters of text one read returns, like a project file read; a longer line is cut. */

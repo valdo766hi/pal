@@ -446,6 +446,16 @@ idle restart; independent final cases require the corrected rule without losing 
 Continuations are delivered after an idle checkpoint in the same conversation/history, not concatenated into the
 initial prompt. Scripted owner corrections count as interventions and remain visible in the trace.
 
+Three development tasks cover long commands, research helpers and attachments. `helper-research` asks two
+independent questions about a repository whose READMEs are stale; Pal's chat for that run gets research helpers.
+`checkout-slow-verifier` is the checkout fix plus a verifier that takes about 150 seconds. Pal's command limit is
+raised to 300 seconds for that run, and the baseline's `run` tool gets the same limit instead of 30 seconds.
+`attachment-lost-isolation` attaches two exports larger than 100 KiB, and the stored copy of one is removed once the
+input is admitted. The answer must total the other export in full and name the lost one as unavailable, with null
+instead of an estimate. The baseline gets the same first 100 KiB of each inline, with no way to read the rest;
+external commands refuse the task. A task's requirements only add to the evaluation directory's own settings, for
+that run, and are restored after it. Version 5 of the Pal and baseline adapters applies them.
+
 ```sh
 nix build --out-link evaluate .#evaluate
 ./evaluate/bin/pal-evaluate --data-dir /absolute/evaluation-data --provider openrouter --model <id> \
@@ -465,8 +475,8 @@ configure the CLI with an explicitly approved evaluation profile,
 never credentials in the command or prompt. Reports/traces are private and may contain repository content.
 
 `--seconds` sets one execution deadline, including Pal project/chat preparation; trace export and independent
-grading are outside it. Baseline shell calls use at most 30 seconds of the remaining time. Both use GNU timeout
-for an independent process-group deadline. Pal's turn/deadline reservation is a Pi document that survives
+grading are outside it. Baseline shell calls use at most 30 seconds, or the task's command limit, of the remaining
+time. Both use GNU timeout for an independent process-group deadline. Pal's turn/deadline reservation is a Pi document that survives
 reopen; exhausting it cancels the native generation task before another model request. Continuations share that
 original deadline and turn allowance, including owned research helpers. Native summary tasks also consume the
 allowance; their requests bypass Pi's generation request hook. Background summaries must settle within the same
