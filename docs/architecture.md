@@ -46,9 +46,10 @@ A chat is a Pal record mapped to a Pi conversation (`src/core/chats.ts`).
    model's answer. A recorded input whose attachment is missing or damaged is not sent without it: it holds back
    only its own chat's later inputs, across restarts, until the owner retries it with its recorded body or
    withdraws it. A storage failure, whose outcome is unknown, stops all admission until restart.
-3. The model has one tool, `codemode`. Its script runs in a QuickJS worker with wall-clock, memory, output and
-   call-count caps, and calls host tools as **nested durable tasks**.
-4. Before a tool runs, `beforeTool` hooks decide whether it may: the grant policy (`src/pi/codemode.ts`), then
+3. The model calls `codemode`, plus the few tools on the kernel's direct list (`MODEL_TOOLS`), such as research
+   helpers when selected. A script runs in a QuickJS worker with wall-clock, memory, output and call-count caps, and
+   calls host tools as **nested durable tasks**. A direct call holds no script worker or script deadline.
+4. Before a tool runs, direct or nested, `beforeTool` hooks decide whether it may: the grant policy (`src/pi/codemode.ts`), then
    command approval for shell commands (`src/core/approvals.ts`). Pi then records the tool's intent and executes it.
 5. Events reach the page over server-sent events (`GET /api/chats/:id/events`): a snapshot, then one batch per
    commit. Reconnecting gets a fresh snapshot, so another device can pick up a running chat.

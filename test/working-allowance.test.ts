@@ -233,7 +233,10 @@ it("charges a helper's native model step to the parent allowance instead of bypa
   const f = await fixture(true);
   await f.pal.working.configureAllowance(f.chat, policy, context);
   await f.run([
-    call('return await tools.agents_delegate({purpose:"Check shared allowance",task:"Answer one harmless question"});'),
+    fauxAssistantMessage(
+      fauxToolCall("agents_delegate", { purpose: "Check shared allowance", task: "Answer one harmless question" }),
+      { stopReason: "toolUse" },
+    ),
     fauxAssistantMessage("neither child nor parent may buy another step"),
   ]);
   expect(f.faux.state.callCount).toBe(1);

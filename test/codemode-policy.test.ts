@@ -3,6 +3,7 @@ import {
   createModels,
   fauxAssistantMessage,
   fauxProvider,
+  type FauxResponseStep,
   fauxText,
   fauxToolCall,
   type ToolResultMessage,
@@ -24,9 +25,10 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-/** A conversation whose model makes the given rounds of `codemode` calls, then answers. */
+/** A conversation whose model makes the given rounds of `codemode` calls, or the given responses, then answers. */
 async function setup(options: {
-  scripts: string[][];
+  scripts?: string[][];
+  responses?: FauxResponseStep[];
   tools?: ToolRegistration[];
   caps?: Partial<CodemodeCaps>;
   allows?: ToolPolicy;
@@ -45,7 +47,8 @@ async function setup(options: {
   const models = createModels();
   models.setProvider(faux.provider);
   faux.setResponses([
-    ...options.scripts.map((round) =>
+    ...(options.responses ?? []),
+    ...(options.scripts ?? []).map((round) =>
       fauxAssistantMessage(
         round.map((code) => fauxToolCall("codemode", { code })),
         { stopReason: "toolUse" },
@@ -57,7 +60,7 @@ async function setup(options: {
   cleanups.push(() => harness.close(context));
   const model = faux.getModel();
   const root = await harness.root(context, { agent: { model: { provider: model.provider, modelId: model.id } } });
-  return { root };
+  return { root, faux };
 }
 
 async function run(root: Awaited<ReturnType<typeof setup>>["root"]): Promise<ToolResultMessage[]> {
@@ -299,5 +302,36 @@ return { first, second };`,
     await root.abort(context);
     expect(aborted).toBe(true);
     expect((await submission.wait(context)).status).not.toBe("done");
+  });
+
+  it("checks the live grant for direct calls and keeps tools off the kernel's list out of the model's reach", async () => {
+    let granted = true;
+    const ran: string[] = [];
+    const tool = (name: string) =>
+      defineTool({
+        name,
+        description: name,
+        parameters: Type.Object({}),
+        callers: ["model"],
+        execute: async () => {
+          ran.push(name);
+          return { output: [{ type: "text", text: `${name} ran` }] };
+        },
+      });
+    const direct = (name: string) => fauxAssistantMessage(fauxToolCall(name, {}), { stopReason: "toolUse" });
+    const { root, faux } = await setup({
+      tools: [tool("agents_delegate"), tool("fx_direct")],
+      allows: () => granted,
+      responses: [direct("agents_delegate"), direct("fx_direct")],
+    });
+    const first = await run(root);
+    expect(text(first[0])).toBe("agents_delegate ran");
+    expect(text(first[1])).toContain("fx_direct can only be called from a script");
+
+    granted = false;
+    faux.setResponses([direct("agents_delegate"), fauxAssistantMessage(fauxText("Done."))]);
+    const second = await run(root);
+    expect(text(second.at(-1))).toContain("agents_delegate is not granted to this conversation");
+    expect(ran).toEqual(["agents_delegate"]);
   });
 });

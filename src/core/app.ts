@@ -18,7 +18,7 @@ import {
   chatGPTProvider,
   OPENAI_CHATGPT,
 } from "../pi/chatgpt.ts";
-import { createPalCodemode } from "../pi/codemode.ts";
+import { createPalCodemode, MODEL_TOOLS } from "../pi/codemode.ts";
 import { evaluationBudget } from "../pi/evaluation-budget.ts";
 import { McpManager } from "../pi/mcp.ts";
 import { ModelProviders } from "../pi/providers.ts";
@@ -29,7 +29,7 @@ import { CommandApprovals } from "./approvals.ts";
 import { BROWSER_NAMESPACE, browserTools } from "../pi/browser-tools.ts";
 import { type BrowserRuntime, browserRuntime, ProjectBrowsers } from "./browser.ts";
 import { chatConfiguration, ChatService } from "./chats.ts";
-import { AGENTS_NAMESPACE, helperBudget, HelperLinks, type HelperLimits, helperTools } from "./delegation.ts";
+import { helperBudget, HelperLinks, type HelperLimits, helperTools } from "./delegation.ts";
 import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { WORKING_NAMESPACE, WorkingState } from "./working-state.ts";
@@ -80,6 +80,8 @@ export type PalOptions = {
   readonly guidanceHome?: string;
   /** Research helper bounds, read at each check; tests lower them. */
   readonly helperLimits?: HelperLimits;
+  /** The Harness clock, which also times script and helper deadlines; tests pass a fake one. */
+  readonly now?: () => number;
 };
 
 /** One running installation: the store's single owner and every service built on it. */
@@ -146,6 +148,7 @@ export async function openPal(
   definitions: readonly CompiledCapability[] = COMPILED_CAPABILITIES,
 ): Promise<Pal> {
   const store = await openStore(options.dataRoot);
+  const now = options.now ?? Date.now;
   options = { ...options, dataRoot: dirname(store.path) };
   const commands = new HostCommands();
   let search: ProjectSearch | undefined;
@@ -368,7 +371,6 @@ export async function openPal(
         INSTRUCTIONS_NAMESPACE,
         SKILLS_NAMESPACE,
         WORKING_NAMESPACE,
-        AGENTS_NAMESPACE,
       ],
     });
     sandbox = codemode.sandbox;
@@ -407,6 +409,7 @@ export async function openPal(
       helperTools({
         project: async (conversation) => (await projectFor(conversation))?.id,
         ...(options.helperLimits === undefined ? {} : { limits: options.helperLimits }),
+        now,
       }),
     );
     const commandApprovals = new CommandApprovals({
@@ -436,7 +439,6 @@ export async function openPal(
           INSTRUCTIONS_NAMESPACE,
           SKILLS_NAMESPACE,
           WORKING_NAMESPACE,
-          AGENTS_NAMESPACE,
           ...namespaces,
         ]),
     });
@@ -455,7 +457,7 @@ export async function openPal(
       return harness;
     };
     const budget = evaluationBudget(currentHarness);
-    const helperBudgets = helperBudget(currentHarness, options.helperLimits);
+    const helperBudgets = helperBudget(currentHarness, options.helperLimits, now);
     // Existing conversations already select this mandatory extension; a new name would leave their core hooks out.
     registry.install({
       ...chatContext.extension,
@@ -479,9 +481,16 @@ export async function openPal(
         ...(helperBudgets.hooks ?? []),
       ],
     });
+    for (const { tool } of registry.snapshot().tools())
+      if ((tool.callers ?? ["model"]).includes("model") && !MODEL_TOOLS.has(tool.name))
+        throw new Error(`${tool.name} is not on the kernel's list of tools the model may call directly`);
     // Pi's default, chosen explicitly: a task that crashes Pal on five opens in a row is parked instead of crash-looping
     // every start; Stop still runs its abort handler.
-    const running = await Harness.open(store.storage, { models, registry, settings: { restartLimit: 5 } }, context);
+    const running = await Harness.open(
+      store.storage,
+      { models, registry, now, settings: { restartLimit: 5 } },
+      context,
+    );
     harness = running;
     running.subscribeClose(() => {
       if (status !== "failed") status = "closing";

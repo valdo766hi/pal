@@ -180,7 +180,8 @@ Settings → **MCP servers**:
 
 ## Research helpers
 
-Off unless selected in Settings → Extensions for new chats. A helper answers one self-contained research question
+Off unless selected in Settings → Extensions for new chats. The model calls helpers directly, not from a script, so a
+waiting helper holds no script worker and has its own deadline. A helper answers one self-contained research question
 using the parent chat's model/reasoning and admitted folder scope, with current project internet-tool grants.
 It cannot write files, run commands, use the browser or start helpers. The file tools are read-only; granted internet
 tools can still have external effects. Each helper uses additional provider requests and quota, not a free model.

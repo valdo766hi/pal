@@ -43,7 +43,9 @@ it("counts helper model turns against the parent's evaluation allowance before a
   const code = (body: string) =>
     fauxAssistantMessage(fauxToolCall("codemode", { code: body }), { stopReason: "toolUse" });
   faux.setResponses([
-    code('return await tools.agents_delegate({purpose:"One fact",task:"Answer FIXTURE-FACT."});'),
+    fauxAssistantMessage(fauxToolCall("agents_delegate", { purpose: "One fact", task: "Answer FIXTURE-FACT." }), {
+      stopReason: "toolUse",
+    }),
     fauxAssistantMessage("FIXTURE-FACT"),
     code('await tools.files_write({path:"over-budget.txt",content:"must-not-write",expectedHash:null});'),
     fauxAssistantMessage("done"),
@@ -73,7 +75,9 @@ it("reports owned helper turns, usage, tool failures and evidence without counti
   const code = (body: string) =>
     fauxAssistantMessage(fauxToolCall("codemode", { code: body }), { stopReason: "toolUse" });
   faux.setResponses([
-    code('return await tools.agents_delegate({purpose:"One fact",task:"Research the fact."});'),
+    fauxAssistantMessage(fauxToolCall("agents_delegate", { purpose: "One fact", task: "Research the fact." }), {
+      stopReason: "toolUse",
+    }),
     code('throw new Error("controlled helper tool failure");'),
     fauxAssistantMessage("Recovered child evidence."),
     fauxAssistantMessage("Completed parent."),

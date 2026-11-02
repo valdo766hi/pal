@@ -41,7 +41,10 @@ export const DEFAULT_CODEMODE_CAPS: CodemodeCaps = {
   maxWorkers: 2,
 };
 
-/** The host's current decision whether a conversation's scripts may call a tool; asked before every nested call. */
+/** The kernel's list of tools the model may call directly; every other tool is reachable only from scripts. */
+export const MODEL_TOOLS: ReadonlySet<string> = new Set([CODEMODE_TOOL_NAME, "agents_delegate"]);
+
+/** The host's current decision whether a conversation may call a tool; asked before every call but a script's own. */
 export type ToolPolicy = (conversationId: ConversationId, toolName: string) => boolean | Promise<boolean>;
 
 export type PalCodemodeOptions = {
@@ -117,9 +120,11 @@ export function createPalCodemode(options: PalCodemodeOptions): {
     hooks: [
       hook(ToolTask, {
         beforeTool: async (call, api) => {
-          if (call.parent === undefined) {
-            return call.name === CODEMODE_TOOL_NAME ? capScript(call.arguments.code, caps) : undefined;
-          }
+          if (call.parent === undefined && !MODEL_TOOLS.has(call.name))
+            return { block: `${call.name} can only be called from a script` };
+          if (call.parent === undefined && call.name === CODEMODE_TOOL_NAME)
+            return capScript(call.arguments.code, caps);
+          // A direct call gets the same live grant check as a call from a script.
           if (!(await options.allows(api.conversationId, call.name))) {
             return { block: `${call.name} is not granted to this conversation` };
           }
