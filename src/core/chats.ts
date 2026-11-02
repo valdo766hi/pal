@@ -85,6 +85,7 @@ export type Admission = { readonly chatId: string; readonly requestId: string; r
 const ChatDoc = defineDocFamily({
   kind: "pal.chat",
   version: 1,
+  checkpointWhen: () => false,
   scope: "session",
   family: true,
   initial: (conversationId: ConversationId) => ({ conversationId }),

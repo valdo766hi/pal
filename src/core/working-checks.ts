@@ -41,6 +41,7 @@ const initial = (): Data => ({ goalRevision: 0, attempts: 0, records: [] });
 const Checks = defineDoc({
   kind: "pal.working-checks",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "initial",
@@ -49,6 +50,7 @@ const Checks = defineDoc({
 const Review = defineDoc({
   kind: "pal.working-review",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "initial",

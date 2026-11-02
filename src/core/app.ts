@@ -479,7 +479,9 @@ export async function openPal(
         ...(helperBudgets.hooks ?? []),
       ],
     });
-    const running = await Harness.open(store.storage, { models, registry }, context);
+    // Pi's default, chosen explicitly: a task that crashes Pal on five opens in a row is parked instead of crash-looping
+    // every start; Stop still runs its abort handler.
+    const running = await Harness.open(store.storage, { models, registry, settings: { restartLimit: 5 } }, context);
     harness = running;
     running.subscribeClose(() => {
       if (status !== "failed") status = "closing";

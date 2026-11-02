@@ -79,7 +79,9 @@ it("prevents older stores' runtime from silently ignoring the new execution poli
       MIGRATIONS.filter((migration) => migration.version <= 21),
     ),
   ).rejects.toThrow(/migration 22/);
-  expect(await f.pal.store.database.get("SELECT max(version) AS version FROM pal_migrations")).toEqual({ version: 22 });
+  expect(await f.pal.store.database.get("SELECT max(version) AS version FROM pal_migrations")).toEqual({
+    version: MIGRATIONS.at(-1)?.version,
+  });
   expect(f.faux.state.callCount).toBe(0);
 });
 
@@ -88,6 +90,7 @@ it("fails closed on an unreadable newer allowance instead of letting advisory re
   const future = defineDoc({
     kind: "pal.working-allowance",
     version: 2,
+    checkpointWhen: () => false,
     scope: "conversation",
     history: "latest",
     fork: "initial",

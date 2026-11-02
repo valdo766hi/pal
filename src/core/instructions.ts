@@ -96,6 +96,7 @@ function preparedDigests(rendered: string | null | undefined): string[] {
 const State = defineDoc({
   kind: "pal.instructionScopes",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "rewindable",
   fork: "initial",

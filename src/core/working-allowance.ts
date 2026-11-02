@@ -58,6 +58,7 @@ const initial = (): Data => ({
 const Allowance = defineDoc({
   kind: "pal.working-allowance",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "initial",

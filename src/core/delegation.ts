@@ -64,6 +64,7 @@ type Outcome = { id: string; status: "answered" | "unanswered"; reason: string; 
 const Helper = defineDoc({
   kind: "pal.helper",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "current",
@@ -85,6 +86,7 @@ const Helper = defineDoc({
 const Allowance = defineDoc({
   kind: "pal.helpers",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "current",
@@ -93,6 +95,7 @@ const Allowance = defineDoc({
 const Slots = defineDocFamily({
   kind: "pal.helper-slots",
   version: 1,
+  checkpointWhen: () => false,
   scope: "session",
   family: true,
   initial: () => ({ tasks: [] as number[] }),

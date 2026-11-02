@@ -137,6 +137,7 @@ export const ExtensionSelection = Type.Object(
 const RunPin = defineDoc({
   kind: "pal.extensionRun",
   version: 1,
+  checkpointWhen: () => false,
   scope: "task",
   initial: () => ({
     release: "",

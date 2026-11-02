@@ -426,6 +426,10 @@ allowances, even when no task is active. The migration changes no table layout o
 may use old code only while the stopped store remains compatible; after migration, preserve data and hold for a
 forward fix rather than attempting an old-code start or automatic database restore/rollback.
 
+Store format 23 comes before Pi Durable 1.4's one-way migration of its own tables, which older builds cannot open.
+An older store that still has unfinished work is refused unchanged, so the release that started that work can finish
+it first. Drain and stop Pal and verify a stopped-state backup before upgrading.
+
 ### Evaluations
 
 Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting repository under

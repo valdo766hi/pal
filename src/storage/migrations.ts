@@ -354,6 +354,32 @@ export const MIGRATIONS: readonly Migration[] = [
       await transaction.exec("SELECT 1");
     },
   },
+  {
+    version: 23,
+    name: "pi_durable_schema_2",
+    // Pi 1.4 then migrates its tables one way, so older builds must refuse the store here. Work they started must
+    // finish under them first: afterwards they could not open the store to reconcile it. The release gate's
+    // unfinished-work query as of schema 22, frozen here.
+    up: async (transaction) => {
+      if (
+        (await transaction.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pi_tasks'")) === undefined
+      )
+        return;
+      const unfinished = await transaction.get<{ n: number }>(
+        "SELECT (SELECT count(*) FROM pi_tasks WHERE status <> 'terminal')" +
+          " + (SELECT count(*) FROM pi_submissions WHERE status IN ('queued', 'placed'))" +
+          " + (SELECT count(*) FROM pal_admissions WHERE state = 'admitting')" +
+          " + (SELECT count(*) FROM pal_chats WHERE state = 'provisioning')" +
+          " + (SELECT count(*) FROM pal_projects WHERE state = 'provisioning')" +
+          " + (SELECT count(*) FROM pal_workspaces WHERE state = 'provisioning')" +
+          " + (SELECT count(*) FROM pal_workspace_purges WHERE completed_at IS NULL)" +
+          " + (SELECT count(*) FROM pal_command_approvals WHERE state = 'pending')" +
+          " + (SELECT count(*) FROM pal_settings WHERE key GLOB 'schedule:*' AND CASE WHEN json_valid(value) THEN json_type(value, '$.pending') IS NOT 'null' ELSE 1 END) AS n",
+      );
+      if ((unfinished?.n ?? 0) > 0)
+        throw new Error("unfinished work needs its retained Pal release; finish it there before upgrading");
+    },
+  },
 ];
 
 /**

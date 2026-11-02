@@ -68,6 +68,7 @@ type Used = Choice & { sha256: string; path: string; scope: "global" | "project"
 const Selection = defineDoc({
   kind: "pal.skills",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "rewindable",
   fork: "initial",

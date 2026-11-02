@@ -28,6 +28,7 @@ const Pin = Type.Object(
 const PinnedInstructions = defineDoc({
   kind: "pal.pinnedInstructions",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "rewindable",
   fork: "asOf",
@@ -56,6 +57,7 @@ type Prepared = {
 const PreparedContext = defineDoc({
   kind: "pal.preparedContext",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "rewindable",
   fork: "initial",
