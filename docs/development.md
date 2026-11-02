@@ -37,7 +37,8 @@ Nix packages keep their immutable store-output identity. Source and other non-Ni
 snapshot the actual `src/` and `dist/` bytes, package/lock manifests, installed production/optional/peer
 dependency graph, and Node runtime/flags at startup. Dependency versions alone are not enough: edited
 installed files change the pin. Missing, linked, special or over-limit runtime files fail closed.
-The snapshot is bounded to 256 packages, 20,000 directory entries/files, 256 MiB total and 128 MiB per file.
+The snapshot is bounded to 256 packages, 20,000 directory entries/files, 256 MiB of package files and 128 MiB
+per file; a non-Nix Node executable is hashed separately, up to 256 MiB. A failure names the exceeded limit.
 
 **Stop Pal before editing, rebuilding or reinstalling its runtime, and keep it unchanged while running.**
 This startup snapshot is not an atomic filesystem snapshot, sandbox or custom-loader/monkeypatch guarantee.

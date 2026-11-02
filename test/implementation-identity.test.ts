@@ -199,6 +199,39 @@ describe("mutable implementation identity", () => {
     expect(await identify(join(root, "node-two"))).toBe(first);
   });
 
+  it("budgets a mutable Node executable apart from packages and names the exceeded limit", async () => {
+    const { root, install } = await installation();
+    const MiB = 1024 * 1024;
+    const sparse = async (path: string, size: number) => {
+      await writeFile(path, "");
+      await truncate(path, size);
+    };
+    // A default source install keeps node-pty's other-platform prebuilds; official Node binaries are ~120 MiB.
+    await sparse(join(install, "node_modules/fixture-dep/prebuilds.bin"), 100 * MiB);
+    await sparse(join(install, "node_modules/fixture-dep/assets.bin"), 100 * MiB);
+    const node = join(root, "node");
+    await sparse(node, 121 * MiB);
+    const execPath = process.execPath;
+    process.execPath = node;
+    cleanups.push(async () => {
+      process.execPath = execPath;
+    });
+    const cause = (pattern: RegExp) => ({
+      cause: expect.objectContaining({ message: expect.stringMatching(pattern) }),
+    });
+
+    const first = await releaseIdentity(install);
+    await appendFile(node, "x");
+    expect(await releaseIdentity(install)).not.toBe(first);
+    await truncate(node, 256 * MiB + 1);
+    await expect(releaseIdentity(install)).rejects.toMatchObject(cause(/Node executable exceeds its 256 MiB limit/));
+    await truncate(node, 121 * MiB);
+    await sparse(join(install, "node_modules/fixture-dep/more.bin"), 100 * MiB);
+    await expect(releaseIdentity(install)).rejects.toMatchObject(
+      cause(/implementation packages exceed their 256 MiB limit/),
+    );
+  });
+
   it("keeps unchanged bytes stable through installation moves and root aliases", async () => {
     const { root, install } = await installation();
     const first = await releaseIdentity(install);
