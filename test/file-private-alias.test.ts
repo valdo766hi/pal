@@ -15,6 +15,7 @@ import { PrivateFiles } from "../src/core/file-policy.ts";
 import { ProjectSearch } from "../src/core/search.ts";
 import { runGit } from "../src/core/git.ts";
 import { openStore } from "../src/storage/store.ts";
+import { projectMemory } from "../plugins/memory/server.ts";
 
 it.each(["private", "ordinary"])("enforces file-read policy for a %s hardlink", async (kind) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pal-file-alias-")));
@@ -219,7 +220,7 @@ it.each(["preview", "changes", "memory-save", "memory-source"])(
       const note = { title: "Fixture", body: "Public fixture note", source: source(canary) };
       if (surface === "memory-source") {
         await writeFile(alias, "public fixture");
-        const id = await pal.memory.save(
+        const id = await projectMemory(pal.capabilities).save(
           project.id,
           "public-note",
           { ...note, source: source("public fixture") },
@@ -227,8 +228,10 @@ it.each(["preview", "changes", "memory-save", "memory-source"])(
         );
         await unlink(alias);
         await link(key, alias);
-        await expect(pal.memory.source(project.id, id, context)).rejects.toThrow(/protected|private|Pal/);
-        expect(await pal.memory.list(project.id, context)).toEqual([]);
+        await expect(projectMemory(pal.capabilities).source(project.id, id, context)).rejects.toThrow(
+          /protected|private|Pal/,
+        );
+        expect(await projectMemory(pal.capabilities).list(project.id, context)).toEqual([]);
       } else {
         await link(key, alias);
         if (surface === "preview")
@@ -240,7 +243,10 @@ it.each(["preview", "changes", "memory-save", "memory-source"])(
             patch: "",
             problem: expect.any(String),
           });
-        } else await expect(pal.memory.save(project.id, "private-note", note, context)).rejects.toThrow();
+        } else
+          await expect(
+            projectMemory(pal.capabilities).save(project.id, "private-note", note, context),
+          ).rejects.toThrow();
       }
     } finally {
       await pal.close();

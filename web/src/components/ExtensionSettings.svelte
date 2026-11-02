@@ -4,6 +4,7 @@
   import { app, refreshExtensions } from "../lib/state.svelte.ts";
   import ReleaseSettings from "./ReleaseSettings.svelte";
 
+  const slotLabels = { context: "Context section" } as const;
   let busy = $state(false);
   let error: string | undefined = $state();
   async function load() {
@@ -51,6 +52,7 @@
 {#if app.extensions}
   {#each app.extensions.catalog as item (item.id)}
     {@const pinned = app.extensions.selected.find((choice) => choice.id === item.id)}
+    {@const contributes = [...item.panels, ...(item.capability?.ui?.slots ?? []).map((slot) => slotLabels[slot.slot])]}
     <div class="extension">
       <div class="details">
         <div class="heading">
@@ -73,7 +75,7 @@
             Implementation: <span class="mono">{item.implementation}</span>
           </p>{/if}
         <div class="fine">
-          {#if item.panels.length > 0}Contributes: {item.panels.join(", ")} ·
+          {#if contributes.length > 0}Contributes: {contributes.join(", ")} ·
           {/if}<span class="mono">{item.native}</span>
         </div>
       </div>

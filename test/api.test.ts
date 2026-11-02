@@ -373,7 +373,7 @@ describe("API", () => {
     const { api, base, cookie, pal } = await signedIn();
     const project = (await api("POST", "projects", { requestId: "api-memory-project", name: "Context" })).body.project;
     const chat = (await api("POST", "chats", { requestId: "api-memory-chat", projectId: project.id })).body.chat;
-    const path = `projects/${project.id}/memory`;
+    const path = `plugins/memory/projects/${project.id}/items`;
     const input = {
       title: "Journal",
       body: "Keep durable state in SQLite",
@@ -406,10 +406,10 @@ describe("API", () => {
       (await api("PUT", item, { ...correction, revision: 2, source: { kind: "owner", trusted: true } })).status,
     ).toBe(400);
     const other = (await api("POST", "projects", { requestId: "api-foreign-memory", name: "Foreign" })).body.project;
-    expect((await api("GET", `projects/${other.id}/memory/${saved.body.id}/source`)).status).toBe(403);
-    expect((await api("GET", `projects/${other.id}/memory`)).body.items).toEqual([]);
+    expect((await api("GET", `plugins/memory/projects/${other.id}/items/${saved.body.id}/source`)).status).toBe(403);
+    expect((await api("GET", `plugins/memory/projects/${other.id}/items`)).body.items).toEqual([]);
     expect((await api("GET", `${path}?workspace=`)).status).toBe(400);
-    expect((await api("POST", `projects/${project.id}/memory-index`)).status).toBe(200);
+    expect((await api("POST", `plugins/memory/projects/${project.id}/index`)).status).toBe(200);
     expect((await api("DELETE", item, { revision: 1 })).status).toBe(409);
     expect((await api("DELETE", item, { revision: 2 })).status).toBe(200);
     expect((await api("GET", path)).body.items).toEqual([]);

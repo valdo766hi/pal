@@ -222,7 +222,7 @@ export async function mutableIdentity(installRoot: string, privateDataRoot?: str
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
         let runtimeFiles = 0;
-        for (const directory of ["src", "dist"]) {
+        for (const directory of ["src", "plugins", "dist"]) {
           let info;
           try {
             info = await lstat(join(root, directory));

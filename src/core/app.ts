@@ -30,7 +30,7 @@ import { BROWSER_NAMESPACE, browserTools } from "../pi/browser-tools.ts";
 import { type BrowserRuntime, browserRuntime, ProjectBrowsers } from "./browser.ts";
 import { chatConfiguration, ChatService } from "./chats.ts";
 import { helperBudget, HelperLinks, type HelperLimits, helperTools } from "./delegation.ts";
-import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
+import { BuiltinExtensions, PLUGINS, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { WORKING_NAMESPACE, WorkingState } from "./working-state.ts";
 import { workspaceRevision } from "./workspace-revision.ts";
@@ -41,8 +41,6 @@ import { ProjectSkills, SKILLS_NAMESPACE } from "./skills.ts";
 import { Changes } from "./changes.ts";
 import { FILES_NAMESPACE, fileTools, projectFiles } from "./files.ts";
 import { FolderGrants } from "./folders.ts";
-import type { ProjectMemory } from "./memory.ts";
-import { COMPILED_CAPABILITIES } from "../capabilities/compiled.ts";
 import { CompiledCapabilities, type CompiledCapability } from "../capabilities/contract.ts";
 import { HttpError } from "./http.ts";
 import {
@@ -93,7 +91,6 @@ export type Pal = {
   readonly projects: Projects;
   readonly folders: FolderGrants;
   readonly workspaces: Workspaces;
-  readonly memory: ProjectMemory;
   readonly capabilities: CompiledCapabilities;
   readonly context: ChatContext;
   readonly working: WorkingState;
@@ -149,7 +146,7 @@ const NO_AMBIENT_AUTH = { env: async () => undefined, fileExists: async () => fa
 export async function openPal(
   options: PalOptions,
   context: Context,
-  definitions: readonly CompiledCapability[] = COMPILED_CAPABILITIES,
+  definitions: readonly CompiledCapability[] = PLUGINS,
 ): Promise<Pal> {
   const store = await openStore(options.dataRoot);
   const now = options.now ?? Date.now;
@@ -627,11 +624,6 @@ export async function openPal(
       owner,
       projects: openedProjects,
       folders,
-      get memory() {
-        if (openedCapabilities.memory === undefined)
-          throw new HttpError(503, "capability_unavailable", "Memory is not included in this Pal build.");
-        return openedCapabilities.memory;
-      },
       capabilities: openedCapabilities,
       context: chatContext,
       working,

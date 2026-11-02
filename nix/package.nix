@@ -54,6 +54,7 @@ let
     (root + "/tsconfig.json")
     (root + "/vite.config.ts")
     (root + "/src")
+    (root + "/plugins")
     (root + "/web")
     (root + "/scripts/release-manifest.ts")
   ];

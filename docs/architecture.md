@@ -151,7 +151,7 @@ claim an atomic filesystem or a hostile-host sandbox.
 | shell     | `shell_run`                                                                           | `src/core/execution.ts`   |
 | instructions | `instructions_scope` | `src/core/instructions.ts` |
 | skills | `skills_search`, `skills_read` | `src/core/skills.ts` |
-| memory    | `memory_search`                                                                       | `src/core/memory.ts`      |
+| memory    | `memory_search`                                                                       | `plugins/memory/memory.ts` |
 | browser   | `browser_observe`, `browser_act` (only while the owner has handed control over)       | `src/pi/browser-tools.ts` |
 | MCP       | one tool per approved server tool, such as Exa search or Context7 docs                | `src/pi/mcp-tools.ts`     |
 
@@ -201,16 +201,21 @@ The current catalog is compiled into Pal, not a public plug-in SDK or a download
 servers are today's way to add tools without rebuilding Pal. Extensions never bypass host policy, and in-process
 code requires full application-code trust.
 
-`src/capabilities/contract.ts` is the first internal compiled-capability adapter. The kernel retains authentication,
-one database owner, credentials, grants, approvals, native task/replay policy and release verification. A capability
-supplies a bounded manifest and a factory, not registry access or replacement kernel hooks. Its manifest declares
-identity/version, compatible capability-API range, Code Mode namespace, tool names/replay/output bounds, permissions,
-named precompiled panels and the existing new-chat selection setting. Factories may dispose ephemeral resources after
-durable work stops; failed opens must release their own unfinished acquisitions. Previously opened contributions are
-disposed in reverse order, once, including partial-startup failures.
+`src/capabilities/contract.ts` is the plugin contract. The kernel retains authentication, one database owner,
+credentials, grants, approvals, native task/replay policy and release verification. A plugin in `plugins/<id>/`
+supplies a bounded manifest (`manifest.ts`, plain data the web build also reads) and a factory (`server.ts`), not
+registry access or replacement kernel hooks. Its manifest declares identity/version, compatible capability-API range,
+catalog order, an optional Code Mode namespace, tools with their callers, replay, output bounds and permissions, the
+tables its SQL may change or read, and interface components. A tool the model may call directly must already be on the
+kernel's direct list; the plugin cannot add itself. The factory gets narrow host services: folder leases, Pi storage
+and SQL limited to its declared tables, never the `Pal` object or the database itself, and may answer owner requests
+under `/api/plugins/<id>/`. Factories may dispose ephemeral resources after durable work stops; failed opens must
+release their own unfinished acquisitions. Previously opened contributions are disposed in reverse order, once,
+including partial-startup failures.
 
-Memory is composed through `src/capabilities/memory.ts`; `src/capabilities/compiled.ts` is the build-time selection.
-Removing its entry removes its service, native tools and namespace, not saved data or core Context/guidance inspection.
+Memory is the plugin in `plugins/memory/`; `plugins/index.ts` is the build-time selection, one line per plugin.
+Removing its line removes its service, native tools, namespace and Context section, not saved data or core
+Context/guidance inspection.
 Unavailable saved defaults remain visible for explicit removal. Existing chats never silently adopt another capability
 version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid
 new-chat defaults are refused before recording provisioning. Existing creation/admission receipts still deduplicate;
@@ -220,15 +225,15 @@ release or compiled catalog. Request inspection joins additive `pal.capabilities
 historical, without invented digests.
 
 The implementation digest binds the manifest to the verified **whole Pal release**, not an independently upgradable
-package. `project.read` is this first adapter's only declared permission; the kernel checks live folder authority around
-every native tool execution, requires Code Mode-only callers and verifies replay declarations. Trusted source can still
-use Node APIs: declarations are not a sandbox or proof of read-only behavior. Effectful adapters require further reviewed
+package. `project.read` is the only declared permission; with it, the kernel checks live folder authority around
+every native tool execution. It also verifies each tool's declared callers and replay. Trusted source can still use
+Node APIs: declarations and the SQL check are not a sandbox or proof of read-only behavior. Effectful adapters require further reviewed
 kernel integration, not a permission string supplied by a skill or manifest.
 
-Copy `src/capabilities/example.ts` for a tiny opt-in bounded echo tool. Add the reviewed definition to the compiled list
-and rebuild; no runtime directory scan or package install occurs. Its new-chat switch and manifest/identity appear in
-Settings; Context inspects request pins. The optional panel declaration references an already compiled named panel,
-not executable or downloaded UI. `test/capabilities.test.ts` exercises the contract and composition boundaries.
+Add a reviewed plugin's line to `plugins/index.ts` and rebuild; no runtime directory scan or package install occurs.
+Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins. Its interface components
+are bundled from `plugins/<id>/ui/` at build time and load only in chats that selected it, never downloaded UI.
+`test/capabilities.test.ts` exercises the contract and composition boundaries.
 
 - `src/core/extensions.ts`: built-in contributions (files, shell, memory, browser, compact) can be switched for new
   chats. Each chat freezes its selection and the implementation versions it ran with. Compact output is opt-in: in

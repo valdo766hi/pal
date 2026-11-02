@@ -41,6 +41,7 @@ stdenv.mkDerivation {
       (root + "/.github/workflows/security.yml")
       (root + "/.github/workflows/security-comment.yml")
       (root + "/src")
+      (root + "/plugins")
       (root + "/web")
       (root + "/test")
       (root + "/scripts")

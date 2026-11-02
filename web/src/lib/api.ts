@@ -23,7 +23,6 @@ export type { RemovedWorkspace } from "../../../src/core/workspace-purge.ts";
 export type { ProjectMcp, ProjectMcpServer } from "../../../src/core/mcp-grants.ts";
 export type { GrantedFolder } from "../../../src/core/folders.ts";
 export type { Workspace, WorkspaceMode } from "../../../src/core/workspaces.ts";
-export type { MemoryItem, MemoryInput } from "../../../src/core/memory.ts";
 export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
 import type { WorkingState } from "../../../src/core/working-state.ts";
 export type WorkingStateInfo = Awaited<ReturnType<WorkingState["inspect"]>>;
@@ -64,7 +63,7 @@ export type ChatSummary = {
   blocked: BlockedInput | null;
 };
 
-const inWorkspace = (path: string, id?: string) => {
+export const inWorkspace = (path: string, id?: string) => {
   if (id === undefined) return path;
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}workspace=${encodeURIComponent(id)}`;
@@ -221,28 +220,9 @@ export const api = {
       "GET",
       `chats/${id}/context/prompt?offset=${offset}${request === undefined ? "" : `&request=${encodeURIComponent(request)}`}`,
     ),
-  memory: (id: string, workspace?: string) =>
-    call<{ items: import("../../../src/core/memory.ts").MemoryItem[] }>(
-      "GET",
-      inWorkspace(`projects/${id}/memory`, workspace),
-    ),
-  memorySave: (id: string, key: string, input: import("../../../src/core/memory.ts").MemoryInput, workspace?: string) =>
-    call<{ id: string }>("POST", `projects/${id}/memory`, { ...input, requestId: key, workspace }),
-  memoryCorrect: (
-    project: string,
-    id: string,
-    revision: number,
-    input: import("../../../src/core/memory.ts").MemoryInput,
-    workspace?: string,
-  ) => call<{ saved: true }>("PUT", `projects/${project}/memory/${id}`, { ...input, revision, workspace }),
-  memoryForget: (project: string, id: string, revision: number, workspace?: string) =>
-    call<{ forgotten: true }>("DELETE", `projects/${project}/memory/${id}`, { revision, workspace }),
-  memorySource: (project: string, id: string, workspace?: string) =>
-    call<Awaited<ReturnType<import("../../../src/core/memory.ts").ProjectMemory["source"]>>>(
-      "GET",
-      inWorkspace(`projects/${project}/memory/${id}/source`, workspace),
-    ),
-  memoryRebuild: (id: string) => call<{ rebuilt: true }>("POST", `projects/${id}/memory-index`),
+  /** A request to a plugin's own routes, `/api/plugins/<id>/<path>`. */
+  plugin: <T>(id: string, method: string, path: string, body?: unknown) =>
+    call<T>(method, `plugins/${id}/${path}`, body),
   projectFolders: (id: string, workspace?: string) =>
     call<{ folders: import("../../../src/core/folders.ts").GrantedFolder[] }>(
       "GET",

@@ -21,6 +21,7 @@ import { STDIO_FIXTURE } from "../fixtures/stdio-server.ts";
 import { browse, startOpenAIFixture } from "../fixtures/openai-server.ts";
 import { startProviderFixture } from "../fixtures/provider-server.ts";
 import { fakeReleaseControl } from "../fixtures/releases.ts";
+import { projectMemory } from "../../plugins/memory/server.ts";
 
 const webRoot = join(import.meta.dirname, "..", "..", "dist", "public");
 const exec = promisify(execFile);
@@ -690,11 +691,13 @@ describe("Pal in a browser", () => {
       await panel.getByLabel("Memory fact", { exact: true }).fill("cobalt owner decision");
       await panel.getByRole("button", { name: "Save memory", exact: true }).click();
       await panel.getByRole("heading", { name: "Owner decision", exact: true }).waitFor();
-      const owner = (await pal.memory.list(project.id, context)).find((item) => item.title === "Owner decision");
+      const owner = (await projectMemory(pal.capabilities).list(project.id, context)).find(
+        (item) => item.title === "Owner decision",
+      );
       if (owner === undefined) throw new Error("missing owner memory");
       await panel.getByRole("button", { name: "Correct Owner decision", exact: true }).click();
       await panel.getByLabel("Memory fact", { exact: true }).fill("my retained draft");
-      await pal.memory.correct(
+      await projectMemory(pal.capabilities).correct(
         project.id,
         owner.id,
         1,
@@ -715,7 +718,7 @@ describe("Pal in a browser", () => {
           .getByRole("button", { name: "Cancel", exact: true })
           .evaluate((el) => el === document.activeElement),
       ).toBe(true);
-      await pal.memory.correct(
+      await projectMemory(pal.capabilities).correct(
         project.id,
         owner.id,
         2,
@@ -727,7 +730,10 @@ describe("Pal in a browser", () => {
         .getByRole("alert")
         .filter({ hasText: /changed/ })
         .waitFor();
-      expect((await pal.memory.list(project.id, context)).find((item) => item.id === owner.id)?.revision).toBe(3);
+      expect(
+        (await projectMemory(pal.capabilities).list(project.id, context)).find((item) => item.id === owner.id)
+          ?.revision,
+      ).toBe(3);
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "detached" });
       expect(await panel.isVisible()).toBe(true);

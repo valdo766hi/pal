@@ -18,7 +18,7 @@ import { type Static, Type } from "typebox";
 import { HttpError } from "./http.ts";
 import { validate } from "./requests.ts";
 import { unfinishedWork } from "./release-state.ts";
-import { COMPILED_CAPABILITIES } from "../capabilities/compiled.ts";
+import * as inventory from "../../plugins/index.ts";
 import {
   capabilityIdentity,
   capabilityManifest,
@@ -27,10 +27,22 @@ import {
   type CompiledCapability,
 } from "../capabilities/contract.ts";
 
-const KERNEL_BUILTINS = [
+/** The build's plugins from `plugins/index.ts`. */
+export const PLUGINS: readonly CompiledCapability[] = Object.values(inventory);
+/** The kernel's own panels; Context is always shown. */
+export type PanelId = "Files" | "Changes" | "Terminal" | "Browser";
+type KernelBuiltin = Pick<
+  CapabilityManifest,
+  "id" | "version" | "name" | "native" | "description" | "order" | "optIn"
+> & {
+  panels: readonly PanelId[];
+};
+
+const KERNEL_BUILTINS: readonly KernelBuiltin[] = [
   {
     id: "files",
     version: 1,
+    order: 10,
     name: "Files and changes",
     native: "pal.files",
     panels: ["Files", "Changes"],
@@ -39,6 +51,7 @@ const KERNEL_BUILTINS = [
   {
     id: "shell",
     version: 1,
+    order: 20,
     name: "Host commands and Terminal",
     native: "pal.shell",
     panels: ["Terminal"],
@@ -47,6 +60,7 @@ const KERNEL_BUILTINS = [
   {
     id: "browser",
     version: 1,
+    order: 40,
     name: "Project browser",
     native: "pal.browser",
     panels: ["Browser"],
@@ -56,6 +70,7 @@ const KERNEL_BUILTINS = [
   {
     id: "helpers",
     version: 1,
+    order: 50,
     name: "Research helpers",
     native: "pal.helpers",
     panels: [],
@@ -67,6 +82,7 @@ const KERNEL_BUILTINS = [
   {
     id: "compact",
     version: 1,
+    order: 60,
     name: "Compact command output",
     native: "pal.compact",
     panels: [],
@@ -77,8 +93,10 @@ const KERNEL_BUILTINS = [
   },
 ] as const;
 export type BuiltinId = string;
-export type PanelId = CapabilityManifest["panels"][number];
-export type Contribution = Pick<CapabilityManifest, "id" | "version" | "name" | "native" | "description" | "optIn"> & {
+export type Contribution = Pick<
+  CapabilityManifest,
+  "id" | "version" | "name" | "native" | "description" | "order" | "optIn"
+> & {
   panels: readonly PanelId[];
   available: boolean;
   implementation: string;
@@ -86,7 +104,7 @@ export type Contribution = Pick<CapabilityManifest, "id" | "version" | "name" | 
 };
 function catalogFor(definitions: readonly CompiledCapability[]) {
   const capabilities = definitions.map(({ manifest }) => capabilityManifest(manifest));
-  const catalog = [...KERNEL_BUILTINS.slice(0, 2), ...capabilities, ...KERNEL_BUILTINS.slice(2)];
+  const catalog = [...KERNEL_BUILTINS, ...capabilities].sort((a, b) => a.order - b.order);
   if (
     new Set(catalog.map((item) => item.id)).size !== catalog.length ||
     new Set(catalog.map((item) => item.native)).size !== catalog.length
@@ -95,7 +113,7 @@ function catalogFor(definitions: readonly CompiledCapability[]) {
   return catalog;
 }
 /** Only compiled contributions; retaining a manifest does not install code or grant authority. */
-export const BUILTINS = catalogFor(COMPILED_CAPABILITIES);
+export const BUILTINS = catalogFor(PLUGINS);
 const Choice = Type.Object(
   { id: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }), version: Type.Integer({ minimum: 1, maximum: 1_000_000 }) },
   { additionalProperties: false },
@@ -203,6 +221,7 @@ export class BuiltinExtensions {
     this.release = release;
     this.#catalog = catalog.map((item) => ({
       ...item,
+      panels: "panels" in item ? item.panels : [],
       available: true,
       implementation:
         "core" in item
@@ -273,7 +292,7 @@ export class BuiltinExtensions {
     registry: Registry,
     harness: () => Harness,
     release: string,
-    definitions: readonly CompiledCapability[] = COMPILED_CAPABILITIES,
+    definitions: readonly CompiledCapability[] = PLUGINS,
   ) {
     const catalog = catalogFor(definitions);
     const identity = createHash("sha256").update(JSON.stringify(catalog)).digest("hex");
@@ -310,6 +329,7 @@ export class BuiltinExtensions {
         ...choice,
         name: `Unavailable ${choice.id}`,
         native: `pal.${choice.id}`,
+        order: Number.MAX_SAFE_INTEGER,
         panels: [],
         available: false,
         implementation: "",

@@ -126,6 +126,13 @@ describe("mutable implementation identity", () => {
     expect(await releaseIdentity(install)).not.toBe(first);
     await unlink(join(install, "src/policy.ts"));
     expect(await releaseIdentity(install)).toBe(first);
+    // Source-mode runs execute plugins/ directly, so its bytes are implementation too.
+    await mkdir(join(install, "plugins/fixture"), { recursive: true });
+    await writeFile(join(install, "plugins/fixture/server.ts"), "export default {};\n");
+    const withPlugin = await releaseIdentity(install);
+    expect(withPlugin).not.toBe(first);
+    await writeFile(join(install, "plugins/fixture/server.ts"), "export default { changed: true };\n");
+    expect(await releaseIdentity(install)).not.toBe(withPlugin);
   });
 
   it("includes installed transitive and optional dependencies, not only their declared versions", async () => {
