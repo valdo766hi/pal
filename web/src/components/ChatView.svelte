@@ -31,7 +31,8 @@
   import ModelControl, { type Group } from "./ModelControl.svelte";
   import ProjectMcpSettings from "./ProjectMcpSettings.svelte";
   import WorkspaceMode from "./WorkspaceMode.svelte";
-  import { drafts, MAX_DRAFT_CHARS, MAX_DRAFT_FILES, type PendingInput } from "../lib/drafts.svelte.ts";
+  import { drafts, type PendingInput } from "../lib/drafts.svelte.ts";
+  import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../../../src/protocol/limits.ts";
   import type { ReviewFeedback } from "../../../src/core/feedback.ts";
   import { codeCopy, copyText } from "../lib/copy.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
@@ -665,8 +666,8 @@
     const projectId = project.id;
     for (const file of files) {
       if (!writing.active || writing.blocked) return;
-      if (writing.attachments.length + writing.uploading >= MAX_DRAFT_FILES) {
-        writing.error = `A draft can attach at most ${MAX_DRAFT_FILES} files.`;
+      if (writing.attachments.length + writing.uploading >= MAX_INPUT_ATTACHMENTS) {
+        writing.error = `A draft can attach at most ${MAX_INPUT_ATTACHMENTS} files.`;
         return;
       }
       writing.touch();
@@ -1237,7 +1238,7 @@
               ? "Steer or queue"
               : "Steer the run or queue a follow-up"
             : "Message Pal"}
-          maxlength={MAX_DRAFT_CHARS}
+          maxlength={MAX_INPUT_CHARS}
           disabled={writing.blocked || !writing.active}
           title="Drafts stay in this tab only. Reloading or signing out clears them."
           bind:value={writing.text}

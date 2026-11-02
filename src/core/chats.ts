@@ -21,8 +21,7 @@ import { WorkspaceMode, workspaceMode } from "./workspaces.ts";
 import { HttpError } from "./http.ts";
 import type { Changes } from "./changes.ts";
 import { type AttachmentLabel, UploadError } from "./uploads.ts";
-
-export const MAX_INPUT_CHARS = 100_000;
+import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../protocol/limits.ts";
 
 export const ChatBody = Type.Object(
   {
@@ -52,7 +51,9 @@ export const InputBody = Type.Object(
     text: Type.String({ minLength: 1, maxLength: MAX_INPUT_CHARS }),
     whenBusy: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer")])),
     /** Upload IDs from this chat's project, in the order shown. */
-    attachments: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 10 })),
+    attachments: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: MAX_INPUT_ATTACHMENTS }),
+    ),
     configuration: Type.Optional(ConfigurationRevision),
     feedback: Type.Optional(FeedbackBody),
   },

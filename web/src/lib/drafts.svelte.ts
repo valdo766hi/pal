@@ -3,8 +3,8 @@ import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { Admission, Upload } from "./api.ts";
 import type { ReviewFeedback } from "../../../src/core/feedback.ts";
 
-export const MAX_DRAFT_CHARS = 100_000;
-export const MAX_DRAFT_FILES = 10;
+import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../../../src/protocol/limits.ts";
+
 export const MAX_DRAFT_CHATS = 32;
 type BusyMode = "followUp" | "steer";
 export type DraftSnapshot = Readonly<{
@@ -63,8 +63,8 @@ export class ChatDraft {
   }
   set text(value: string) {
     if (!this.active || this.blocked) return;
-    if (value.length > MAX_DRAFT_CHARS) {
-      this.error = `A draft can contain at most ${MAX_DRAFT_CHARS.toLocaleString()} characters; nothing was added.`;
+    if (value.length > MAX_INPUT_CHARS) {
+      this.error = `A draft can contain at most ${MAX_INPUT_CHARS.toLocaleString()} characters; nothing was added.`;
       return;
     }
     this.#text = value;
@@ -77,8 +77,8 @@ export class ChatDraft {
   }
   set attachments(value: readonly Readonly<Upload>[]) {
     if (!this.active || this.blocked) return;
-    if (value.length > MAX_DRAFT_FILES) {
-      this.error = `A draft can attach at most ${MAX_DRAFT_FILES} files; nothing was added.`;
+    if (value.length > MAX_INPUT_ATTACHMENTS) {
+      this.error = `A draft can attach at most ${MAX_INPUT_ATTACHMENTS} files; nothing was added.`;
       return;
     }
     this.#attachments = Object.freeze(value.map((file) => Object.freeze({ ...file })));
@@ -96,8 +96,8 @@ export class ChatDraft {
   append(text: string): boolean {
     if (!this.active || this.blocked) return false;
     const value = `${this.text}${this.text ? "\n\n" : ""}${text}`;
-    if (value.length > MAX_DRAFT_CHARS) {
-      this.error = `This would exceed ${MAX_DRAFT_CHARS.toLocaleString()} characters; nothing was added.`;
+    if (value.length > MAX_INPUT_CHARS) {
+      this.error = `This would exceed ${MAX_INPUT_CHARS.toLocaleString()} characters; nothing was added.`;
       return false;
     }
     this.text = value;

@@ -18,6 +18,7 @@ import type { Chat } from "./chats.ts";
 import { HttpError } from "./http.ts";
 import { entryText } from "./memory.ts";
 import { MAX_UPLOAD_BYTES } from "./uploads.ts";
+import { MAX_INPUT_ATTACHMENTS } from "../protocol/limits.ts";
 import { validate } from "./requests.ts";
 
 const BUDGETS = { pinnedTokens: 1500, pinnedBytes: 6144, previewBytes: 65536 };
@@ -83,7 +84,7 @@ const Uploads = Type.Object({
       size: Type.Integer({ minimum: 0, maximum: MAX_UPLOAD_BYTES }),
       mediaType: Type.String({ maxLength: 200 }),
     }),
-    { maxItems: 10 },
+    { maxItems: MAX_INPUT_ATTACHMENTS },
   ),
 });
 const Page = Type.Object({

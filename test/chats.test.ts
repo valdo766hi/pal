@@ -14,9 +14,9 @@ import {
   ChatService,
   InputBlocked,
   InputHeld,
-  MAX_INPUT_CHARS,
   ProjectUnavailable,
 } from "../src/core/chats.ts";
+import { MAX_INPUT_CHARS } from "../src/protocol/limits.ts";
 import { InvalidRequest, RequestConflict } from "../src/core/requests.ts";
 import { Uploads } from "../src/core/uploads.ts";
 import { openStore } from "../src/storage/store.ts";

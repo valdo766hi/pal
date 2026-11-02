@@ -4,6 +4,7 @@ import { mkdir, open, readdir, realpath, rm, writeFile, type FileHandle } from "
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { Type } from "typebox";
+import { MAX_CHECK_ATTEMPTS } from "../protocol/limits.ts";
 import { runGit } from "./git.ts";
 import { validate } from "./requests.ts";
 import { privateReleaseDirectory, readReleaseJson, releaseLock, writeReleaseJson } from "./release-files.ts";
@@ -209,8 +210,8 @@ export async function evaluateRelease(
       await verifyRelease(installRoot, dataRoot, existing, signal);
       return existing;
     }
-    if ((await readdir(root)).filter((name) => /^attempt-[a-f0-9-]{36}\.log$/.test(name)).length >= 8)
-      throw new Error("eight check attempts are retained; review retention before checking another");
+    if ((await readdir(root)).filter((name) => /^attempt-[a-f0-9-]{36}\.log$/.test(name)).length >= MAX_CHECK_ATTEMPTS)
+      throw new Error(`${MAX_CHECK_ATTEMPTS} check attempts are retained; review retention before checking another`);
     const snapshot = randomUUID();
     log = await open(join(root, `attempt-${snapshot}.log`), "wx", 0o600);
     const snapshots = join(root, "sources");

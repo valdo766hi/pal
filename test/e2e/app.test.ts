@@ -2797,6 +2797,8 @@ describe("Pal in a browser", () => {
       await page.goto(`${base}/#/settings/extensions`);
       await page.reload();
       const control = page.getByRole("region", { name: "Controlled releases", exact: true });
+      // The retention shown is the supervisor's own limit.
+      await control.getByText(/^2\/8 releases retained\./).waitFor();
       await control.getByRole("button", { name: `Review candidate ${releases.digest.slice(0, 12)}` }).click();
       await control.getByRole("checkbox", { name: /I reviewed all changes/ }).check();
       await control.getByRole("button", { name: "Approve exact digest", exact: true }).click();

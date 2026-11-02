@@ -1,15 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { Value } from "typebox/value";
-import { InputBody, MAX_INPUT_CHARS } from "../src/core/chats.ts";
+import { InputBody } from "../src/core/chats.ts";
+import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../src/protocol/limits.ts";
 import type { Admission, Upload } from "../web/src/lib/api.ts";
-import {
-  ChatDraft,
-  ChatDrafts,
-  MAX_DRAFT_CHARS,
-  MAX_DRAFT_CHATS,
-  MAX_DRAFT_FILES,
-  type PendingInput,
-} from "../web/src/lib/drafts.svelte.ts";
+import { ChatDraft, ChatDrafts, MAX_DRAFT_CHATS, type PendingInput } from "../web/src/lib/drafts.svelte.ts";
 
 const file = (id = "upload-one"): Upload => ({
   id,
@@ -148,18 +142,19 @@ describe("per-chat draft ownership", () => {
   });
 
   it("matches host message limits and refuses oversized inserts without truncating the current draft", () => {
-    expect(MAX_DRAFT_CHARS).toBe(MAX_INPUT_CHARS);
-    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_DRAFT_FILES).fill("file") })).toBe(true);
-    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_DRAFT_FILES + 1).fill("file") })).toBe(false);
+    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_INPUT_ATTACHMENTS).fill("file") })).toBe(true);
+    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_INPUT_ATTACHMENTS + 1).fill("file") })).toBe(
+      false,
+    );
     const draft = new ChatDraft("one");
-    draft.text = "x".repeat(MAX_DRAFT_CHARS);
+    draft.text = "x".repeat(MAX_INPUT_CHARS);
     expect(draft.append("extra")).toBe(false);
-    expect(draft.text).toHaveLength(MAX_DRAFT_CHARS);
-    draft.text = "y".repeat(MAX_DRAFT_CHARS + 1);
-    expect(draft.text).toBe("x".repeat(MAX_DRAFT_CHARS));
-    draft.attachments = Array.from({ length: MAX_DRAFT_FILES }, (_, i) => file(String(i)));
+    expect(draft.text).toHaveLength(MAX_INPUT_CHARS);
+    draft.text = "y".repeat(MAX_INPUT_CHARS + 1);
+    expect(draft.text).toBe("x".repeat(MAX_INPUT_CHARS));
+    draft.attachments = Array.from({ length: MAX_INPUT_ATTACHMENTS }, (_, i) => file(String(i)));
     draft.attachments = [...draft.attachments, file("overflow")];
-    expect(draft.attachments).toHaveLength(MAX_DRAFT_FILES);
+    expect(draft.attachments).toHaveLength(MAX_INPUT_ATTACHMENTS);
     expect(draft.error).toMatch(/nothing was added/);
   });
 
