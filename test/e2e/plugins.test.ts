@@ -1,6 +1,6 @@
-// Adding a plugin is its folder plus its line in plugins/index.ts. This adds the example test plugin to a copy of the
-// source that way, builds the interface and the server from that copy, uses the plugin's panel and entry renderer,
-// fails its panel's import, then reopens the data with a build that lacks the plugin.
+// Follows docs/development.md#writing-a-plugin: adding a plugin is its folder plus its line in plugins/index.ts. This
+// adds the template plugin to a copy of the source that way, builds the interface and the server from that copy, uses
+// its panel, setting and entry renderer, fails its panel's import, then reopens the data with a build that lacks it.
 import { appendFile, cp, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";

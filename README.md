@@ -26,8 +26,11 @@ not an ever-growing core.
 The goal is for anyone to create extensions, add their own tools, customize Pal and share reusable packages.
 Built-ins are a starting point, not the limit.
 
-Today, Pal ships compiled, version-pinned built-ins and accepts custom tools through MCP. A public extension SDK
-and package installer are not available yet. See [extension architecture](docs/architecture.md#extensions-and-releases).
+Today you can add a skill (a `SKILL.md` procedure, no code), connect an MCP server (tools in a separate process, no
+rebuild) or write a plugin compiled into Pal (tools, settings, panels and chat pieces). Plugins are trusted code with
+full access to Pal's process; review them like Pal's own. A package installer and downloadable plugins are not
+available yet. See [adding capabilities](docs/development.md#adding-capabilities) and
+[extension architecture](docs/architecture.md#extensions-and-releases).
 
 ## Features
 

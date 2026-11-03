@@ -548,6 +548,7 @@ src/
 web/src/
   components/      Svelte 5 views and panels
   lib/             API client, chat event stream, shared state, icons
+plugins/           plugins compiled into Pal: <id>/{manifest.ts, server.ts, ui/} and the index.ts inventory
 test/              Vitest suites and fixture services; e2e/ for Playwright
 nix/               package, checks and test derivations
 ```
@@ -556,15 +557,67 @@ See [architecture](architecture.md) for how the pieces connect.
 
 ## Adding capabilities
 
-Prefer extensions and reusable packages over adding more responsibilities to core. The aim is for people to build
-and share their own tools, integrations and customizations, not just use the bundled features. See
-[extension architecture](architecture.md#extensions-and-releases) for the current scope and trust boundaries.
+Pal keeps a small core. New abilities come from one of three places:
 
-- **Custom tools today:** implement an MCP server and connect it through [Settings → MCP servers](configuration.md#internet-tools-mcp).
-- **Built-in contributions today:** use `src/core/extensions.ts` and the existing native-tool and UI boundaries.
-  Interface-only extras do not need a model tool or new permissions.
-- **Shared guarantees:** keep owner consent, Code Mode-only model calls, durable receipts, version pins and resource
-  limits intact. New defaults must not change active chats or runs.
+| Add           | When                                                                                         | How                                                                                                                                  |
+| ------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| A skill       | A procedure the model should follow with the tools Pal already has. No code.                 | A `SKILL.md` in `~/.agents/skills/<name>/` or the project's `.agents/skills/<name>/` ([skill sources](architecture.md#skill-sources)). |
+| An MCP server | Tools from a separate process or service, added without rebuilding Pal.                      | Connect it in [Settings → MCP servers](configuration.md#internet-tools-mcp).                                                         |
+| A plugin      | Full integration: native tools, settings, panels, chat pieces and its own transcript entries. | TypeScript and Svelte in `plugins/<id>/`, compiled into Pal; rebuild and restart.                                                    |
+
+Whichever you choose, keep owner consent, Code Mode-only model calls, durable receipts, version pins and resource
+limits intact. New defaults must not change active chats or runs.
+
+**Trust.** A plugin runs inside Pal's process with full trust and can use any Node API. Its manifest's permissions,
+callers and tables are policy that Pal checks at its boundaries, not a sandbox. Review a plugin as you would Pal's own
+code, and never build one from a source you don't trust. Skills and MCP servers stay outside that boundary.
+
+### Writing a plugin
+
+`test/fixtures/plugins/example/` is a complete template: one tool, one setting, one panel and a renderer for the entry
+its tool records. `test/e2e/plugins.test.ts` follows these steps on a copy of the source, builds it and uses each part
+in a browser. See [extension architecture](architecture.md#extensions-and-releases) for what the kernel keeps.
+
+1. **Create the folder.** Copy the template to `plugins/<id>/`, where `<id>` is lowercase letters, digits and hyphens.
+   It moves two folders up, so drop two `../` from each import that leaves the folder (`../../../../src/` becomes
+   `../../src/`). Replace `example` everywhere: the ID, native name, namespace and tool prefix, panel and tab names,
+   entry kind and the `api.plugin("example", …)` call.
+2. **Describe it in `manifest.ts`.** It is plain data, which the web build also reads.
+   - `id`, `version` and `native`, which must be `pal.<id>`. Chats pin the version, and a chat whose version a build
+     lacks waits for its retained Pal release, so raise it only for an incompatible change.
+   - `core: { min: 2, max: 2 }`, the capability API it was written for; `name`, `description` and `order`, its place
+     in Settings → Extensions; `optIn: true` leaves it off until the owner enables it for new chats.
+   - `namespace` and `tools`. Each tool name starts with the namespace prefix and declares `callers: ["tools"]` (Code
+     Mode), its `replay` (`safe` only if repeating it has no external effect), `maxOutputBytes` and, if it reads the
+     chat's granted folders, `permissions: ["project.read"]`. Only tools already on the kernel's direct list may add
+     `"model"`.
+   - `ui`: Settings tabs, workspace `panels`, chat `slots` (`context` or `composer`) and `renderers` for its own
+     `pal.<id>` entries, each naming a component in `ui/`. Icons come from `web/src/lib/icons.ts`. Kernel panel and
+     tab names are refused.
+3. **Add a tool in `server.ts`.** `open(host)` returns the tools the manifest declares, with the same names, replay
+   and callers. Record what the owner should see with
+   `api.commit((tx) => tx.appendEntry(api.conversationId, { kind: "pal.<id>", data }), context)`. The `host` offers
+   narrow services: `settings`, `now()`, folder leases through `authorize`, the chat's `project` and SQL limited to
+   tables the manifest declares. Pal doesn't create tables for plugins, so keep state in settings or entries.
+4. **Add a setting.** `host.settings.get(name)` and `set(name, value)` keep JSON values of at most 16 KiB for this
+   plugin only. `api(request)` answers the owner's requests to `/api/plugins/<id>/…`: validate the body and throw
+   `HttpError` to refuse. The Settings tab calls it with `api.plugin("<id>", method, path, body)` from
+   `web/src/lib/api.ts`.
+5. **Add a panel.** A Svelte 5 component in `ui/` that receives `{ project, chat, workspace }`. It appears after the
+   kernel's panels in chats that selected the plugin; a component that fails to load says so in its place. A
+   renderer receives `{ entry }`.
+6. **List it.** Add one line to `plugins/index.ts`: `export { default as <id> } from "./<id>/server.ts";`. A plugin
+   with `scope: "browser"`, such as `pets`, has only interface pieces, no `server.ts` and no line.
+7. **Build, drain and restart.** Run `pnpm check` and `pnpm build`, let running chats finish, then restart Pal on the
+   new build. A changed plugin changes Pal's implementation identity, so the new build refuses to start while work is
+   unfinished; finish it on the previous build first. An installed Pal takes the new build through
+   [releases](configuration.md#releases).
+8. **Enable and test.** Turn it on in Settings → Extensions for new chats; existing chats keep the selection and
+   versions they started with. `test/capabilities.test.ts` shows the contract checks, and `test/e2e/plugins.test.ts`
+   the browser flow. Run `pnpm test` and `pnpm test:e2e`.
+
+Removing a plugin's line and folder removes its tools and interface. Its settings and entries stay, and chats that
+used it show its entries as a short note.
 
 ## Conventions
 

@@ -198,46 +198,54 @@ core. Capabilities belong in contributions around that core: agent tools, panels
 extras. The goal is for built-in and community extensions to follow the same model, bundled into reusable packages
 people can create, customize and share.
 
-The current catalog is compiled into Pal, not a public plug-in SDK or a downloadable package loader. Custom MCP
-servers are today's way to add tools without rebuilding Pal. Extensions never bypass host policy, and in-process
-code requires full application-code trust.
+Plugins are compiled into Pal; there is no downloadable package or runtime loader. Skills add procedures and MCP
+servers add tools without a rebuild. [Adding capabilities](development.md#adding-capabilities) compares the three
+and walks through writing a plugin.
 
-`src/capabilities/contract.ts` is the plugin contract. The kernel retains authentication, one database owner,
-credentials, grants, approvals, native task/replay policy and release verification. A plugin in `plugins/<id>/`
-supplies a bounded manifest (`manifest.ts`, plain data the web build also reads) and a factory (`server.ts`), not
-registry access or replacement kernel hooks. Its manifest declares identity/version, compatible capability-API range,
-catalog order, an optional Code Mode namespace, tools with their callers, replay, output bounds and permissions, the
-tables its SQL may change or read, and interface components. A tool the model may call directly must already be on the
-kernel's direct list; the plugin cannot add itself. The factory gets narrow host services: folder leases, Pi storage,
-its own settings (JSON values kept under `plugin:<id>:` in `pal_settings`) and SQL limited to its declared tables,
-never the `Pal` object or the database itself, and may answer owner requests under `/api/plugins/<id>/`. Factories may dispose ephemeral resources after durable work stops; failed opens must
-release their own unfinished acquisitions. Previously opened contributions are disposed in reverse order, once,
-including partial-startup failures.
+**Trust model.** A plugin is trusted code in Pal's process and can use any Node API. Its declared permissions,
+callers and tables are policy that the kernel checks at its boundaries, not a sandbox or proof of read-only behavior.
+Review a plugin as Pal's own code. Effectful adapters require further reviewed kernel integration, not a permission
+string supplied by a skill or manifest.
 
-Memory is the plugin in `plugins/memory/`; `plugins/index.ts` is the build-time selection, one line per plugin.
-Removing its line removes its service, native tools, namespace and Context section, not saved data or core
-Context/guidance inspection.
+`src/capabilities/contract.ts` is the plugin contract.
+
+- **The kernel keeps** authentication, one database owner, credentials, grants, approvals, native task/replay policy
+  and release verification. Plugins never get registry access, replacement kernel hooks, the `Pal` object or the
+  database itself.
+- **A plugin** in `plugins/<id>/` supplies a manifest (`manifest.ts`, plain data the web build also reads) and a
+  factory (`server.ts`). The manifest declares identity and version, the compatible capability-API range, catalog
+  order, an optional Code Mode namespace, tools with their callers, replay, output bounds and permissions, the tables
+  its SQL may change or read, and interface components. A tool the model may call directly must already be on the
+  kernel's direct list; the plugin cannot add itself.
+- **Host services:** folder leases, Pi storage, its own settings (JSON values kept under `plugin:<id>:` in
+  `pal_settings`), SQL limited to its declared tables and owner requests under `/api/plugins/<id>/`.
+- **Permissions:** `project.read` is the only declared permission; with it, the kernel checks live folder authority
+  around every native tool execution. It also verifies each tool's declared callers and replay.
+- **Lifecycle:** factories may dispose ephemeral resources after durable work stops; failed opens must release their
+  own unfinished acquisitions. Opened plugins are disposed in reverse order, once, including after a partial-startup
+  failure.
+
+`plugins/index.ts` is the build-time selection, one line per plugin with a server part: memory and research helpers
+today. Add a reviewed plugin's line and rebuild; no runtime directory scan or package install occurs. Removing a line
+removes the plugin's service, native tools, namespace and interface, not its saved data or core Context/guidance
+inspection. Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins.
+
+Interface components are bundled from `plugins/<id>/ui/` at build time, never downloaded. Settings tabs come from
+every plugin in the build; Context sections, workspace panels after the kernel's, composer pieces and renderers for
+the plugin's own `pal.<id>` entries appear only in chats that selected it. In a build without a plugin a chat used,
+those entries show as a short note, and a component that fails to load says so in its place. A browser plugin such as
+pets has no server part or inventory line: only Settings tabs and composer pieces that every chat shows, switched in
+the browser.
+
 Unavailable saved defaults remain visible for explicit removal. Existing chats never silently adopt another capability
 version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid
 new-chat defaults are refused before recording provisioning. Existing creation/admission receipts still deduplicate;
 changing another default never silently upgrades a version pin. Unfinished work also blocks startup under a changed
 release or compiled catalog. Request inspection joins additive `pal.capabilities` identity receipts to the unchanged
 `pal.extensions` wire records, keeping older inspectors readable. Historical records without those identities stay
-historical, without invented digests.
+historical, without invented digests. The implementation digest binds the manifest to the verified **whole Pal
+release**, not an independently upgradable package.
 
-The implementation digest binds the manifest to the verified **whole Pal release**, not an independently upgradable
-package. `project.read` is the only declared permission; with it, the kernel checks live folder authority around
-every native tool execution. It also verifies each tool's declared callers and replay. Trusted source can still use
-Node APIs: declarations and the SQL check are not a sandbox or proof of read-only behavior. Effectful adapters require further reviewed
-kernel integration, not a permission string supplied by a skill or manifest.
-
-Add a reviewed plugin's line to `plugins/index.ts` and rebuild; no runtime directory scan or package install occurs.
-Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins. Its interface components
-are bundled from `plugins/<id>/ui/` at build time and load only in chats that selected it, never downloaded UI: Context
-sections, workspace panels after the kernel's, and renderers for its own `pal.<id>` transcript entries. In a build
-without a plugin a chat used, those entries show as a short note. A component that fails to load says so in its place.
-A browser plugin such as pets has no server part or line in the inventory: only settings tabs and composer pieces that
-every chat shows, switched in the browser.
 `test/capabilities.test.ts` exercises the contract and composition boundaries; `test/e2e/plugins.test.ts` adds the
 test plugin in `test/fixtures/plugins/example/` to a copy of the source and uses it in a browser.
 
