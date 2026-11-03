@@ -40,8 +40,8 @@ available yet. See [adding capabilities](docs/development.md#adding-capabilities
   a local Ollama server. You choose the model and reasoning level per chat. Pal never switches provider or falls back
   to another one on its own.
 - **Projects and workspaces.** A project is either a Pal-managed folder or an existing folder on the server, plus
-  read-only reference folders and uploads from your device. Each chat runs in **Local** (the folder itself),
-  **Worktree** (a separate Git worktree from `HEAD`) or **Read-only** mode.
+  read-only reference folders and uploads from your device, chosen or pasted into the message box. Each chat runs in
+  **Local** (the folder itself), **Worktree** (a separate Git worktree from `HEAD`) or **Read-only** mode.
 - **Agent tools through Code Mode.** The model writes small scripts in a QuickJS sandbox that call host tools: files
   (list, read, find, search, write, edit, attachments), shell commands, project memory, internet tools and the
   browser. Each tool call is a durable task with its own receipt.

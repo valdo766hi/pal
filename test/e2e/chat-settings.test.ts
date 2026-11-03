@@ -796,6 +796,45 @@ describe("chat draft admission", () => {
   });
 });
 
+describe("pasting into the composer", () => {
+  // A 1×1 PNG, as a screenshot or a copied image would put on the clipboard.
+  const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
+
+  it("attaches a pasted image, but leaves a paste that also carries text to the text box", async () => {
+    const { page, base, saved, errors } = await setup(1440);
+    const uploads: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/uploads")) uploads.push(request.url());
+    });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const message = page.getByLabel("Message", { exact: true });
+    await expect.poll(() => message.isEnabled()).toBe(true);
+    const paste = (text: string | undefined) =>
+      message.evaluate(
+        (node, [png, text]) => {
+          const data = new DataTransfer();
+          if (text !== undefined) data.setData("text/plain", text);
+          const bytes = Uint8Array.from(atob(png), (char) => char.charCodeAt(0));
+          data.items.add(new File([bytes], "image.png", { type: "image/png" }));
+          const event = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+          node.dispatchEvent(event);
+          return event.defaultPrevented;
+        },
+        [PNG, text] as const,
+      );
+    expect(await paste(undefined)).toBe(true);
+    await page.getByRole("button", { name: "Remove image.png", exact: true }).waitFor();
+    expect(uploads).toHaveLength(1);
+
+    // Rich documents copy their text along with an image of it: that pastes as text, and nothing more attaches.
+    expect(await paste("a copied table")).toBe(false);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(uploads).toHaveLength(1);
+    expect(await page.getByRole("button", { name: "Remove image.png", exact: true }).count()).toBe(1);
+    expect(errors).toEqual([]);
+  });
+});
+
 describe("MCP catalog consent", () => {
   it.each([1440, 390])(
     "keeps a stale tab's selection but requires the changed definitions to be reviewed at %s px",

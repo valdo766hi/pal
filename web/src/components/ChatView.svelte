@@ -730,6 +730,17 @@
     }
   }
 
+  /**
+   * Files pasted into the composer, such as a screenshot or a copied image, attach like chosen ones. A clipboard that
+   * also holds plain text, as rich documents do along with an image of themselves, pastes that text instead.
+   */
+  function paste(event: ClipboardEvent) {
+    const data = event.clipboardData;
+    if (data === null || data.files.length === 0 || data.types.includes("text/plain")) return;
+    event.preventDefault();
+    void upload([...data.files]);
+  }
+
   function size(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     return bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
@@ -1308,6 +1319,7 @@
           disabled={writing.blocked || !writing.active}
           title="Drafts stay in this tab, across reloads, until you send them or sign out."
           bind:value={writing.text}
+          onpaste={paste}
           onfocus={() => (typing = true)}
           onblur={() => (typing = false)}
           onkeydown={onKey}></textarea>
