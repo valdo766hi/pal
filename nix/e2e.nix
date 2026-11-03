@@ -19,6 +19,7 @@ tests.overrideAttrs {
     FONTCONFIG_FILE = makeFontsConf { fontDirectories = [ dejavu_fonts ]; };
     # The packaged owner browser runtime, so its sandbox and egress are tested with the exact programs Pal ships.
     PAL_BASH = lib.getExe bash;
+    PAL_EXPECTED_CHROME = pal.chromeForTesting;
   }
   // pal.browserEnv;
   buildPhase = ''

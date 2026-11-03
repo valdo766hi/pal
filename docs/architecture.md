@@ -163,8 +163,9 @@ folders and away from Pal's data. Guidance readers separately authorize only the
 
 ## Browser
 
-`src/core/browser.ts` starts one Chromium per project on demand, using the headless shell that matches
-`playwright-core`.
+`src/core/browser.ts` starts one Chromium per project on demand, driven by `playwright-core`. It uses Chrome for
+Testing's stable headless shell pinned in `nix/package.nix`, not the older build Playwright bundles, because it renders
+untrusted pages; update that pin at each Chrome security release.
 
 - **Sandbox.** It runs inside bubblewrap with every namespace unshared. It sees only the read-only Nix store, a
   private `/tmp` and its own profile, and it has no network.
