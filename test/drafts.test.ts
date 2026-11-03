@@ -330,8 +330,43 @@ describe("drafts across reloads", () => {
         pending: { chatId: "elsewhere" },
       }),
     );
+    const valid = { v: 1, revision: 1, text: "x", attachments: [], whenBusy: "followUp", feedback: [] };
+    store.setItem("pal.draft.three", "null");
+    store.setItem("pal.draft.four", JSON.stringify({ ...valid, pending: null }));
     expect(new ChatDrafts(store).open("one")).toMatchObject({ text: "", pending: undefined });
     expect(store.getItem("pal.draft.one")).toBeNull();
-    expect(new ChatDrafts(store).open("two")).toMatchObject({ text: "", pending: undefined });
+    for (const id of ["two", "three", "four"]) {
+      expect(new ChatDrafts(store).open(id)).toMatchObject({ text: "", pending: undefined });
+      expect(store.getItem(`pal.draft.${id}`)).toBeNull();
+    }
+  });
+
+  it("says a draft would be lost when the tab's storage can't be reached or read", () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("storage is disabled", "SecurityError");
+      },
+    });
+    try {
+      const draft = new ChatDrafts().open("one");
+      expect(draft.saved).toBe(true);
+      draft.text = "would be lost";
+      expect(draft.saved).toBe(false);
+      draft.text = "";
+      expect(draft.saved).toBe(true);
+    } finally {
+      if (original === undefined) Reflect.deleteProperty(globalThis, "sessionStorage");
+      else Object.defineProperty(globalThis, "sessionStorage", original);
+    }
+    const unreadable = new MemoryStore();
+    unreadable.getItem = () => {
+      throw new Error("read failed");
+    };
+    const draft = new ChatDrafts(unreadable).open("one");
+    draft.text = "kept only here";
+    expect(draft.saved).toBe(false);
+    expect(unreadable.items.size).toBe(0);
   });
 });

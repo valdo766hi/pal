@@ -51,15 +51,20 @@ const receipt = (value: unknown): value is ReviewFeedback =>
   ["normal", "include-ignored"].includes((value as ReviewFeedback).scope);
 const busy = (value: unknown): value is BusyMode => value === "followUp" || value === "steer";
 
+const object = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 /** A saved draft this code wrote, or undefined for anything else; storage is shared with whatever runs on the origin. */
-function parse(raw: string | null, chatId: string): Saved | undefined {
-  let value: Partial<Saved>;
+function parse(raw: string, chatId: string): Saved | undefined {
+  let parsed: unknown;
   try {
-    value = raw === null ? {} : (JSON.parse(raw) as Partial<Saved>);
+    parsed = JSON.parse(raw);
   } catch {
     return undefined;
   }
-  const pending = value.pending;
+  if (!object(parsed)) return undefined;
+  const value = parsed as Partial<Saved>;
+  const pending: unknown = value.pending;
   const valid =
     value.v === 1 &&
     Number.isSafeInteger(value.revision) &&
@@ -79,10 +84,12 @@ function parse(raw: string | null, chatId: string): Saved | undefined {
     Array.isArray(value.feedback) &&
     value.feedback.every((block) => typeof block?.text === "string" && receipt(block.receipt)) &&
     (pending === undefined ||
-      (pending.chatId === chatId &&
+      (object(pending) &&
+        pending.chatId === chatId &&
         typeof pending.requestId === "string" &&
         Number.isSafeInteger(pending.revision) &&
-        typeof pending.body?.text === "string" &&
+        object(pending.body) &&
+        typeof pending.body.text === "string" &&
         strings(pending.body.attachments) &&
         busy(pending.body.whenBusy) &&
         typeof pending.body.configuration === "string" &&
@@ -94,7 +101,7 @@ export class ChatDraft {
   readonly chatId: string;
   readonly blocked: boolean;
   readonly #controller = new AbortController();
-  readonly #store: DraftStore | undefined;
+  #store: DraftStore | undefined;
   #active = $state(true);
   #text = $state("");
   #attachments = $state.raw<readonly Readonly<Upload>[]>([]);
@@ -120,7 +127,8 @@ export class ChatDraft {
     try {
       raw = this.#store?.getItem(KEY + chatId) ?? null;
     } catch {
-      this.saved = false;
+      // A store that can't be read can't be trusted to keep anything either.
+      this.#store = undefined;
     }
     if (raw === null) return;
     const saved = parse(raw, chatId);
@@ -143,10 +151,15 @@ export class ChatDraft {
 
   /** Mirrors this draft to the tab's store; an empty draft leaves nothing behind. Inactive drafts never write. */
   #save() {
-    if (!this.active || this.#store === undefined) return;
+    if (!this.active) return;
+    const empty = this.#text === "" && this.#attachments.length === 0 && this.#pending === undefined;
+    // Without a store, nothing survives a reload: say so as soon as there is something to lose.
+    if (this.#store === undefined) {
+      this.saved = empty;
+      return;
+    }
     try {
-      if (this.#text === "" && this.#attachments.length === 0 && this.#pending === undefined)
-        this.#store.removeItem(KEY + this.chatId);
+      if (empty) this.#store.removeItem(KEY + this.chatId);
       else
         this.#store.setItem(
           KEY + this.chatId,
