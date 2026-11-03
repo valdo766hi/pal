@@ -300,7 +300,13 @@ function pluginSettings(database: SqliteDatabase, id: string): PluginSettings {
   return {
     async get(name) {
       const row = await database.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = ?", key(name));
-      return row === undefined ? undefined : JSON.parse(row.value);
+      if (row === undefined) return undefined;
+      try {
+        return JSON.parse(row.value);
+      } catch {
+        // Neither the stored value nor the parser's message, which can quote it, belongs in an error.
+        throw new Error(`Capability ${id} setting ${name} is corrupt.`);
+      }
     },
     async set(name, value) {
       const text = JSON.stringify(value);

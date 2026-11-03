@@ -58,8 +58,16 @@ const SourceRecord = Type.Union([
 ]);
 type Source = Static<typeof SourceRecord>;
 const VersionBody = Type.Object({ ...MemoryBody.properties, source: SourceRecord }, { additionalProperties: false });
-const decodeSource = (row: Pick<Row, "title" | "body" | "source">) =>
-  validate(VersionBody, { title: row.title, body: row.body, source: JSON.parse(row.source) }).source;
+const decodeSource = (row: Pick<Row, "title" | "body" | "source">) => {
+  let source: unknown;
+  try {
+    source = JSON.parse(row.source);
+  } catch (cause) {
+    // A memory is never shown without its source, so a corrupt one fails closed.
+    throw new Error("A stored memory source is corrupt.", { cause });
+  }
+  return validate(VersionBody, { title: row.title, body: row.body, source }).source;
+};
 export type MemoryItem = {
   id: string;
   revision: number;

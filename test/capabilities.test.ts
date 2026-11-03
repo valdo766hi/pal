@@ -617,6 +617,14 @@ describe("compiled capability contract", () => {
     for (const value of ["x".repeat(16 * 1024), undefined])
       await expect(settings.set("echo", value)).rejects.toThrow("at most 16 KiB");
     expect(await settings.get("echo")).toEqual({ prefix: "» " });
+    // A corrupt row names the plugin and setting, never its stored value.
+    await f.pal.store.database.run(
+      "UPDATE pal_settings SET value = '{\"secret-value' WHERE key = 'plugin:example:echo'",
+    );
+    const corrupt = await settings.get("echo").catch((error: unknown) => error);
+    expect(corrupt).toBeInstanceOf(Error);
+    expect((corrupt as Error).message).toBe("Capability example setting echo is corrupt.");
+    expect(JSON.stringify(corrupt, Object.getOwnPropertyNames(corrupt))).not.toContain("secret-value");
   });
 
   it("keeps a plugin's SQL to its declared tables and its requests to its own ID", async () => {

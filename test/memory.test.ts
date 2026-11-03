@@ -122,6 +122,16 @@ describe("source-linked curated memory", () => {
     });
   });
 
+  it("fails closed on a corrupt stored source instead of showing the memory without it", async () => {
+    const f = await setup();
+    await projectMemory(f.pal.capabilities).save(f.project.id, "memory-corrupt", note(), context);
+    // SQLite's JSON functions accept JSON5 that JSON.parse rejects, so the row passes the query and fails to decode.
+    await f.pal.store.database.run(`UPDATE pal_memory_versions SET source = '{kind:"owner"}'`);
+    await expect(projectMemory(f.pal.capabilities).list(f.project.id, context)).rejects.toThrow(
+      "A stored memory source is corrupt.",
+    );
+  });
+
   it("retrieval-rank-v1 keeps an older relevant constraint ahead of recent distractors across compaction and reopen", async () => {
     const f = await setup();
     const body = "Preserve the zircon quorum ledger; the unresolved step is to repair the planner.";
