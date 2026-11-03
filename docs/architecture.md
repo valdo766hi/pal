@@ -208,9 +208,9 @@ supplies a bounded manifest (`manifest.ts`, plain data the web build also reads)
 registry access or replacement kernel hooks. Its manifest declares identity/version, compatible capability-API range,
 catalog order, an optional Code Mode namespace, tools with their callers, replay, output bounds and permissions, the
 tables its SQL may change or read, and interface components. A tool the model may call directly must already be on the
-kernel's direct list; the plugin cannot add itself. The factory gets narrow host services: folder leases, Pi storage
-and SQL limited to its declared tables, never the `Pal` object or the database itself, and may answer owner requests
-under `/api/plugins/<id>/`. Factories may dispose ephemeral resources after durable work stops; failed opens must
+kernel's direct list; the plugin cannot add itself. The factory gets narrow host services: folder leases, Pi storage,
+its own settings (JSON values kept under `plugin:<id>:` in `pal_settings`) and SQL limited to its declared tables,
+never the `Pal` object or the database itself, and may answer owner requests under `/api/plugins/<id>/`. Factories may dispose ephemeral resources after durable work stops; failed opens must
 release their own unfinished acquisitions. Previously opened contributions are disposed in reverse order, once,
 including partial-startup failures.
 

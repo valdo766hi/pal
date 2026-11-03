@@ -158,6 +158,8 @@ export type CapabilityHost = {
   /** This plugin's options from the embedding, such as lower test bounds; the plugin validates them. */
   options?: unknown;
   storage: Storage;
+  /** This plugin's own settings, kept in Pal's database and readable by its tools and owner requests. */
+  settings: PluginSettings;
   folders: FolderGrants;
   deny: readonly string[];
   privateFiles: PrivateFiles;
@@ -165,10 +167,15 @@ export type CapabilityHost = {
   authorize(api: ToolExecutionApi, context: Context): Promise<FolderLease>;
 };
 /** What the kernel opens a plugin with: its services, before they are narrowed to that plugin. */
-export type KernelServices = Omit<CapabilityHost, "sql" | "options"> & {
+export type KernelServices = Omit<CapabilityHost, "sql" | "options" | "settings"> & {
   database: SqliteDatabase;
   /** Options by plugin ID. */
   options?: Readonly<Record<string, unknown>>;
+};
+/** JSON values by name (`^[a-z][a-z0-9.-]{0,63}$`), at most 16 KiB each; `get` returns undefined until set. */
+export type PluginSettings = {
+  get(name: string): Promise<unknown>;
+  set(name: string, value: unknown): Promise<void>;
 };
 /** One owner request under `/api/plugins/<id>/`; `path` is what follows the plugin's ID. */
 export type CapabilityRequest = {
@@ -192,6 +199,7 @@ export type CompiledCapability = {
   open(host: CapabilityHost): CapabilityRuntime | Promise<CapabilityRuntime>;
 };
 const KERNEL_PANELS = new Set(["Files", "Changes", "Terminal", "Browser", "Context"]);
+const KERNEL_SETTINGS = new Set(["general", "models", "mcp", "extensions"]);
 const reserved = new Set([
   "files",
   "shell",
@@ -232,6 +240,8 @@ export function capabilityManifest(input: unknown): CapabilityManifest {
   const panels = manifest.ui?.panels ?? [];
   if (panels.some((panel) => KERNEL_PANELS.has(panel.id)))
     throw new Error(`Capability ${manifest.id} cannot replace a kernel panel.`);
+  if (manifest.ui?.settings?.some((tab) => KERNEL_SETTINGS.has(tab.id)) === true)
+    throw new Error(`Capability ${manifest.id} cannot replace a kernel settings tab.`);
   if (
     manifest.ui?.renderers?.some(
       (renderer) => renderer.entry !== manifest.native && !renderer.entry.startsWith(`${manifest.native}.`),
@@ -278,6 +288,33 @@ export function capabilityIdentity(manifest: CapabilityManifest, release: string
  * SQL a plugin's statements may run: reads name only its declared tables, changes only its own. A check that keeps
  * trusted code to its contract, not a sandbox; anything else, including multi-statement `exec`, is refused.
  */
+const SETTING_NAME = /^[a-z][a-z0-9.-]{0,63}$/;
+const MAX_SETTING_BYTES = 16 * 1024;
+
+/** A plugin's settings live in `pal_settings` under `plugin:<id>:`, a prefix no kernel setting uses. */
+function pluginSettings(database: SqliteDatabase, id: string): PluginSettings {
+  const key = (name: string) => {
+    if (!SETTING_NAME.test(name)) throw new Error(`Capability ${id} used an invalid setting name.`);
+    return `plugin:${id}:${name}`;
+  };
+  return {
+    async get(name) {
+      const row = await database.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = ?", key(name));
+      return row === undefined ? undefined : JSON.parse(row.value);
+    },
+    async set(name, value) {
+      const text = JSON.stringify(value);
+      if (text === undefined || Buffer.byteLength(text) > MAX_SETTING_BYTES)
+        throw new Error(`Capability ${id} setting ${name} must be JSON of at most 16 KiB.`);
+      await database.run(
+        "INSERT INTO pal_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        key(name),
+        text,
+      );
+    },
+  };
+}
+
 function scopedSql(database: SqliteDatabase, manifest: CapabilityManifest): SqliteDatabase {
   const owns = new Set(manifest.storage?.owns ?? []);
   const reads = new Set([...owns, ...(manifest.storage?.reads ?? [])]);
@@ -346,6 +383,7 @@ export class CompiledCapabilities {
         const runtime = await definition.open({
           ...services,
           sql: scopedSql(database, manifest),
+          settings: pluginSettings(database, manifest.id),
           options: options?.[manifest.id],
         });
         const record = { manifest, runtime, extension: defineExtension({ name: manifest.native }) };

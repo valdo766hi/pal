@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { build as bundle } from "esbuild";
 import { type Browser, chromium } from "playwright-core";
 import { build } from "vite";
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
 import { startServer } from "../../src/core/server.ts";
@@ -69,7 +69,7 @@ afterAll(async () => {
 });
 
 describe("a plugin added as its folder and inventory line", () => {
-  it("shows its panel and entries, survives a failed panel import and leaves a note once removed", async () => {
+  it("shows its panel, setting and entries, survives a failed panel import and leaves a note once removed", async () => {
     const data = await realpath(await mkdtemp(join(tmpdir(), "pal-plugin-data-")));
     const options = { dataRoot: join(data, "data"), guidanceHome: join(data, "home") };
     let close: () => Promise<unknown> = async () => {};
@@ -114,6 +114,13 @@ describe("a plugin added as its folder and inventory line", () => {
       await first.page.getByText("Example echo: from the plugin").waitFor();
       await first.page.getByRole("button", { name: "Example", exact: true }).click();
       await first.page.getByText("Example panel for Plugins · With example").waitFor();
+      // Its Settings tab keeps the owner's value through the plugin's own route.
+      await first.page.goto(`${base}/#/settings/example`);
+      await first.page.getByLabel("Echo prefix").fill("» ");
+      await first.page.getByRole("button", { name: "Save prefix" }).click();
+      await first.page.getByRole("status").filter({ hasText: "Saved." }).waitFor();
+      await first.page.reload();
+      await expect.poll(() => first.page.getByLabel("Echo prefix").inputValue()).toBe("» ");
       await first.session.close();
 
       // A panel whose code doesn't load reports it in place; the rest of the shell keeps working.

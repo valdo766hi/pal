@@ -18,6 +18,7 @@ import {
   CompiledCapabilities,
   type KernelServices,
   type CompiledCapability,
+  type PluginSettings,
 } from "../src/capabilities/contract.ts";
 import { openPal, type Pal } from "../src/core/app.ts";
 import type { Chat } from "../src/core/chats.ts";
@@ -212,11 +213,22 @@ describe("compiled capability contract", () => {
         selected: [{ id: "example", version: 1 }],
         implementations: [{ id: "example", version: 1, digest: item?.implementation }],
       });
+    // The owner's setting, saved through the plugin's own route, reaches its tool after a restart.
+    const settings = (method: string, body?: unknown) =>
+      f.pal.capabilities.request(
+        "example",
+        { method, path: ["settings"], query: new URLSearchParams(), body },
+        context,
+      );
+    expect(await settings("GET")).toEqual({ prefix: "" });
+    await expect(settings("PUT", { prefix: "x".repeat(33) })).rejects.toThrow();
+    await settings("PUT", { prefix: "» " });
     await f.reopen();
+    expect(await settings("GET")).toEqual({ prefix: "» " });
     expect((await f.pal.extensions.view()).selected).toEqual([{ id: "example", version: 1 }]);
     expect(await f.pal.extensions.pins(chat.conversationId, f.pal.harness, context)).toEqual(pins);
     expect((await f.run(chat, 'return await tools.example_echo({text:"after restart"});')).output).toContain(
-      "after restart",
+      "» after restart",
     );
     await Promise.all([f.pal.close(), f.pal.close()]);
     expect(events).toEqual([
@@ -530,6 +542,7 @@ describe("compiled capability contract", () => {
     for (const [invalid, message] of [
       [{ ...manifest, native: "pal.echo" }, "native name pal.example"],
       [{ ...manifest, ui: { panels: [panel] } }, "kernel panel"],
+      [{ ...manifest, ui: { settings: [{ ...panel, id: "general", label: "General" }] } }, "kernel settings tab"],
       [renderer("pal.memory"), "its own entries"],
       [renderer("pal.examples"), "its own entries"],
     ] as const)
@@ -549,8 +562,8 @@ describe("compiled capability contract", () => {
       const dispose = vi.fn();
       const definition: CompiledCapability = {
         ...exampleCapability,
-        open: () => {
-          const runtime = exampleCapability.open();
+        open: (services) => {
+          const runtime = exampleCapability.open(services);
           return {
             tools: runtime.tools.map((tool) => ({
               ...tool,
@@ -563,13 +576,47 @@ describe("compiled capability contract", () => {
       await expect(CompiledCapabilities.open([definition], host(f.pal))).rejects.toThrow("declared replay and callers");
       expect(dispose).toHaveBeenCalledTimes(1);
     }
-    const opened = await CompiledCapabilities.open([exampleCapability], host(f.pal));
+    let tools: ReturnType<typeof exampleCapability.open>["tools"] = [];
+    const opened = await CompiledCapabilities.open(
+      [{ ...exampleCapability, open: (services) => ({ tools: (tools = exampleCapability.open(services).tools) }) }],
+      host(f.pal),
+    );
     cleanups.push(() => opened.close());
     const registry = createRegistry();
-    const kernel = defineExtension({ name: "pal.policy", tools: exampleCapability.open().tools });
+    const kernel = defineExtension({ name: "pal.policy", tools });
     registry.install(kernel);
     expect(() => opened.install(registry)).toThrow("collides");
     expect(registry.snapshot().installed()).toEqual([kernel]);
+  });
+
+  it("keeps a plugin's settings bounded and under its own prefix", async () => {
+    const f = await fixture([]);
+    let settings: PluginSettings | undefined;
+    const opened = await CompiledCapabilities.open(
+      [
+        {
+          ...exampleCapability,
+          open: (services) => {
+            settings = services.settings;
+            return exampleCapability.open(services);
+          },
+        },
+      ],
+      host(f.pal),
+    );
+    cleanups.push(() => opened.close());
+    if (settings === undefined) throw new Error("missing plugin settings");
+    expect(await settings.get("echo")).toBeUndefined();
+    await settings.set("echo", { prefix: "» " });
+    expect(await settings.get("echo")).toEqual({ prefix: "» " });
+    expect(await f.pal.store.database.all("SELECT key FROM pal_settings WHERE key LIKE 'plugin:%'")).toEqual([
+      { key: "plugin:example:echo" },
+    ]);
+    for (const name of ["", "Echo", ":extensions:selection", "x".repeat(65)])
+      await expect(settings.get(name)).rejects.toThrow("invalid setting name");
+    for (const value of ["x".repeat(16 * 1024), undefined])
+      await expect(settings.set("echo", value)).rejects.toThrow("at most 16 KiB");
+    expect(await settings.get("echo")).toEqual({ prefix: "» " });
   });
 
   it("keeps a plugin's SQL to its declared tables and its requests to its own ID", async () => {
@@ -579,7 +626,7 @@ describe("compiled capability contract", () => {
       manifest: { ...exampleCapability.manifest, storage: { owns: ["pal_example_notes"], reads: ["pal_projects"] } },
       open: (services) => {
         sql = services.sql;
-        return exampleCapability.open();
+        return exampleCapability.open(services);
       },
     };
     const opened = await CompiledCapabilities.open([scoped], host(f.pal));
@@ -662,8 +709,8 @@ describe("compiled capability contract", () => {
     await expect(CompiledCapabilities.open([first, second], host(f.pal))).rejects.toThrow("second open failed");
     expect(events).toEqual(["open:example", "dispose:example"]);
     const dispose = vi.fn();
-    second.open = () => ({
-      tools: exampleCapability.open().tools.map((tool) => ({ ...tool, name: "second_echo" })),
+    second.open = (services) => ({
+      tools: exampleCapability.open(services).tools.map((tool) => ({ ...tool, name: "second_echo" })),
       dispose: () => {
         dispose();
         events.push("dispose:second");
@@ -692,7 +739,7 @@ describe("compiled capability contract", () => {
       pal = await openPal(
         { dataRoot: join(root, "data"), installRoot: "/nonexistent-install", guidanceHome: join(root, "home") },
         context,
-        [{ ...exampleCapability, open: () => ({ ...exampleCapability.open(), dispose }) }],
+        [{ ...exampleCapability, open: (host) => ({ ...exampleCapability.open(host), dispose }) }],
       );
       const closeMcp = pal.mcp.close.bind(pal.mcp);
       const mcp = vi.spyOn(pal.mcp, "close").mockImplementation(async () => {

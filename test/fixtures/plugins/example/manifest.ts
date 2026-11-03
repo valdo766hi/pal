@@ -14,6 +14,7 @@ export default {
     { name: "example_echo", replay: "safe", callers: ["tools"], permissions: ["project.read"], maxOutputBytes: 4096 },
   ],
   ui: {
+    settings: [{ id: "example", label: "Example echo", icon: "layers", component: "ExampleSettings", order: 70 }],
     panels: [{ id: "Example", icon: "layers", component: "ExamplePanel", order: 10 }],
     renderers: [{ entry: "pal.example", component: "ExampleResult", order: 10 }],
   },
