@@ -28,7 +28,7 @@ import { openStore, type Store } from "../storage/store.ts";
 import { CommandApprovals } from "./approvals.ts";
 import { BROWSER_NAMESPACE, browserTools } from "../pi/browser-tools.ts";
 import { type BrowserRuntime, browserRuntime, ProjectBrowsers } from "./browser.ts";
-import { chatConfiguration, ChatService } from "./chats.ts";
+import { type Barrier, chatConfiguration, ChatService } from "./chats.ts";
 import { helperBudget, HelperLinks, type HelperLimits } from "./delegation.ts";
 import { BuiltinExtensions, PLUGINS, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
@@ -82,6 +82,8 @@ export type PalOptions = {
   readonly helperLimits?: HelperLimits;
   /** The Harness clock, which also times script and helper deadlines; tests pass a fake one. */
   readonly now?: () => number;
+  /** Pauses admission between Pal's and Pi's commits; tests use it to reorder them deterministically. */
+  readonly admissionBarrier?: (point: Barrier) => void | Promise<void>;
 };
 
 /** One running installation: the store's single owner and every service built on it. */
@@ -406,14 +408,21 @@ export async function openPal(
           list: (api, ctx) => folders.forRun(api, ctx),
           open: (api, ctx, id) => folders.forTool(api, ctx, id),
         },
-        // Only attachments this chat sent with an admitted input, which the model has seen.
+        // Only attachments this chat sent with an input Pi accepted, which the model has seen. Pal's own receipt can
+        // trail Pi's commit, so an input still admitting counts once Pi holds its submission.
         attachment: async (conversation, id, offset, limit) => {
-          const chat = await database.get<{ project: string }>(
-            "SELECT c.project_id AS project FROM pal_chats c JOIN pal_admissions a ON a.chat_id = c.id WHERE c.conversation_id = ? AND c.deleted_at IS NULL AND a.state = 'admitted' AND EXISTS (SELECT 1 FROM json_each(a.intent, '$.attachments') WHERE value = ?)",
+          const inputs = await database.all<{ project: string; request: string; state: string }>(
+            "SELECT c.project_id AS project, a.request_id AS request, a.state FROM pal_chats c JOIN pal_admissions a ON a.chat_id = c.id WHERE c.conversation_id = ? AND c.deleted_at IS NULL AND a.state IN ('admitted', 'admitting') AND EXISTS (SELECT 1 FROM json_each(a.intent, '$.attachments') WHERE value = ?)",
             conversation,
             id,
           );
-          return chat === undefined ? undefined : uploads.read(chat.project, id, offset, limit);
+          for (const input of inputs)
+            if (
+              input.state === "admitted" ||
+              (await store.storage.submissionByRequest(conversation, input.request, context)) !== undefined
+            )
+              return uploads.read(input.project, id, offset, limit);
+          return undefined;
         },
       }),
     );
@@ -571,6 +580,7 @@ export async function openPal(
         },
         attachments: uploads,
         feedback: changes,
+        ...(options.admissionBarrier === undefined ? {} : { barrier: options.admissionBarrier }),
         folderScope: (projectId, chatId) => folders.capture(projectId, chatId),
         extensions: () => extensions.capture(),
         checkExtensions: (selected) => extensions.check(selected),

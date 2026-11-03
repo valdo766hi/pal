@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { openPal } from "../src/core/app.ts";
+import { openPal, type PalOptions } from "../src/core/app.ts";
 import type { Chat } from "../src/core/chats.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -20,11 +20,16 @@ const PNG = Buffer.from(
   "base64",
 );
 
-async function setup() {
+async function setup(admissionBarrier?: PalOptions["admissionBarrier"]) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pal-attachments-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const pal = await openPal(
-    { dataRoot: join(root, "data"), installRoot: "/nonexistent-install", guidanceHome: join(root, "home") },
+    {
+      dataRoot: join(root, "data"),
+      installRoot: "/nonexistent-install",
+      guidanceHome: join(root, "home"),
+      ...(admissionBarrier === undefined ? {} : { admissionBarrier }),
+    },
     context,
   );
   cleanups.push(() => pal.close());
@@ -124,6 +129,18 @@ return [image.type, image.mimeType, image.data === "${PNG.toString("base64")}"].
       const refused = await f.send(stranger, [read({ id: image.id })]);
       expect(refused.results[0]).toContain(`this chat sent no attachment ${image.id}`);
     }
+  });
+
+  it("reads an input's own attachment while Pal's acknowledgement still trails Pi's commit", async () => {
+    // Pi runs the whole turn before Pal records that it admitted the input; the barrier runs only after setup returns.
+    const f: Awaited<ReturnType<typeof setup>> = await setup(async (point) => {
+      if (point === "input-submitted") await f.pal.harness.waitForIdle(context);
+    });
+    const notes = await f.upload("late.txt", "text/plain", Buffer.from("first line\nsecond line\n"));
+    const other = await f.upload("unsent.txt", "text/plain", Buffer.from("never sent\n"));
+    const sent = await f.send(await f.chat(), [read({ id: notes.id, offset: 2 }), read({ id: other.id })], [notes.id]);
+    expect(sent.results[0]).toContain("2\tsecond line");
+    expect(sent.results[1]).toContain(`this chat sent no attachment ${other.id}`);
   });
 
   it("fails only the read for a missing or damaged payload", async () => {
