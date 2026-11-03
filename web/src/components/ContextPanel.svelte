@@ -11,7 +11,7 @@
     type Workspace,
   } from "../lib/api.ts";
   import Icon from "../lib/Icon.svelte";
-  import { sections } from "../lib/plugins.ts";
+  import { slots } from "../lib/plugins.ts";
   import InstructionSources from "./InstructionSources.svelte";
   import SkillSources from "./SkillSources.svelte";
   import WorkingGoal from "./WorkingGoal.svelte";
@@ -238,7 +238,7 @@
         </details>
       </section>
     {/if}
-    {#each sections("context", extensions?.selected ?? []) as section (section.key)}
+    {#each slots("context", extensions?.selected ?? []) as section (section.key)}
       {#await section.load()}<p class="sub" role="status">Loading {section.name}…</p>
       {:then { default: Section }}<Section {project} {chat} {workspace} {info} {folders} {refreshed} />
       {:catch failure}<p role="alert">Couldn't load {section.name}: {String(failure)}</p>{/await}

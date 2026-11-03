@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PETS, type PetId, type Pose } from "../lib/pets.ts";
+  import { PETS, type PetId, type Pose } from "./pets.ts";
   import PetSprite from "./PetSprite.svelte";
 
   let { id, running, active }: { id: string; running: boolean; active: boolean } = $props();

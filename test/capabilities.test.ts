@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -24,6 +24,8 @@ import type { Chat } from "../src/core/chats.ts";
 import { BuiltinExtensions } from "../src/core/extensions.ts";
 import { FileAccessError } from "../src/core/files.ts";
 import { PrivateFiles } from "../src/core/file-policy.ts";
+import * as inventory from "../plugins/index.ts";
+import { ICONS } from "../web/src/lib/icons.ts";
 import memoryCapability, { projectMemory } from "../plugins/memory/server.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -124,6 +126,29 @@ function traced(base: CompiledCapability, events: string[], output?: string): Co
 }
 
 describe("compiled capability contract", () => {
+  it("keeps every plugin folder valid, with its components, and only server plugins in the server inventory", async () => {
+    const root = join(import.meta.dirname, "../plugins");
+    const servers = Object.values(inventory).map((plugin) => plugin.manifest.id);
+    const folders = (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+    expect(folders.map((entry) => entry.name)).toEqual(expect.arrayContaining(["memory", "helpers", "pets"]));
+    for (const folder of folders) {
+      const module: { default: unknown } = await import(pathToFileURL(join(root, folder.name, "manifest.ts")).href);
+      const manifest = capabilityManifest(module.default);
+      expect(manifest.id).toBe(folder.name);
+      expect(servers.includes(manifest.id)).toBe(manifest.scope !== "browser");
+      for (const item of [...(manifest.ui?.slots ?? []), ...(manifest.ui?.settings ?? [])])
+        await access(join(root, folder.name, "ui", `${item.component}.svelte`));
+      for (const item of manifest.ui?.settings ?? []) expect(Object.keys(ICONS)).toContain(item.icon);
+    }
+    const { id, version, native, name, description, core, order } = exampleCapability.manifest;
+    const bare = { id, version, native, name, description, core, order, scope: "browser" };
+    expect(() => capabilityManifest({ ...bare, tools: exampleCapability.manifest.tools })).toThrow("browser-only");
+    const f = await fixture([]);
+    await expect(
+      CompiledCapabilities.open([{ manifest: capabilityManifest(bare), open: () => ({}) }], host(f.pal)),
+    ).rejects.toThrow("no server part");
+  });
+
   it("registers the bounded opt-in template with host-owned grants, settings and implementation identities", async () => {
     const events: string[] = [];
     const f = await fixture([traced(exampleCapability, events)]);

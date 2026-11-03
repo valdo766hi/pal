@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { PETS, type PetId, type Pose } from "../lib/pets.ts";
-  import { app, choosePet } from "../lib/state.svelte.ts";
+  import { PETS, type PetId, type Pose } from "./pets.ts";
+  import { choosePet, pet as choice } from "./choice.svelte.ts";
   import PetSprite from "./PetSprite.svelte";
 
   const pets = Object.entries(PETS) as [PetId, (typeof PETS)[PetId]][];
-  const chosen: PetId = $derived(Object.hasOwn(PETS, app.pet.id) ? (app.pet.id as PetId) : "abuy");
+  const chosen: PetId = $derived(Object.hasOwn(PETS, choice.id) ? (choice.id as PetId) : "abuy");
   const moments: [Pose, string][] = [
     ["sit", "While you're here"],
     ["work", "While Pal works"],
@@ -30,8 +30,8 @@
       type="checkbox"
       role="switch"
       aria-label="Show the pet on the composer"
-      checked={app.pet.enabled}
-      onchange={(event) => choosePet({ ...app.pet, enabled: event.currentTarget.checked })}
+      checked={choice.enabled}
+      onchange={(event) => choosePet({ ...choice, enabled: event.currentTarget.checked })}
     />
   </div>
   <div class="choices" role="radiogroup" aria-label="Pet">
@@ -42,8 +42,8 @@
           name="pet"
           value={id}
           checked={chosen === id}
-          disabled={!app.pet.enabled}
-          onchange={() => choosePet({ ...app.pet, id })}
+          disabled={!choice.enabled}
+          onchange={() => choosePet({ ...choice, id })}
         />
         <span class="stage"><PetSprite {pet} pose="sit" scale={4} /></span>
         <span class="name">{pet.name}</span>

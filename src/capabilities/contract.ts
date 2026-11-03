@@ -20,6 +20,7 @@ import { MODEL_TOOLS } from "../pi/codemode.ts";
 export const CAPABILITY_API = 2;
 const Order = Type.Integer({ minimum: 0, maximum: 1000 });
 const Table = Type.String({ pattern: "^pal_[a-z0-9_]{1,59}$" });
+const Component = Type.String({ pattern: "^[A-Z][A-Za-z0-9]{0,63}$" });
 const Manifest = Type.Object(
   {
     id: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
@@ -33,6 +34,11 @@ const Manifest = Type.Object(
     ),
     /** Its place among the kernel's contributions and other plugins. */
     order: Order,
+    /**
+     * `browser`: interface pieces every chat shows, switched in the browser: no tools, storage or server part, and
+     * never selected per chat.
+     */
+    scope: Type.Optional(Type.Literal("browser")),
     namespace: Type.Optional(
       Type.Object(
         {
@@ -72,18 +78,30 @@ const Manifest = Type.Object(
         { additionalProperties: false },
       ),
     ),
-    /** Svelte components under ui/, shown only in chats that selected the plugin. */
+    /** Svelte components under ui/; chat slots show only in chats that selected the plugin. */
     ui: Type.Optional(
       Type.Object(
         {
-          slots: Type.Optional(
+          /** Settings tabs; `id` is the tab's route. */
+          settings: Type.Optional(
             Type.Array(
               Type.Object(
                 {
-                  slot: Type.Enum(["context"]),
-                  component: Type.String({ pattern: "^[A-Z][A-Za-z0-9]{0,63}$" }),
+                  id: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
+                  label: Type.String({ minLength: 1, maxLength: 40 }),
+                  icon: Type.String({ pattern: "^[a-z][a-zA-Z0-9]{0,31}$" }),
+                  component: Component,
                   order: Order,
                 },
+                { additionalProperties: false },
+              ),
+              { maxItems: 4 },
+            ),
+          ),
+          slots: Type.Optional(
+            Type.Array(
+              Type.Object(
+                { slot: Type.Enum(["context", "composer"]), component: Component, order: Order },
                 { additionalProperties: false },
               ),
               { maxItems: 8 },
@@ -167,6 +185,14 @@ export function capabilityManifest(input: unknown): CapabilityManifest {
     throw new Error(`Capability ${manifest.id} cannot replace a core contribution.`);
   const own = manifest.id.replaceAll("-", "_");
   const { namespace, tools = [], storage } = manifest;
+  if (
+    manifest.scope === "browser" &&
+    (namespace !== undefined ||
+      tools.length > 0 ||
+      storage !== undefined ||
+      manifest.ui?.slots?.some((slot) => slot.slot !== "composer") === true)
+  )
+    throw new Error(`Capability ${manifest.id} is browser-only: settings and composer pieces, nothing else.`);
   if (namespace !== undefined && (namespace.name !== manifest.id || namespace.prefix !== `${own}_`))
     throw new Error(`Capability ${manifest.id} has an invalid Code Mode namespace.`);
   if (new Set(tools.map((tool) => tool.name)).size !== tools.length)
@@ -246,6 +272,8 @@ export class CompiledCapabilities {
       natives = new Set<string>(),
       names = new Set<string>();
     for (const { manifest } of prepared) {
+      if (manifest.scope === "browser")
+        throw new Error(`Capability ${manifest.id} is browser-only and has no server part.`);
       if (ids.has(manifest.id) || natives.has(manifest.native)) throw new Error("Duplicate compiled capability.");
       ids.add(manifest.id);
       natives.add(manifest.native);

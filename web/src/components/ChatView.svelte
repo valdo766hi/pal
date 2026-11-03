@@ -38,6 +38,7 @@
   import { renderMarkdown } from "../lib/markdown.ts";
   import { rise } from "../lib/motion.ts";
   import { app, navigate, refreshChatGPT, refreshProjects, viewport } from "../lib/state.svelte.ts";
+  import { slots } from "../lib/plugins.ts";
 
   let {
     chat,
@@ -58,6 +59,10 @@
     onAdmitted?: () => void;
   } = $props();
   const workspace = $derived(chat.workspace);
+  const composerPieces = $derived(slots("composer", chat.extensions));
+  /** Room each composer piece asks for above the transcript's end. */
+  let spaces: Record<string, number> = $state({});
+  const reserved = $derived(Math.max(0, ...Object.values(spaces)));
   const root = $derived(workspace?.root ?? project.root);
   const ready = $derived(workspace == null || workspace.state === "ready");
   let preparing = $state(false);
@@ -814,7 +819,7 @@
     <div
       class="transcript"
       style:padding-inline={phone ? "18px" : "24px"}
-      style:padding-bottom={app.pet.enabled ? "54px" : undefined}
+      style:padding-bottom={reserved > 0 ? `${reserved}px` : undefined}
     >
       {#if helperUpdates > 0 && helpersError !== undefined}
         <div class="callout er" role="alert">
@@ -1063,11 +1068,16 @@
 
   <div class="dock">
     <div class="dockin">
-      {#if app.pet.enabled}
-        {#await import("./Pet.svelte") then { default: Pet }}
-          <Pet id={app.pet.id} running={stream?.running ?? false} active={typing || writing.text !== ""} />
+      {#each composerPieces as piece (piece.key)}
+        <!-- A piece that fails to load is left out; the composer works without it. -->
+        {#await piece.load() then { default: Piece }}
+          <Piece
+            running={stream?.running ?? false}
+            active={typing || writing.text !== ""}
+            onSpace={(pixels) => (spaces[piece.key] = pixels)}
+          />
         {/await}
-      {/if}
+      {/each}
       {#if !ready}
         <div class="callout wa" role="status">
           {workspace?.error ?? "Preparing this chat's working folder. Messages stay disabled until it is ready."}

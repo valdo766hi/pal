@@ -446,12 +446,13 @@ describe("Pal in a browser", () => {
     await page.reload();
     await page.getByLabel("Message").waitFor();
     expect(await pet.count()).toBe(0);
-    // Off means its code is never fetched, not merely hidden.
+    // Off means the pet's own code is never fetched, not merely hidden; only the small composer piece that reads the
+    // choice loads.
     expect(
       await page.evaluate(() =>
         performance
           .getEntriesByType("resource")
-          .some((entry) => /\/assets\/(Pet|PetSprite|pets)-[^/]+\.js$/.test(entry.name)),
+          .some((entry) => /\/assets\/(Companion|PetSprite|pets)-[^/]+\.js$/.test(entry.name)),
       ),
     ).toBe(false);
     await page.evaluate(() => ["pal.pet", "pal.petId"].forEach((key) => localStorage.removeItem(key)));

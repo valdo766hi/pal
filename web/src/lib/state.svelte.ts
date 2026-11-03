@@ -7,8 +7,10 @@ import {
   type ProvidersState,
   type ProviderView,
 } from "./api.ts";
+import { settingsSections } from "./plugins.ts";
 
-export type SettingsTab = "general" | "models" | "mcp" | "extensions" | "pets";
+/** A kernel tab or a plugin's settings section. */
+export type SettingsTab = string;
 export type Route = { view: "home" } | { view: "chat"; chatId: string } | { view: "settings"; tab: SettingsTab };
 
 function parseRoute(hash: string): Route {
@@ -17,7 +19,11 @@ function parseRoute(hash: string): Route {
   if (view === "settings")
     return {
       view: "settings",
-      tab: id === "models" || id === "mcp" || id === "extensions" || id === "pets" ? id : "general",
+      tab:
+        id !== undefined &&
+        ["models", "mcp", "extensions", ...settingsSections.map((section) => section.id)].includes(id)
+          ? id
+          : "general",
     };
   return { view: "home" };
 }
@@ -31,7 +37,6 @@ export const app = $state({
   extensions: undefined as ExtensionView | undefined,
   width: window.innerWidth,
   sendWithEnter: readSetting("pal.sendWithEnter") !== "false",
-  pet: { enabled: readSetting("pal.pet") !== "off", id: readSetting("pal.petId") ?? "abuy" },
   theme: themeSetting(readSetting("pal.theme")),
   systemLight: matchMedia("(prefers-color-scheme: light)").matches,
 });
@@ -49,15 +54,6 @@ export function shownTheme(): "dark" | "light" {
 export function chooseTheme(theme: Theme): void {
   app.theme = theme;
   saveSetting("pal.theme", theme);
-}
-
-/** The composer pet is a per-browser choice: it changes nothing on the server or in any chat. */
-export type PetChoice = { enabled: boolean; id: string };
-
-export function choosePet(choice: PetChoice): void {
-  app.pet = choice;
-  saveSetting("pal.pet", choice.enabled ? "on" : "off");
-  saveSetting("pal.petId", choice.id);
 }
 
 addEventListener("hashchange", () => {

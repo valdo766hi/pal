@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { type Pet, type Pose, pixels } from "../lib/pets.ts";
+  import { type Pet, type Pose, pixels } from "./pets.ts";
 
   let { pet, pose, scale = 3 }: { pet: Pet; pose: Pose; scale?: number } = $props();
   const shown = $derived(pet.poses[pose]);

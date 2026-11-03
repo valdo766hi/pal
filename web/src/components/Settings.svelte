@@ -20,6 +20,7 @@
   import SchedulerSettings from "./SchedulerSettings.svelte";
   import { api } from "../lib/api.ts";
   import { copyText } from "../lib/copy.ts";
+  import { settingsSections } from "../lib/plugins.ts";
 
   let { tab, onSignOut }: { tab: SettingsTab; onSignOut: () => void } = $props();
 
@@ -63,8 +64,9 @@
     { id: "models", label: "Models", icon: "model" },
     { id: "mcp", label: "MCP servers", icon: "plug" },
     { id: "extensions", label: "Extensions", icon: "model" },
-    { id: "pets", label: "Pets", icon: "paw" },
+    ...settingsSections,
   ] as const;
+  const section = $derived(settingsSections.find((item) => item.id === tab));
 </script>
 
 <div class="settings" class:narrow>
@@ -149,10 +151,10 @@
         <WorkspaceCleanup />
       {:else if tab === "extensions"}
         <ExtensionSettings />
-      {:else if tab === "pets"}
-        {#await import("./PetSettings.svelte")}<p role="status">Loading pets…</p>
-        {:then { default: PetSettings }}<PetSettings />
-        {:catch failure}<p role="alert">Couldn't load pets: {String(failure)}</p>{/await}
+      {:else if section !== undefined}
+        {#await section.load()}<p role="status">Loading {section.name}…</p>
+        {:then { default: Section }}<Section />
+        {:catch failure}<p role="alert">Couldn't load {section.name}: {String(failure)}</p>{/await}
       {:else if tab === "mcp"}
         <McpSettings />
       {:else}
