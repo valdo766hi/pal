@@ -1396,6 +1396,14 @@ describe("API", () => {
     expect([held.status, held.body.error]).toEqual([409, "input_held"]);
     // A sender that lost its reply can find out what became of a request without sending it again.
     expect((await api("GET", `chats/${blocked.id}/inputs/input-lost`)).body).toEqual({ state: "admitting" });
+    // Diagnostics say which input holds the chat and how to recover, but not its text or attachment's name.
+    const diagnosed = (await api("GET", `chats/${blocked.id}/diagnostics`)).body;
+    expect(diagnosed.chat.blocked).toEqual({
+      requestId: "input-lost",
+      cause: "attachment-unreadable",
+      recovery: expect.stringContaining("Retry it with its recorded message, or withdraw it"),
+    });
+    expect(JSON.stringify(diagnosed)).not.toMatch(/Read it|lost\.txt/);
     const never = await api("GET", `chats/${blocked.id}/inputs/input-held`);
     expect([never.status, never.body.error]).toEqual([404, "input_not_found"]);
     const listed = (await api("GET", "projects")).body.projects.find((item: { id: string }) => item.id === project.id);
@@ -1481,9 +1489,12 @@ describe("API", () => {
       providers: expect.arrayContaining([{ id: "openrouter", enabled: false, hasKey: true }]),
       chatgpt: { connected: false },
       unfinished: { tasks: 0, approvals: 0 },
+      admission: { stopped: false },
+      reports: { counts: {}, recent: [] },
     });
     expect(body.chat).toMatchObject({
       chat: chat.id,
+      blocked: null,
       workspace: { mode: "local", state: "failed" },
       running: false,
       inputs: [{ requestId: "diagnostics-input", state: "admitted", submissionId: expect.any(Number) }],

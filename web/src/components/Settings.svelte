@@ -20,7 +20,7 @@
   import SchedulerSettings from "./SchedulerSettings.svelte";
   import { api } from "../lib/api.ts";
   import { copyText } from "../lib/copy.ts";
-  import { settingsSections } from "../lib/plugins.ts";
+  import { loadFailures, settingsSections } from "../lib/plugins.ts";
 
   let { tab, onSignOut }: { tab: SettingsTab; onSignOut: () => void } = $props();
 
@@ -50,8 +50,8 @@
     diagnostics = "copying";
     diagnosticsError = undefined;
     try {
-      if (!(await copyText(JSON.stringify(await api.diagnostics(), null, 2))))
-        throw new Error("the browser refused to copy");
+      const report = { ...(await api.diagnostics()), interface: { pluginLoadFailures: loadFailures } };
+      if (!(await copyText(JSON.stringify(report, null, 2)))) throw new Error("the browser refused to copy");
       diagnostics = "copied";
     } catch (failure) {
       diagnostics = "idle";

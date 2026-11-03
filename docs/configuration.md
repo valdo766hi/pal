@@ -34,7 +34,8 @@ The Nix package installs the same program as `pal`.
 `pal doctor` exits 1 for a broken core and 0 when only optional prerequisites are missing. It checks native modules,
 Git/GNU timeout/Bash versions, and data-directory permissions and writability without creating the directory. A
 running store is reported as busy; its schema is not inspected. A stopped store is checked for a readable Pal schema,
-not fully integrity-checked or migrated. Doctor neither reads credentials nor contacts model providers, starts a
+not fully integrity-checked or migrated. An implementation it can't verify is reported with Pal's reason, such as
+the limit a source install exceeded, or only the system error's code. Doctor neither reads credentials nor contacts model providers, starts a
 browser, or activates a release. Browser program checks do not prove namespace, egress or user-scope protection;
 those remain mandatory at browser start. Missing macOS browser/release adapters are reported as unavailable, not
 parity. Review paths and other metadata before sharing the report.

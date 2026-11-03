@@ -38,7 +38,7 @@
   import { renderMarkdown } from "../lib/markdown.ts";
   import { rise } from "../lib/motion.ts";
   import { app, navigate, refreshChatGPT, refreshProjects, viewport } from "../lib/state.svelte.ts";
-  import { type Piece, type RendererProps, renderer, slots } from "../lib/plugins.ts";
+  import { loadFailures, type Piece, type RendererProps, renderer, slots } from "../lib/plugins.ts";
 
   let {
     chat,
@@ -214,7 +214,8 @@
   async function copyDiagnostics() {
     diagnostics = "copying";
     try {
-      const copied = await copyText(JSON.stringify(await api.chatDiagnostics(chat.id), null, 2));
+      const report = { ...(await api.chatDiagnostics(chat.id)), interface: { pluginLoadFailures: loadFailures } };
+      const copied = await copyText(JSON.stringify(report, null, 2));
       diagnostics = copied ? "copied" : "idle";
       if (!copied) error = "The browser refused to copy diagnostics.";
     } catch (failure) {

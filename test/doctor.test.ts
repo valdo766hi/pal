@@ -98,7 +98,11 @@ describe("pal doctor", () => {
     await writeFile(join(root, "package.json"), `{"name":"pal","secret":"${secret}"`);
     const report = await runDoctor({ installRoot: root, dataRoot, env: {} });
     expect(report.core).toBe("broken");
-    expect(check(report, "implementation")).toMatchObject({ kind: "core", ok: false });
+    expect(check(report, "implementation")).toMatchObject({
+      kind: "core",
+      ok: false,
+      detail: "Implementation identity could not be verified: Invalid implementation package metadata.",
+    });
     expect(JSON.stringify(report)).not.toContain(secret);
   });
 

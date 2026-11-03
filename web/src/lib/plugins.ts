@@ -32,11 +32,19 @@ const manifests = Object.values(
 ).map((module) => module.default);
 const components = import.meta.glob("../../../plugins/*/ui/*.svelte");
 
+/** Plugin components that failed to load in this tab, newest last, for the owner's copied diagnostics. */
+export const loadFailures: { plugin: string; component: string; at: string }[] = [];
+
 function loader<P extends Record<string, unknown>>(manifest: CapabilityManifest, component: string): Loader<P> {
-  return (
+  const load =
     (components[`../../../plugins/${manifest.id}/ui/${component}.svelte`] as Loader<P> | undefined) ??
-    (() => Promise.reject(new Error(`${manifest.id} has no ${component} component`)))
-  );
+    (() => Promise.reject(new Error(`${manifest.id} has no ${component} component`)));
+  return () =>
+    load().catch((failure: unknown) => {
+      loadFailures.push({ plugin: manifest.id, component, at: new Date().toISOString() });
+      if (loadFailures.length > 20) loadFailures.shift();
+      throw failure;
+    });
 }
 
 const icon = (name: string, fallback: IconName): IconName =>

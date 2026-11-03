@@ -130,6 +130,19 @@ describe("a plugin added as its folder and inventory line", () => {
       await failed.page.getByRole("alert").filter({ hasText: "Couldn't load Example echo" }).waitFor();
       await failed.page.getByRole("button", { name: "Context", exact: true }).click();
       await failed.page.getByRole("heading", { name: "Project instructions" }).waitFor();
+      // The owner's copied diagnostics name the component that failed, from the same tab.
+      await failed.session.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
+      await failed.page.evaluate(() => {
+        location.hash = "#/settings/general";
+      });
+      await failed.page.getByRole("button", { name: "Copy diagnostics", exact: true }).click();
+      await failed.page.getByRole("button", { name: "Copied", exact: true }).waitFor();
+      const copied = JSON.parse(await failed.page.evaluate(() => navigator.clipboard.readText())) as {
+        interface: { pluginLoadFailures: { plugin: string; component: string }[] };
+      };
+      expect(copied.interface.pluginLoadFailures).toEqual([
+        expect.objectContaining({ plugin: "example", component: "ExamplePanel" }),
+      ]);
       await failed.session.close();
 
       // Without the plugin, the chat's history keeps its entry as a plain note.

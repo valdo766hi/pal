@@ -56,6 +56,7 @@ import { Owner } from "./owner.ts";
 import { type Project, Projects } from "./projects.ts";
 import { Schedules } from "./schedules.ts";
 import { ProjectSearch } from "./search.ts";
+import { Reports } from "./diagnostics.ts";
 import { Uploads } from "./uploads.ts";
 import { Terminals } from "./terminals.ts";
 import { WorkspacePurge } from "./workspace-purge.ts";
@@ -92,6 +93,8 @@ export type Pal = {
   readonly folders: FolderGrants;
   readonly workspaces: Workspaces;
   readonly capabilities: CompiledCapabilities;
+  /** Pi's non-fatal reports since Pal started, by category, for diagnostics. */
+  readonly reports: Reports;
   readonly context: ChatContext;
   readonly working: WorkingState;
   readonly instructions: ProjectInstructions;
@@ -505,9 +508,10 @@ export async function openPal(
         throw new Error(`${tool.name} is not on the kernel's list of tools the model may call directly`);
     // Pi's default, chosen explicitly: a task that crashes Pal on five opens in a row is parked instead of crash-looping
     // every start; Stop still runs its abort handler.
+    const reports = new Reports();
     const running = await Harness.open(
       store.storage,
-      { models, registry, now, settings: { restartLimit: 5 } },
+      { models, registry, now, settings: { restartLimit: 5 }, onReport: (_error, info) => reports.record(info, now()) },
       context,
     );
     harness = running;
@@ -616,6 +620,7 @@ export async function openPal(
       get status() {
         return status;
       },
+      reports,
       store,
       owner,
       projects: openedProjects,
