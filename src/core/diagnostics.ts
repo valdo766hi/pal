@@ -6,6 +6,7 @@ import { type ReportInfo, watchEvents } from "@earendil-works/pi-durable";
 import pkg from "../../package.json" with { type: "json" };
 import type { Pal } from "./app.ts";
 import { unfinishedWork } from "./backup.ts";
+import { DESTINATION_CHANGED } from "./chats.ts";
 
 const RECENT = 20;
 
@@ -115,7 +116,7 @@ export async function chatDiagnostics(pal: Pal, chatId: string, conversationId: 
         ? null
         : {
             requestId: blocked.requestId,
-            cause: "attachment-unreadable",
+            cause: blocked.reason === DESTINATION_CHANGED ? "destination-changed" : "attachment-unreadable",
             recovery: "Retry it with its recorded message, or withdraw it; this chat's later inputs wait behind it.",
           },
     commandMode: await pal.approvals.mode(chatId),

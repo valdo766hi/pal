@@ -69,6 +69,9 @@ export class ProjectUnavailable extends Error {}
 export class AdmissionStopped extends Error {}
 /** A recorded input whose attachments cannot be read; it blocks only its own chat, and later inputs wait behind it. */
 export class InputBlocked extends Error {}
+/** The reason a saved input is held when its chat's model or reasoning changed after it was recorded. */
+export const DESTINATION_CHANGED =
+  "This chat's model or reasoning changed after this message was saved. Switch back to retry it, or withdraw it.";
 /** A new input refused, not recorded, because an earlier one in its chat is blocked. */
 export class InputHeld extends Error {}
 
@@ -343,6 +346,16 @@ export class ChatService {
       if (selection.expected !== undefined && selection.expected !== current) throw configurationChanged();
       const next = chatConfiguration(selection);
       if (next === current) return current;
+      // A held input keeps the destination it was recorded for until it is retried or withdrawn.
+      const held = await this.#guard((db) =>
+        db.get("SELECT 1 FROM pal_admissions WHERE chat_id = ? AND state = 'admitting'", chatId),
+      );
+      if (held !== undefined)
+        throw new HttpError(
+          409,
+          "configuration_busy",
+          "Retry or withdraw this chat's held message before changing models.",
+        );
       await conversation.commit(async (tx) => {
         const live = await tx.doc(LiveDoc, conversation.id);
         const inbox = await tx.doc(InboxDoc, conversation.id);
@@ -581,7 +594,15 @@ export class ChatService {
     });
     let submissionId = await this.#piSubmission(conversation.id, requestId, context);
     if (submissionId === undefined) {
-      const withFiles = await this.#attachments(projectId, intent).catch(async (error: unknown) => {
+      const withFiles = await (async () => {
+        // A saved input reaches only the destination its sender confirmed, also on retry and after a restart.
+        if (
+          intent.configuration !== undefined &&
+          chatConfiguration(await conversation.agent(context)) !== intent.configuration
+        )
+          throw new InputBlocked(DESTINATION_CHANGED);
+        return this.#attachments(projectId, intent);
+      })().catch(async (error: unknown) => {
         if (error instanceof InputBlocked)
           await this.#guard((db) =>
             db.run(

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { configure, createRegistry, Harness } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AdmissionStopped,
@@ -12,6 +12,7 @@ import {
   ChatNotFound,
   chatConfiguration,
   ChatService,
+  DESTINATION_CHANGED,
   InputBlocked,
   InputHeld,
   ProjectUnavailable,
@@ -458,6 +459,44 @@ describe("chats", () => {
       expect(await pal.userMessages(chat.conversationId)).toBe(lead === "retry" ? 1 : 0);
     },
   );
+
+  it("keeps a held input on the destination it was recorded for, through retry and restart", async () => {
+    const dataRoot = await tempDir();
+    const first = await open(dataRoot);
+    const chat = await first.chats.createChat("destination-chat-request", { projectId: "project-1" }, context);
+    const conversation = await first.harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing conversation");
+    const agent = await conversation.agent(context);
+    if (agent.model === undefined) throw new Error("missing model");
+    const recorded = { model: agent.model, thinkingLevel: agent.thinkingLevel };
+    const { id, payload } = await attach(first.uploads, dataRoot);
+    await rm(payload);
+    const body = { text: "read the notes", attachments: [id], configuration: chatConfiguration(recorded) };
+    await expect(first.chats.submit(chat.id, "held-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+    // The owner can't move a chat to another destination while it holds an input.
+    await expect(
+      first.chats.configure(chat.id, { model: recorded.model, thinkingLevel: "high" }, context),
+    ).rejects.toMatchObject({ status: 409, code: "configuration_busy" });
+
+    // A chat whose destination changed anyway (as before this rule) holds the input instead of sending it there.
+    await conversation.commit((tx) => configure(tx, conversation.id, { ...recorded, thinkingLevel: "high" }), context);
+    await writeFile(payload, "notes\n");
+    await expect(first.chats.retry(chat.id, "held-input", context)).rejects.toBeInstanceOf(InputBlocked);
+    expect((await first.chats.get(chat.id))?.blocked?.reason).toBe(DESTINATION_CHANGED);
+    expect(await first.userMessages(chat.conversationId)).toBe(0);
+    await first.harness.close(context);
+
+    // Startup recovery holds it the same way, without failing to start.
+    const second = await open(dataRoot);
+    expect((await second.chats.get(chat.id))?.blocked?.reason).toBe(DESTINATION_CHANGED);
+    expect(await second.userMessages(chat.conversationId)).toBe(0);
+    const reopened = await second.harness.conversation(chat.conversationId, context);
+    if (reopened === undefined) throw new Error("missing conversation");
+    await reopened.commit((tx) => configure(tx, reopened.id, recorded), context);
+    await second.chats.retry(chat.id, "held-input", context);
+    expect((await second.chats.get(chat.id))?.blocked).toBeNull();
+    expect(await second.userMessages(chat.conversationId)).toBe(1);
+  });
 
   it("keeps an input Pi already admitted instead of withdrawing it", async () => {
     const dataRoot = await tempDir();
