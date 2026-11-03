@@ -141,7 +141,8 @@ export class ChatStream {
 
   /** Snapshots are authoritative: whatever one leaves out is cleared. */
   #reset(snapshot: Partial<SnapshotEvent>): void {
-    // Pal's own entry records, read through their view shape.
+    // SAFETY: Pi entries are read through Pal's narrower view: `model` holds Pi's own messages, and every `data` field the
+    // view reads is checked against the entry kind that writes it (pal.shell, pal.mcp, pal.helper, pal.user) first.
     this.entries = (snapshot.entries ?? []) as unknown as Entry[];
     this.running = snapshot.run !== undefined;
     this.tools = snapshot.tools ?? [];
@@ -161,6 +162,7 @@ export class ChatStream {
   }
 
   #append(entry: Event<"entry_appended">["entry"]): void {
+    // SAFETY: as in #reset: the view reads `data` only after checking the entry kind that writes it.
     if (!this.entries.some((known) => known.id === entry.id)) this.entries.push(entry as unknown as Entry);
   }
 

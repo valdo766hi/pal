@@ -60,11 +60,16 @@
   } = $props();
   const workspace = $derived(chat.workspace);
   const composerPieces = $derived(slots("composer", chat.extensions));
-  /** This build's contributions, once known: entries of a selected plugin missing from it get a plain note. */
+  /**
+   * This build's contributions as `id@version`, once known: entries of a plugin a chat pinned at a version this build
+   * lacks get a plain note.
+   */
   const available = $derived(
     app.extensions === undefined
       ? undefined
-      : new Set(app.extensions.catalog.filter((item) => item.available !== false).map((item) => item.id)),
+      : new Set(
+          app.extensions.catalog.filter((item) => item.available !== false).map((item) => `${item.id}@${item.version}`),
+        ),
   );
   /** Room each composer piece asks for above the transcript's end. */
   let spaces: Record<string, number> = $state({});
@@ -397,7 +402,9 @@
     };
     const receipts = new Map(
       entries.flatMap((entry) =>
-        entry.data?.shell?.status === "finished" ? [[entry.data.shell.callId, entry.data.shell] as const] : [],
+        entry.kind === "pal.shell" && entry.data?.shell?.status === "finished"
+          ? [[entry.data.shell.callId, entry.data.shell] as const]
+          : [],
       ),
     );
     const answers = new Map(

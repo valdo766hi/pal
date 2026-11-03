@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 // Plugin interface pieces from plugins/*: manifests are read at build time, components load only when shown.
 import type { Component } from "svelte";
 import type { CapabilityManifest } from "../../../src/capabilities/contract.ts";
@@ -100,7 +101,8 @@ export function panels(selected: readonly Choice[]): PluginPanel[] {
 
 /**
  * How this chat shows a transcript entry a plugin wrote: its renderer; `missing` when the entry belongs to a plugin the
- * chat selected but this build's catalog (`available`, once known) lacks; undefined otherwise.
+ * chat selected at a version this build's catalog (`available` as `id@version`, once known) lacks, such as after an
+ * upgrade; undefined otherwise.
  */
 export function renderer(
   kind: string,
@@ -113,5 +115,7 @@ export function renderer(
       return { key: `${manifest.id}/${item.component}`, name: manifest.name, load: loader(manifest, item.component) };
   }
   const owner = selected.find((choice) => kind === `pal.${choice.id}` || kind.startsWith(`pal.${choice.id}.`));
-  return owner !== undefined && available !== undefined && !available.has(owner.id) ? "missing" : undefined;
+  return owner !== undefined && available !== undefined && !available.has(`${owner.id}@${owner.version}`)
+    ? "missing"
+    : undefined;
 }
