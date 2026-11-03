@@ -130,8 +130,17 @@ export async function sampleTranscript(browser: Browser, webRoot: string, entrie
         constructor(url: string | URL, options?: EventSourceInit) {
           super(url, options);
           if (!String(url).includes("/events")) return;
+          // The first snapshot, which the benchmark later sends again as a reconnect would.
+          this.addEventListener("snapshot", (event) => {
+            (window as unknown as { palBenchmarkSnapshot?: string }).palBenchmarkSnapshot ??= (
+              event as MessageEvent<string>
+            ).data;
+          });
           addEventListener("pal-benchmark-event", (event) =>
             this.dispatchEvent(new MessageEvent("event", { data: (event as CustomEvent<string>).detail })),
+          );
+          addEventListener("pal-benchmark-snapshot", (event) =>
+            this.dispatchEvent(new MessageEvent("snapshot", { data: (event as CustomEvent<string>).detail })),
           );
         }
       };
@@ -144,21 +153,82 @@ export async function sampleTranscript(browser: Browser, webRoot: string, entrie
     const input = page.getByLabel("Message", { exact: true });
     await input.fill("Preserve my draft and focus");
     const scroller = page.locator(".scroller");
-    await scroller.evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const scrollBefore = await scroller.evaluate((node) => node.scrollTop);
+    const settle = () =>
+      page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    // The scroller is column-reverse: 0 is the newest end and older history lies at negative offsets.
+    await scroller.evaluate((node) => (node.scrollTop = -(node.scrollHeight - node.clientHeight) / 3));
+    await settle();
+    const anchor = await scroller.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const rows = [...node.querySelectorAll(".assistant")];
+      const middle = box.top + box.height / 2;
+      const index = rows.findIndex((row) => {
+        const rect = row.getBoundingClientRect();
+        return rect.top <= middle && rect.bottom >= middle;
+      });
+      return { index, scrollTop: node.scrollTop, text: rows[index]?.querySelector("p")?.textContent };
+    });
+    assert(
+      anchor.scrollTop < 0 &&
+        anchor.index >= 0 &&
+        anchor.index < entries - 3 &&
+        anchor.text === `Profile row ${anchor.index}`,
+      "The benchmark did not reach older history.",
+    );
+    const offset = () =>
+      scroller.evaluate(
+        (node, index) =>
+          (node.querySelectorAll(".assistant")[index]?.getBoundingClientRect().top ?? Number.NaN) -
+          node.getBoundingClientRect().top,
+        anchor.index,
+      );
+    const visible = await offset();
+    const steady = async (step: string) =>
+      assert(Math.abs((await offset()) - visible) <= 1, `The visible history moved during ${step}.`);
     const sample = await measureLiveText(page, updates);
 
     // A fast but wrong transcript is not a measurement.
+    const text = "Live profile" + ".".repeat(updates);
+    const exact = async (step: string) => {
+      assert.equal(
+        await page.locator(".assistant .md").count(),
+        entries + 1,
+        `History was not fully rendered ${step}.`,
+      );
+      assert.equal(
+        await page.locator(".assistant .md").last().locator("p").textContent(),
+        text,
+        `The live text is not exact ${step}.`,
+      );
+    };
+    await steady("live text");
+    await exact("after live text");
+    // The answer commits, then a reconnect replaces the transcript with a snapshot; the reader's place holds.
+    const emit = (name: "event" | "snapshot", data: unknown) =>
+      page.evaluate(([type, detail]) => dispatchEvent(new CustomEvent(type, { detail })), [
+        `pal-benchmark-${name}`,
+        JSON.stringify(data),
+      ] as const);
+    const snapshot = JSON.parse(
+      await page.evaluate(() => (window as unknown as { palBenchmarkSnapshot?: string }).palBenchmarkSnapshot ?? "{}"),
+    ) as { entries?: { id: number }[] };
+    const history = snapshot.entries ?? [];
+    assert.equal(history.length, entries, "The page did not receive the fixture's snapshot.");
+    const committed = {
+      id: Math.max(...history.map((entry) => entry.id)) + 1,
+      kind: "pi.assistant",
+      model: [fauxAssistantMessage(text)],
+    };
+    await emit("event", { type: "message_end", message: committed.model[0], entry: committed });
+    await settle();
+    await steady("the commit");
+    await exact("after the commit");
+    await emit("snapshot", { ...snapshot, entries: [...history, committed] });
+    await settle();
+    await steady("snapshot replacement");
+    await exact("after snapshot replacement");
     assert.equal(await input.inputValue(), "Preserve my draft and focus", "The draft changed.");
     assert(await input.evaluate((node) => node === document.activeElement), "The composer lost focus.");
-    assert.equal(await scroller.evaluate((node) => node.scrollTop), scrollBefore, "The scroll position moved.");
-    assert.equal(await page.locator(".assistant .md").count(), entries + 1, "History was not fully rendered.");
-    assert.equal(
-      await page.locator(".assistant .md").last().locator("p").textContent(),
-      "Live profile" + ".".repeat(updates),
-      "The live text is not exact.",
-    );
     assert.deepEqual(provider.requests, [], "The benchmark reached a model provider.");
     assert.deepEqual(errors, [], "The page reported errors.");
     return sample;

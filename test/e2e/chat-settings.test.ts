@@ -2048,9 +2048,29 @@ describe("long transcript updates", () => {
     });
     const input = page.getByLabel("Message", { exact: true });
     await input.fill("Keep this draft");
-    await page.locator(".scroller").evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
+    // The scroller is column-reverse: 0 is the newest end and older history lies at negative offsets.
+    const scroller = page.locator(".scroller");
+    await scroller.evaluate((node) => (node.scrollTop = -(node.scrollHeight - node.clientHeight) / 2));
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const scrollBefore = await page.locator(".scroller").evaluate((node) => node.scrollTop);
+    const anchor = await scroller.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const middle = box.top + box.height / 2;
+      const rows = [...node.querySelectorAll(".transcript > .item .md")].filter((row) =>
+        /^History \d+$/.test(row.textContent?.trim() ?? ""),
+      );
+      const distance = (row: Element) => Math.abs(row.getBoundingClientRect().top - middle);
+      const nearest = rows.reduce((best, row) => (distance(row) < distance(best) ? row : best));
+      return { scrollTop: node.scrollTop, text: nearest.textContent?.trim() ?? "" };
+    });
+    expect(anchor.scrollTop).toBeLessThan(0);
+    expect(anchor.text).not.toBe("History 79");
+    const offset = () =>
+      page
+        .getByText(anchor.text, { exact: true })
+        .evaluate(
+          (node) => node.getBoundingClientRect().top - (node.closest(".scroller")?.getBoundingClientRect().top ?? 0),
+        );
+    const visible = await offset();
     const order = () =>
       page
         .locator(".transcript > .item")
@@ -2066,7 +2086,7 @@ describe("long transcript updates", () => {
     await expect
       .poll(order)
       .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "echo loose", `Live${".".repeat(20)}`]);
-    expect(await page.locator(".scroller").evaluate((node) => node.scrollTop)).toBe(scrollBefore);
+    expect(Math.abs((await offset()) - visible)).toBeLessThanOrEqual(1);
     expect(await input.inputValue()).toBe("Keep this draft");
     expect(await input.evaluate((node) => node === document.activeElement)).toBe(true);
 

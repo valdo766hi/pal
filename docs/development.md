@@ -215,14 +215,17 @@ nix build --out-link transcript-benchmark .#transcript-benchmark
 ```
 
 Each sample opens a fresh in-process Pal fixture with fake provider keys and 500 assistant history entries in a new
-1440×900 sandboxed Chromium context limited to loopback, then sends 60 live text updates through the chat's own
-event stream. JSON keeps every sample's Chromium task/script/layout/style time and animation-frame waits, their
-nearest-rank p50/p95, and web-bundle, browser and host identity. A sample fails unless all history and the exact
-live text render, the draft, focus and scroll position are unchanged, no provider request is made and the page
-reports no errors. Only the web bundle is selected: the server, fixture and browser come from the runner's tree,
-so compare bundles that speak the same API. These are not network, model or page-load latency results. CI runs
-the same pre-extraction baseline and candidate bundles on macOS and on Ubuntu 22.04; hosted Ubuntu 24.04 disallows
-the user namespaces Chromium's sandbox needs, and the runner never launches Chromium without its sandbox.
+1440×900 sandboxed Chromium context limited to loopback, then sends 60 live text updates through the chat's own event
+stream. JSON keeps every sample's Chromium task/script/layout/style time and animation-frame waits, their nearest-rank
+p50/p95, and web-bundle, browser and host identity. Before measuring, it scrolls a third of the way into older history
+(the transcript scroller is `column-reverse`, so history lies at negative offsets) and checks that a history row sits in
+the middle of the view. A sample fails unless all history and the exact live text render, that row stays within a pixel
+of its place through the live text, the answer's commit and a snapshot replacement, the draft and focus are unchanged,
+no provider request is made and the page reports no errors. Only the live updates are timed. Only the web bundle is
+selected: the server, fixture and browser come from the runner's tree, so compare bundles that speak the same API. These
+are not network, model or page-load latency results. CI runs the same pre-extraction baseline and candidate bundles on
+macOS and on Ubuntu 22.04; hosted Ubuntu 24.04 disallows the user namespaces Chromium's sandbox needs, and the runner
+never launches Chromium without its sandbox.
 
 ### Loopback MCP cache measurements
 
