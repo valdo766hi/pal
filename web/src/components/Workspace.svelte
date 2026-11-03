@@ -22,6 +22,8 @@
   import RenameChat from "./RenameChat.svelte";
   import Settings from "./Settings.svelte";
   import Sidebar from "./Sidebar.svelte";
+  import { panels } from "../lib/plugins.ts";
+  import type { IconName } from "../lib/icons.ts";
 
   let { onSignOut }: { onSignOut: () => void } = $props();
 
@@ -45,15 +47,16 @@
   const terminalPanel = () => import("./TerminalPanel.svelte");
   const contextPanel = () => import("./ContextPanel.svelte");
   const browserPanel = () => import("./BrowserPanel.svelte");
-  type PanelView = "Changes" | "Files" | "Terminal" | "Context" | "Browser";
+  /** A kernel panel's name or a plugin panel's ID. */
+  type PanelView = string;
   let panelView = $state<PanelView>("Changes");
-  const panelButtons = [
+  const kernelPanels: readonly { id: string; icon: IconName }[] = [
     { id: "Changes", icon: "changes" },
     { id: "Files", icon: "file" },
     { id: "Terminal", icon: "term" },
     { id: "Browser", icon: "globe" },
     { id: "Context", icon: "layers" },
-  ] as const;
+  ];
   type Dock = "bottom" | "side";
   /** Where Terminal sits beside the chat on desktop, and the share of the work area it takes, per position. */
   let dock: Dock = $state(readSetting("pal.terminalDock") === "side" ? "side" : "bottom");
@@ -146,9 +149,13 @@
     return undefined;
   });
 
+  const pluginPanels = $derived(located === undefined ? [] : panels(located.chat.extensions));
+  const pluginPanel = $derived(pluginPanels.find((item) => item.id === panelView));
+  const panelButtons = $derived([...kernelPanels, ...pluginPanels.map(({ id, icon }) => ({ id, icon }))]);
   const enabledPanels = $derived(
     new Set([
       "Context",
+      ...pluginPanels.map((item) => item.id),
       ...(app.extensions?.catalog ?? [])
         .filter((item) =>
           located?.chat.extensions.some((choice) => choice.id === item.id && choice.version === item.version),
@@ -317,7 +324,7 @@
                   project={located.project}
                   onNewChat={(mode) => newChat(located.project.id, mode)}
                   panels={panelButtons.filter((item) => enabledPanels.has(item.id))}
-                  onPanel={(id) => openPanel(id as PanelView)}
+                  onPanel={(id) => openPanel(id)}
                   changeCount={changeStatus?.files}
                 />{/key}
             </div>
@@ -416,6 +423,11 @@
                         }}
                       />
                     {:catch failure}<p role="alert">Couldn't load files: {String(failure)}</p>{/await}
+                  {:else if pluginPanel !== undefined}
+                    {#await pluginPanel.load()}<p role="status">Loading {pluginPanel.name}…</p>
+                    {:then { default: Panel }}
+                      <Panel project={located.project} chat={located.chat} workspace={located.chat.workspace} />
+                    {:catch failure}<p role="alert">Couldn't load {pluginPanel.name}: {String(failure)}</p>{/await}
                   {:else}
                     {#await changesPanel()}
                       <p role="status">Loading changes…</p>

@@ -107,6 +107,35 @@ const Manifest = Type.Object(
               { maxItems: 8 },
             ),
           ),
+          /** Workspace panels beside the kernel's; `id` is the panel's name. */
+          panels: Type.Optional(
+            Type.Array(
+              Type.Object(
+                {
+                  id: Type.String({ pattern: "^[A-Z][A-Za-z ]{0,23}$" }),
+                  icon: Type.String({ pattern: "^[a-z][a-zA-Z0-9]{0,31}$" }),
+                  component: Component,
+                  order: Order,
+                },
+                { additionalProperties: false },
+              ),
+              { maxItems: 4 },
+            ),
+          ),
+          /** Components that show the plugin's own transcript entries, by entry kind. */
+          renderers: Type.Optional(
+            Type.Array(
+              Type.Object(
+                {
+                  entry: Type.String({ pattern: "^pal\\.[a-z][a-z0-9.-]{0,59}$" }),
+                  component: Component,
+                  order: Order,
+                },
+                { additionalProperties: false },
+              ),
+              { maxItems: 8 },
+            ),
+          ),
         },
         { additionalProperties: false },
       ),
@@ -162,6 +191,7 @@ export type CompiledCapability = {
   /** A failed open must release anything it acquired before throwing. */
   open(host: CapabilityHost): CapabilityRuntime | Promise<CapabilityRuntime>;
 };
+const KERNEL_PANELS = new Set(["Files", "Changes", "Terminal", "Browser", "Context"]);
 const reserved = new Set([
   "files",
   "shell",
@@ -175,6 +205,19 @@ const reserved = new Set([
   "skills",
   "codemode",
   "mcp",
+  // The kernel's own records: an entry named pal.<id> or pal.<id>.* belongs to plugin <id>.
+  "user",
+  "chat",
+  "capabilities",
+  "helper",
+  "helper-slots",
+  "release",
+  "working-allowance",
+  "working-checks",
+  "working-review",
+  "working-state",
+  "evaluation-budget",
+  "evaluation-checkpoint",
 ]);
 
 export function capabilityManifest(input: unknown): CapabilityManifest {
@@ -183,6 +226,18 @@ export function capabilityManifest(input: unknown): CapabilityManifest {
     throw new Error(`Capability ${manifest.id}@${manifest.version} needs a different Pal capability API.`);
   if (reserved.has(manifest.id) || reserved.has(manifest.native.slice(4)))
     throw new Error(`Capability ${manifest.id} cannot replace a core contribution.`);
+  // Entries a plugin writes carry its native name, so history can name the plugin even when a build lacks it.
+  if (manifest.native !== `pal.${manifest.id}`)
+    throw new Error(`Capability ${manifest.id} must use the native name pal.${manifest.id}.`);
+  const panels = manifest.ui?.panels ?? [];
+  if (panels.some((panel) => KERNEL_PANELS.has(panel.id)))
+    throw new Error(`Capability ${manifest.id} cannot replace a kernel panel.`);
+  if (
+    manifest.ui?.renderers?.some(
+      (renderer) => renderer.entry !== manifest.native && !renderer.entry.startsWith(`${manifest.native}.`),
+    ) === true
+  )
+    throw new Error(`Capability ${manifest.id} can only render its own entries.`);
   const own = manifest.id.replaceAll("-", "_");
   const { namespace, tools = [], storage } = manifest;
   if (
@@ -190,6 +245,8 @@ export function capabilityManifest(input: unknown): CapabilityManifest {
     (namespace !== undefined ||
       tools.length > 0 ||
       storage !== undefined ||
+      panels.length > 0 ||
+      manifest.ui?.renderers !== undefined ||
       manifest.ui?.slots?.some((slot) => slot.slot !== "composer") === true)
   )
     throw new Error(`Capability ${manifest.id} is browser-only: settings and composer pieces, nothing else.`);

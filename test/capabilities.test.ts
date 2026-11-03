@@ -11,7 +11,7 @@ import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { validate } from "../src/core/requests.ts";
-import { exampleCapability } from "../src/capabilities/example.ts";
+import exampleCapability from "./fixtures/plugins/example/server.ts";
 import {
   capabilityIdentity,
   capabilityManifest,
@@ -136,17 +136,38 @@ describe("compiled capability contract", () => {
       const manifest = capabilityManifest(module.default);
       expect(manifest.id).toBe(folder.name);
       expect(servers.includes(manifest.id)).toBe(manifest.scope !== "browser");
-      for (const item of [...(manifest.ui?.slots ?? []), ...(manifest.ui?.settings ?? [])])
+      const { slots = [], settings = [], panels = [], renderers = [] } = manifest.ui ?? {};
+      for (const item of [...slots, ...settings, ...panels, ...renderers])
         await access(join(root, folder.name, "ui", `${item.component}.svelte`));
-      for (const item of manifest.ui?.settings ?? []) expect(Object.keys(ICONS)).toContain(item.icon);
+      for (const item of [...settings, ...panels]) expect(Object.keys(ICONS)).toContain(item.icon);
     }
     const { id, version, native, name, description, core, order } = exampleCapability.manifest;
     const bare = { id, version, native, name, description, core, order, scope: "browser" };
-    expect(() => capabilityManifest({ ...bare, tools: exampleCapability.manifest.tools })).toThrow("browser-only");
+    for (const extra of [{ tools: exampleCapability.manifest.tools }, { ui: exampleCapability.manifest.ui }])
+      expect(() => capabilityManifest({ ...bare, ...extra })).toThrow("browser-only");
     const f = await fixture([]);
     await expect(
       CompiledCapabilities.open([{ manifest: capabilityManifest(bare), open: () => ({}) }], host(f.pal)),
     ).rejects.toThrow("no server part");
+  });
+
+  it("keeps the kernel's own record kinds out of plugin IDs", async () => {
+    const source = join(import.meta.dirname, "../src");
+    const plugins = await readdir(join(import.meta.dirname, "../plugins"));
+    const kinds = new Set<string>();
+    for (const file of await readdir(source, { recursive: true }))
+      if (file.endsWith(".ts"))
+        for (const [, id] of (await readFile(join(source, file), "utf8")).matchAll(
+          /kind: "pal\.([a-z][a-z0-9-]*)[".]/g,
+        ))
+          if (id !== undefined && !plugins.includes(id)) kinds.add(id);
+    expect([...kinds]).toEqual(expect.arrayContaining(["user", "chat", "working-state"]));
+    const { version, name, description, core, order } = exampleCapability.manifest;
+    for (const id of kinds)
+      expect(
+        () => capabilityManifest({ id, version, native: `pal.${id}`, name, description, core, order }),
+        id,
+      ).toThrow("core contribution");
   });
 
   it("registers the bounded opt-in template with host-owned grants, settings and implementation identities", async () => {
@@ -173,6 +194,10 @@ describe("compiled capability contract", () => {
       'return await tools.example_echo({text:"bounded template 界"});',
     );
     expect(output).toContain("bounded template 界");
+    const recorded = (await conversation.entries({}, 100, undefined, context)).items.filter(
+      (entry) => entry.kind === "pal.example",
+    );
+    expect(recorded.map((entry) => entry.data)).toEqual([{ text: "bounded template 界" }]);
     const agent = await conversation.agent(context);
     expect(agent.tools.map((tool) => tool.name)).not.toContain("example_echo");
     expect(agent.callable.map((tool) => tool.name)).toContain("example_echo");
@@ -285,7 +310,7 @@ describe("compiled capability contract", () => {
             setup(builder) {
               builder.onLoad({ filter: /\/plugins\/index\.ts$/ }, (args) => ({
                 contents: template
-                  ? 'export { exampleCapability as example } from "../src/capabilities/example.ts";'
+                  ? 'export { default as example } from "../test/fixtures/plugins/example/server.ts";'
                   : "export {};",
                 loader: "ts",
                 resolveDir: dirname(args.path),
@@ -496,6 +521,20 @@ describe("compiled capability contract", () => {
       { ...manifest, credentialStore: "ambient" },
     ])
       expect(() => capabilityManifest(invalid)).toThrow();
+    // History names a plugin by its native name; its panels and renderers stay out of the kernel's and others'.
+    const panel = { id: "Context", icon: "layers", component: "ExamplePanel", order: 10 };
+    const renderer = (entry: string) => ({
+      ...manifest,
+      ui: { renderers: [{ entry, component: "ExampleResult", order: 10 }] },
+    });
+    for (const [invalid, message] of [
+      [{ ...manifest, native: "pal.echo" }, "native name pal.example"],
+      [{ ...manifest, ui: { panels: [panel] } }, "kernel panel"],
+      [renderer("pal.memory"), "its own entries"],
+      [renderer("pal.examples"), "its own entries"],
+    ] as const)
+      expect(() => capabilityManifest(invalid)).toThrow(message);
+    expect(capabilityManifest(renderer("pal.example.result")).ui?.renderers?.[0]?.entry).toBe("pal.example.result");
     expect(capabilityIdentity(manifest, "release-one").digest).not.toBe(
       capabilityIdentity(manifest, "release-two").digest,
     );
@@ -614,6 +653,7 @@ describe("compiled capability contract", () => {
         native: "pal.second",
         namespace: { name: "second", prefix: "second_" },
         tools: exampleCapability.manifest.tools.map((tool) => ({ ...tool, name: "second_echo" })),
+        ui: {},
       },
       open: () => {
         throw new Error("fixture second open failed");

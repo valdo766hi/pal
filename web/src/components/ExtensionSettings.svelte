@@ -52,7 +52,13 @@
 {#if app.extensions}
   {#each app.extensions.catalog as item (item.id)}
     {@const pinned = app.extensions.selected.find((choice) => choice.id === item.id)}
-    {@const contributes = [...item.panels, ...(item.capability?.ui?.slots ?? []).map((slot) => slotLabels[slot.slot])]}
+    {@const ui = item.capability?.ui}
+    {@const contributes = [
+      ...item.panels,
+      ...(ui?.panels ?? []).map((panel) => panel.id),
+      ...(ui?.slots ?? []).map((slot) => slotLabels[slot.slot]),
+      ...(ui?.renderers?.length ? ["Chat results"] : []),
+    ]}
     <div class="extension">
       <div class="details">
         <div class="heading">

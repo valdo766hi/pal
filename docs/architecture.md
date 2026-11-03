@@ -232,10 +232,13 @@ kernel integration, not a permission string supplied by a skill or manifest.
 
 Add a reviewed plugin's line to `plugins/index.ts` and rebuild; no runtime directory scan or package install occurs.
 Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins. Its interface components
-are bundled from `plugins/<id>/ui/` at build time and load only in chats that selected it, never downloaded UI.
+are bundled from `plugins/<id>/ui/` at build time and load only in chats that selected it, never downloaded UI: Context
+sections, workspace panels after the kernel's, and renderers for its own `pal.<id>` transcript entries. In a build
+without a plugin a chat used, those entries show as a short note. A component that fails to load says so in its place.
 A browser plugin such as pets has no server part or line in the inventory: only settings tabs and composer pieces that
 every chat shows, switched in the browser.
-`test/capabilities.test.ts` exercises the contract and composition boundaries.
+`test/capabilities.test.ts` exercises the contract and composition boundaries; `test/e2e/plugins.test.ts` adds the
+test plugin in `test/fixtures/plugins/example/` to a copy of the source and uses it in a browser.
 
 - `src/core/extensions.ts`: the kernel's contributions (files, shell, browser, compact) and the plugins (memory,
   research helpers) can be switched for new chats. The helpers plugin offers `agents_delegate`; helper conversations,

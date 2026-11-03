@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
 import type { CompiledCapability } from "../../src/capabilities/contract.ts";
-import { exampleCapability } from "../../src/capabilities/example.ts";
+import exampleCapability from "../fixtures/plugins/example/server.ts";
 import { startServer } from "../../src/core/server.ts";
 import { runGit } from "../../src/core/git.ts";
 import { GOOD_KEY, startProviderFixture } from "../fixtures/provider-server.ts";
@@ -1296,6 +1296,7 @@ describe("compiled capability composition", () => {
     await row.getByRole("switch", { name: "Enable Example echo for new chats", exact: true }).waitFor();
     expect(await row.innerText()).toContain("Core API 2–2");
     expect(await row.innerText()).toContain("example_echo · safe · project.read");
+    expect(await row.innerText()).toContain("Contributes: Example, Chat results");
     const item = (await pal.extensions.view()).catalog.find((item) => item.id === "example");
     if (item === undefined) throw new Error("missing compiled template");
     expect(await row.innerText()).toContain(item.implementation);

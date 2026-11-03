@@ -38,7 +38,7 @@
   import { renderMarkdown } from "../lib/markdown.ts";
   import { rise } from "../lib/motion.ts";
   import { app, navigate, refreshChatGPT, refreshProjects, viewport } from "../lib/state.svelte.ts";
-  import { slots } from "../lib/plugins.ts";
+  import { type Piece, type RendererProps, renderer, slots } from "../lib/plugins.ts";
 
   let {
     chat,
@@ -60,6 +60,12 @@
   } = $props();
   const workspace = $derived(chat.workspace);
   const composerPieces = $derived(slots("composer", chat.extensions));
+  /** This build's contributions, once known: entries of a selected plugin missing from it get a plain note. */
+  const available = $derived(
+    app.extensions === undefined
+      ? undefined
+      : new Set(app.extensions.catalog.filter((item) => item.available !== false).map((item) => item.id)),
+  );
   /** Room each composer piece asks for above the transcript's end. */
   let spaces: Record<string, number> = $state({});
   const reserved = $derived(Math.max(0, ...Object.values(spaces)));
@@ -98,6 +104,7 @@
         live: boolean;
       }
     | { kind: "note"; id: string; text: string }
+    | { kind: "plugin"; id: string; entry: Entry; piece: Piece<RendererProps> | "missing" }
     | { kind: "shell"; id: string; receipt: ShellReceipt }
     | { kind: "mcp"; id: string; receipt: McpReceipt }
     | { kind: "helper"; id: string; task: number; purpose: string; status: "answered" | "unanswered" | undefined }
@@ -434,6 +441,11 @@
           id: String(entry.id),
           receipt: receipts.get(entry.data.shell.callId) ?? entry.data.shell,
         });
+        continue;
+      }
+      const piece = renderer(entry.kind, chat.extensions, available);
+      if (piece !== undefined) {
+        built.push({ kind: "plugin", id: String(entry.id), entry, piece });
         continue;
       }
       const message = entry.model?.[0];
@@ -863,6 +875,18 @@
             </div>
           {:else if item.kind === "note"}
             <div class="note"><Icon name="info" /><span>{item.text}</span></div>
+          {:else if item.kind === "plugin"}
+            {#if item.piece === "missing"}
+              <div class="note"><Icon name="info" /><span>Recorded by a plugin this build doesn't include.</span></div>
+            {:else}
+              {@const piece = item.piece}
+              {#await piece.load() then { default: Renderer }}<Renderer entry={item.entry} />{:catch failure}<p
+                  class="dim small"
+                  role="alert"
+                >
+                  Couldn't show {piece.name}'s result: {String(failure)}
+                </p>{/await}
+            {/if}
           {:else if item.kind === "mcp"}
             <InternetSources receipt={item.receipt} />
           {:else if item.kind === "helper"}

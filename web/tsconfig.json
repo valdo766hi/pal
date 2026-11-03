@@ -17,6 +17,7 @@
     "src/**/*.svelte",
     "../plugins/*/manifest.ts",
     "../plugins/*/ui/**/*.svelte",
-    "../plugins/*/ui/**/*.ts"
+    "../plugins/*/ui/**/*.ts",
+    "../test/fixtures/plugins/*/ui/**/*.svelte"
   ]
 }
