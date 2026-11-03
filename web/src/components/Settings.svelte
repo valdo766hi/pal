@@ -16,9 +16,11 @@
   import ProviderSettings from "./ProviderSettings.svelte";
   import WorkspaceCleanup from "./WorkspaceCleanup.svelte";
   import ExtensionSettings from "./ExtensionSettings.svelte";
+  import CommandSettings from "./CommandSettings.svelte";
   import SchedulerSettings from "./SchedulerSettings.svelte";
   import { api } from "../lib/api.ts";
   import { copyText } from "../lib/copy.ts";
+  import { loadFailures, settingsSections } from "../lib/plugins.ts";
 
   let { tab, onSignOut }: { tab: SettingsTab; onSignOut: () => void } = $props();
 
@@ -48,8 +50,8 @@
     diagnostics = "copying";
     diagnosticsError = undefined;
     try {
-      if (!(await copyText(JSON.stringify(await api.diagnostics(), null, 2))))
-        throw new Error("the browser refused to copy");
+      const report = { ...(await api.diagnostics()), interface: { pluginLoadFailures: loadFailures } };
+      if (!(await copyText(JSON.stringify(report, null, 2)))) throw new Error("the browser refused to copy");
       diagnostics = "copied";
     } catch (failure) {
       diagnostics = "idle";
@@ -62,8 +64,9 @@
     { id: "models", label: "Models", icon: "model" },
     { id: "mcp", label: "MCP servers", icon: "plug" },
     { id: "extensions", label: "Extensions", icon: "model" },
-    { id: "pets", label: "Pets", icon: "paw" },
+    ...settingsSections,
   ] as const;
+  const section = $derived(settingsSections.find((item) => item.id === tab));
 </script>
 
 <div class="settings" class:narrow>
@@ -143,14 +146,15 @@
             <div class="callout er" role="alert">Couldn't copy diagnostics: {diagnosticsError}</div>
           {/if}
           <SchedulerSettings />
+          <CommandSettings />
         </div>
         <WorkspaceCleanup />
       {:else if tab === "extensions"}
         <ExtensionSettings />
-      {:else if tab === "pets"}
-        {#await import("./PetSettings.svelte")}<p role="status">Loading pets…</p>
-        {:then { default: PetSettings }}<PetSettings />
-        {:catch failure}<p role="alert">Couldn't load pets: {String(failure)}</p>{/await}
+      {:else if section !== undefined}
+        {#await section.load()}<p role="status">Loading {section.name}…</p>
+        {:then { default: Section }}<Section />
+        {:catch failure}<p role="alert">Couldn't load {section.name}: {String(failure)}</p>{/await}
       {:else if tab === "mcp"}
         <McpSettings />
       {:else}

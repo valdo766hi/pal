@@ -10,7 +10,10 @@ export default defineConfig(
   ts.configs.strict,
   svelte.configs.recommended,
   { languageOptions: { globals: globals.node } },
-  { files: ["web/**"], languageOptions: { globals: globals.browser } },
+  {
+    files: ["web/**", "plugins/*/ui/**", "test/fixtures/plugins/*/ui/**"],
+    languageOptions: { globals: globals.browser },
+  },
   {
     files: ["**/*.svelte", "**/*.svelte.ts"],
     languageOptions: { parserOptions: { parser: ts.parser, extraFileExtensions: [".svelte"] } },

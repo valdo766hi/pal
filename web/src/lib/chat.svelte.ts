@@ -1,5 +1,15 @@
 // Reconnect replaces live state from a snapshot; event offsets are not replayable.
-import type { ToolEventCall, ToolSlot } from "@earendil-works/pi-durable";
+import type {
+  AgentEvent,
+  AgentState,
+  CompactionFailure,
+  CompactionStatus,
+  MessageChange,
+  NestedToolSlot,
+  SnapshotEvent,
+  ToolSlot,
+  UsageState,
+} from "@earendil-works/pi-durable";
 import type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
 import type { McpReceipt } from "../../../src/pi/mcp-source.ts";
 export type { CommandApproval, McpReceipt };
@@ -32,7 +42,14 @@ export type NestedCall = {
   error?: string;
 };
 
-export type Attachment = { id: string; name: string; size: number; mediaType: string };
+export type Attachment = {
+  id: string;
+  name: string;
+  size: number;
+  mediaType: string;
+  /** What of it the model got with its message; absent on drafts and older messages. */
+  received?: import("../../../src/core/uploads.ts").Received;
+};
 
 export type ShellReceipt = {
   callId: string;
@@ -58,39 +75,26 @@ export type Entry = {
   };
 };
 
-type Change =
-  | { type: "text_start" | "thinking_start" | "toolcall_start" | "block"; contentIndex: number; block: Block }
-  | { type: "text_delta" | "thinking_delta"; contentIndex: number; delta: string }
-  | { type: "toolcall_delta"; contentIndex: number }
-  | { type: "message"; message: Message };
-
-type Snapshot = {
-  entries: Entry[];
-  run?: unknown;
-  tools?: readonly ToolSlot[];
-  generation?: { message?: Message; retry?: { at: number; error: string } };
-  inbox: { id: number; mode: "steer" | "followUp" }[];
-};
-
-type AgentEvent =
-  | { type: "run_start" | "run_end" }
-  | ({ type: "tool_execution_start" | "tool_execution_end" } & ToolEventCall)
-  | { type: "entry_appended"; entry: Entry }
-  | { type: "message_start"; message: Message }
-  | { type: "message_update"; changes: Change[] }
-  | { type: "message_end"; entry: Entry }
-  | { type: "inbox_update"; items: { id: number; mode: "steer" | "followUp" }[] }
-  | { type: "auto_retry_start"; at: number; errorMessage: string }
-  | { type: "auto_retry_end" }
-  | { type: string };
+type Queued = SnapshotEvent["inbox"][number];
+type Event<T extends AgentEvent["type"]> = Extract<AgentEvent, { type: T }>;
 
 export class ChatStream {
   entries: Entry[] = $state([]);
   partial: Message | undefined = $state();
   running = $state(false);
   tools: readonly ToolSlot[] = $state.raw([]);
-  inbox: { id: number; mode: "steer" | "followUp" }[] = $state([]);
+  /** Calls the running tools made, such as a script's tool calls, related by native call and task IDs. */
+  nested: readonly NestedToolSlot[] = $state.raw([]);
+  inbox: readonly Queued[] = $state.raw([]);
   retry: { at: number; error: string } | undefined = $state();
+  /** When Pal next asks the provider for a deferred response. */
+  deferredPoll: number | undefined = $state();
+  compactions: readonly CompactionStatus[] = $state.raw([]);
+  compactionFailure: CompactionFailure | undefined = $state();
+  /** A task of this conversation that failed since the last run started; it is never shown as success. */
+  failure: { kind: string; message: string } | undefined = $state();
+  usage: UsageState | undefined = $state.raw();
+  agent: AgentState | undefined = $state.raw();
   connected = $state(false);
   loaded = $state(false);
   /** The browser retries a dropped stream by itself; one the server refused stays closed until replaced. */
@@ -113,7 +117,7 @@ export class ChatStream {
         apply(data);
       });
     }
-    listen<Snapshot>("snapshot", (snapshot) => this.#reset(snapshot));
+    listen<Partial<SnapshotEvent>>("snapshot", (snapshot) => this.#reset(snapshot));
     listen<AgentEvent>("event", (event) => this.#apply(event));
     listen<ApprovalView>("approvals", (view) => this.showApprovals(view));
     source.addEventListener("open", () => {
@@ -135,74 +139,220 @@ export class ChatStream {
     this.approvals = view.approvals;
   }
 
-  #reset(snapshot: Snapshot): void {
-    this.entries = snapshot.entries;
+  /** Snapshots are authoritative: whatever one leaves out is cleared. */
+  #reset(snapshot: Partial<SnapshotEvent>): void {
+    // SAFETY: Pi entries are read through Pal's narrower view: `model` holds Pi's own messages, and every `data` field the
+    // view reads is checked against the entry kind that writes it (pal.shell, pal.mcp, pal.helper, pal.user) first.
+    this.entries = (snapshot.entries ?? []) as unknown as Entry[];
     this.running = snapshot.run !== undefined;
     this.tools = snapshot.tools ?? [];
-    this.partial = snapshot.generation?.message;
+    this.nested = snapshot.nestedTools ?? [];
+    this.partial = snapshot.generation?.message as Message | undefined;
     this.retry = snapshot.generation?.retry;
-    this.inbox = snapshot.inbox;
+    this.deferredPoll = snapshot.generation?.deferred?.pollAt;
+    this.inbox = snapshot.inbox ?? [];
+    this.compactions = snapshot.compactions ?? [];
+    this.compactionFailure = snapshot.compactionFailure;
+    this.failure = undefined;
+    this.usage = snapshot.usage;
+    this.agent = snapshot.agent;
     this.loaded = true;
     this.connected = true;
     this.problem = undefined;
   }
 
-  #append(entry: Entry): void {
-    if (!this.entries.some((known) => known.id === entry.id)) this.entries.push(entry);
+  #append(entry: Event<"entry_appended">["entry"]): void {
+    // SAFETY: as in #reset: the view reads `data` only after checking the entry kind that writes it.
+    if (!this.entries.some((known) => known.id === entry.id)) this.entries.push(entry as unknown as Entry);
   }
 
   #apply(event: AgentEvent): void {
-    if (event.type === "run_start") this.running = true;
-    else if (event.type === "run_end") {
-      this.running = false;
-      this.tools = [];
-      this.partial = undefined;
-    } else if (
-      (event.type === "tool_execution_start" || event.type === "tool_execution_end") &&
-      "toolCallId" in event &&
-      event.parentToolCallId === undefined
-    ) {
-      this.tools = this.tools.filter((tool) => tool.callId !== event.toolCallId);
-      if (event.type === "tool_execution_start") {
-        const tool: ToolSlot = { callId: event.toolCallId, name: event.toolName, status: "running" };
-        if (event.taskId !== undefined) tool.taskId = event.taskId;
-        this.tools = [...this.tools, tool];
+    switch (event.type) {
+      case "snapshot":
+        return this.#reset(event);
+      case "run_start":
+        this.running = true;
+        this.failure = undefined;
+        return;
+      case "run_end":
+        this.running = false;
+        this.tools = [];
+        this.nested = [];
+        this.partial = undefined;
+        this.retry = undefined;
+        this.deferredPoll = undefined;
+        return;
+      // Presentation only: rounds show through their messages and tool calls.
+      case "turn_start":
+      case "turn_end":
+      case "submission":
+        return;
+      case "message_start":
+        if (event.message.role === "assistant") this.partial = event.message as Message;
+        return;
+      case "message_update":
+        for (const change of event.changes) this.#change(change);
+        return;
+      case "message_end":
+        this.#append(event.entry);
+        this.partial = undefined;
+        return;
+      case "tool_execution_start":
+        return this.#start(event);
+      case "tool_execution_update":
+        return this.#update(event);
+      case "tool_execution_end":
+        return this.#end(event);
+      case "inbox_update":
+        this.inbox = event.items;
+        return;
+      case "auto_retry_start":
+        this.retry = { at: event.at, error: event.errorMessage };
+        this.deferredPoll = undefined;
+        return;
+      case "auto_retry_end":
+        this.retry = undefined;
+        return;
+      case "deferred_poll":
+        this.deferredPoll = event.pollAt;
+        return;
+      case "entry_appended":
+        return this.#append(event.entry);
+      case "agent_changed":
+        this.agent = event.agent;
+        return;
+      case "usage_changed":
+        this.usage = event.usage;
+        return;
+      case "task_failed":
+        this.failure = { kind: event.kind, message: event.message };
+        return;
+      case "compaction_start": {
+        // Compaction events name compaction tasks.
+        const taskId = event.taskId as CompactionStatus["taskId"];
+        this.compactions = [
+          ...this.compactions.filter((compaction) => compaction.taskId !== event.taskId),
+          { taskId, reason: event.reason, blocking: event.blocking, attempt: 1 },
+        ];
+        return;
       }
-    } else if ("entry" in event && (event.type === "entry_appended" || event.type === "message_end")) {
-      this.#append(event.entry);
-      if (event.type === "message_end") this.partial = undefined;
-    } else if (event.type === "message_start" && "message" in event) {
-      if (event.message.role === "assistant") this.partial = event.message;
-    } else if (event.type === "message_update" && "changes" in event) {
-      for (const change of event.changes) this.#change(change);
-    } else if (event.type === "inbox_update" && "items" in event) {
-      this.inbox = event.items;
-    } else if (event.type === "auto_retry_start" && "errorMessage" in event) {
-      this.retry = { at: event.at, error: event.errorMessage };
-    } else if (event.type === "auto_retry_end") {
-      this.retry = undefined;
+      case "compaction_end": {
+        const taskId = event.taskId as CompactionStatus["taskId"];
+        this.compactions = this.compactions.filter((compaction) => compaction.taskId !== taskId);
+        this.compactionFailure =
+          event.error === undefined ? undefined : { taskId, reason: event.reason, error: event.error };
+        return;
+      }
+      default: {
+        // A Pi event this projection does not handle fails the typecheck here.
+        const unhandled: never = event;
+        return unhandled;
+      }
     }
   }
 
-  #change(change: Change): void {
+  #start(event: Event<"tool_execution_start">): void {
+    if (event.parentToolCallId === undefined) {
+      const tool: ToolSlot = { callId: event.toolCallId, name: event.toolName, status: "running" };
+      if (event.taskId !== undefined) tool.taskId = event.taskId;
+      this.tools = [...this.tools.filter((known) => known.callId !== event.toolCallId), tool];
+    } else if (event.taskId !== undefined && event.parentTaskId !== undefined) {
+      const call: NestedToolSlot = {
+        callId: event.toolCallId,
+        name: event.toolName,
+        status: "running",
+        parentCallId: event.parentToolCallId,
+        parentTaskId: event.parentTaskId,
+        taskId: event.taskId,
+        arguments: event.args,
+      };
+      this.nested = [...this.nested.filter((known) => known.callId !== event.toolCallId), call];
+    }
+  }
+
+  /** Bounded running output: a front trim and an append of the retained window, or its replacement. */
+  #update(event: Event<"tool_execution_update">): void {
+    const apply = <T extends ToolSlot | NestedToolSlot>(slot: T): T => {
+      if (slot.callId !== event.toolCallId) return slot;
+      const next = { ...slot };
+      if (event.output !== undefined)
+        next.output =
+          "set" in event.output
+            ? event.output.set
+            : (slot.output ?? "").slice(event.output.trimStart ?? 0) + (event.output.append ?? "");
+      if (event.details === null) delete next.details;
+      else if (event.details !== undefined) next.details = event.details;
+      if (event.diagnostics !== undefined) next.diagnostics = [...event.diagnostics];
+      return next;
+    };
+    if (event.parentToolCallId === undefined) this.tools = this.tools.map(apply);
+    else this.nested = this.nested.map(apply);
+  }
+
+  /** Without a result entry the call faulted or was orphaned: it shows as unconfirmed, never as done. */
+  #end(event: Event<"tool_execution_end">): void {
+    if (event.parentToolCallId === undefined) {
+      this.tools = this.tools.filter((tool) => tool.callId !== event.toolCallId);
+      this.nested = this.nested.filter((call) => call.parentCallId !== event.toolCallId);
+      if (event.entry !== undefined) this.#append(event.entry);
+      return;
+    }
+    this.nested = this.nested.map((call) =>
+      call.callId === event.toolCallId
+        ? {
+            ...call,
+            status: "done",
+            summary: {
+              isError: event.result?.isError ?? true,
+              ...(event.result?.durationMs === undefined ? {} : { durationMs: event.result.durationMs }),
+            },
+          }
+        : call,
+    );
+  }
+
+  #change(change: MessageChange): void {
     if (change.type === "message") {
-      this.partial = change.message;
+      this.partial = change.message as Message;
       return;
     }
     const partial = this.partial;
     if (partial === undefined || typeof partial.content === "string") return;
-    if (
-      change.type === "text_start" ||
-      change.type === "thinking_start" ||
-      change.type === "toolcall_start" ||
-      change.type === "block"
-    ) {
-      partial.content[change.contentIndex] = change.block;
-    } else if (change.type === "text_delta" || change.type === "thinking_delta") {
-      const block = partial.content[change.contentIndex];
-      if (block?.type === "text") block.text += change.delta;
-      else if (block?.type === "thinking") block.thinking += change.delta;
+    const block = partial.content[change.contentIndex];
+    switch (change.type) {
+      case "text_start":
+      case "thinking_start":
+      case "toolcall_start":
+      case "block":
+        partial.content[change.contentIndex] = change.block as Block;
+        return;
+      case "text_delta":
+      case "thinking_delta":
+        if (block?.type === "text") block.text += change.delta;
+        else if (block?.type === "thinking") block.thinking += change.delta;
+        return;
+      case "toolcall_delta":
+        if (block?.type === "toolCall") appendAt(block.arguments, change.path, change.delta);
+        return;
+      default: {
+        const unhandled: never = change;
+        return unhandled;
+      }
     }
+  }
+}
+
+/** Append to the string at `path` within a tool call's streamed arguments. */
+function appendAt(target: Record<string, unknown>, path: readonly (string | number)[], delta: string): void {
+  let node: Record<string | number, unknown> = target;
+  for (const [index, key] of path.entries()) {
+    if (index === path.length - 1) {
+      node[key] = (typeof node[key] === "string" ? node[key] : "") + delta;
+      return;
+    }
+    const next = node[key];
+    if (typeof next !== "object" || next === null) return;
+    node = next as Record<string | number, unknown>;
   }
 }
 

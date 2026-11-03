@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApi } from "../src/core/api.ts";
 import { openPal } from "../src/core/app.ts";
 import { startServer } from "../src/core/server.ts";
+import { ChatStream } from "../web/src/lib/chat.svelte.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -184,5 +185,167 @@ describe("chat event streams", () => {
     slow.destroy();
     await expect.poll(() => watches(), { timeout: 5_000 }).toBe(0);
     await expect.poll(() => inFlight(), { timeout: 5_000 }).toBe(0);
+  });
+});
+
+/** The browser's EventSource, driven by the test with the server's event names. */
+class FakeEventSource {
+  static CLOSED = 2;
+  static last: FakeEventSource | undefined;
+  readyState = 1;
+  readonly #listeners = new Map<string, ((event: { data: string }) => void)[]>();
+  constructor() {
+    FakeEventSource.last = this;
+  }
+  addEventListener(name: string, listener: (event: { data: string }) => void) {
+    this.#listeners.set(name, [...(this.#listeners.get(name) ?? []), listener]);
+  }
+  emit(name: string, ...data: unknown[]) {
+    for (const item of data)
+      for (const listener of this.#listeners.get(name) ?? []) listener({ data: JSON.stringify(item) });
+  }
+  close() {}
+}
+
+describe("web projection of native events", () => {
+  const snapshot = (overrides: Record<string, unknown> = {}) => ({
+    type: "snapshot",
+    entries: [],
+    tools: [],
+    nestedTools: [],
+    compactions: [],
+    inbox: [],
+    agent: {},
+    usage: { models: {}, tools: {} },
+    ...overrides,
+  });
+  const open = () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const stream = new ChatStream("chat-one");
+    const source = FakeEventSource.last as FakeEventSource;
+    source.emit("snapshot", snapshot());
+    return { stream, event: (...events: unknown[]) => source.emit("event", ...events), source };
+  };
+  const call = (id: string, task: number, parent?: { id: string; task: number }) => ({
+    toolCallId: id,
+    toolName: parent === undefined ? "codemode" : "files_read",
+    taskId: task,
+    ...(parent === undefined ? {} : { parentToolCallId: parent.id, parentTaskId: parent.task }),
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("applies tool-call argument deltas at their path, between interleaved text", () => {
+    const { stream, event } = open();
+    event(
+      { type: "message_start", message: { role: "assistant", content: [] } },
+      {
+        type: "message_update",
+        changes: [
+          { type: "text_start", contentIndex: 0, block: { type: "text", text: "Let me " } },
+          {
+            type: "toolcall_start",
+            contentIndex: 1,
+            block: { type: "toolCall", id: "call-1", name: "codemode", arguments: { code: "console." } },
+          },
+          { type: "toolcall_delta", contentIndex: 1, path: ["code"], delta: 'log("hello")' },
+          { type: "text_delta", contentIndex: 0, delta: "check." },
+        ],
+      },
+    );
+    expect(stream.partial?.content).toEqual([
+      { type: "text", text: "Let me check." },
+      { type: "toolCall", id: "call-1", name: "codemode", arguments: { code: 'console.log("hello")' } },
+    ]);
+  });
+
+  it("projects nested calls by native IDs and never shows a faulted call as done", () => {
+    const { stream, event } = open();
+    const parent = { id: "call-1", task: 7 };
+    event(
+      { type: "run_start", inputs: [1] },
+      { type: "tool_execution_start", args: { code: "x" }, ...call("call-1", 7) },
+      { type: "tool_execution_start", args: { path: "a" }, ...call("call-1/1", 8, parent) },
+      { type: "tool_execution_start", args: { path: "b" }, ...call("call-1/2", 9, parent) },
+      { type: "tool_execution_update", output: { append: "partial" }, ...call("call-1/1", 8, parent) },
+      {
+        type: "tool_execution_end",
+        result: { taskId: 8, isError: false, diagnostics: [] },
+        ...call("call-1/1", 8, parent),
+      },
+      { type: "tool_execution_end", ...call("call-1/2", 9, parent) },
+    );
+    expect(stream.tools).toEqual([{ callId: "call-1", name: "codemode", status: "running", taskId: 7 }]);
+    expect(stream.nested.map((slot) => [slot.callId, slot.parentTaskId, slot.status, slot.summary?.isError])).toEqual([
+      ["call-1/1", 7, "done", false],
+      ["call-1/2", 7, "done", true],
+    ]);
+    expect(stream.nested[0]?.output).toBe("partial");
+    // The model-issued call faulted: no result entry, so nothing records it as done.
+    event(
+      { type: "tool_execution_end", ...call("call-1", 7) },
+      { type: "task_failed", taskId: 7, kind: "tool", message: "the tool task faulted" },
+    );
+    expect([stream.tools, stream.nested, stream.entries]).toEqual([[], [], []]);
+    expect(stream.failure).toEqual({ kind: "tool", message: "the tool task faulted" });
+  });
+
+  it("keeps repeated provider call IDs of different turns apart", () => {
+    const { stream, event } = open();
+    const entry = (id: number) => ({
+      id,
+      kind: "pi.toolResult",
+      model: [{ role: "toolResult", toolCallId: "call-1", content: [] }],
+    });
+    event(
+      { type: "run_start", inputs: [1] },
+      { type: "tool_execution_start", args: {}, ...call("call-1", 7) },
+      { type: "tool_execution_end", entry: entry(11), ...call("call-1", 7) },
+      { type: "turn_end" },
+      { type: "turn_start" },
+      { type: "tool_execution_start", args: {}, ...call("call-1", 12) },
+    );
+    expect(stream.entries.map((item) => item.id)).toEqual([11]);
+    expect(stream.tools).toEqual([{ callId: "call-1", name: "codemode", status: "running", taskId: 12 }]);
+  });
+
+  it("replaces stale live state from a reconnect snapshot and tracks retries, polls and compaction", () => {
+    const { stream, event, source } = open();
+    event(
+      { type: "run_start", inputs: [1] },
+      { type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "old" }] } },
+      { type: "tool_execution_start", args: {}, ...call("call-1", 7) },
+      { type: "auto_retry_start", attempt: 2, at: 5, errorMessage: "overloaded" },
+      { type: "auto_retry_end", attempt: 2 },
+      { type: "deferred_poll", pollAt: 9 },
+      { type: "compaction_start", taskId: 20, reason: "threshold", blocking: true },
+      { type: "task_failed", taskId: 21, kind: "generation", message: "stale failure" },
+    );
+    expect([stream.running, stream.retry, stream.deferredPoll, stream.compactions.length]).toEqual([
+      true,
+      undefined,
+      9,
+      1,
+    ]);
+    event({ type: "compaction_end", taskId: 20, reason: "threshold", error: "summary failed" });
+    expect([stream.compactions, stream.compactionFailure?.error]).toEqual([[], "summary failed"]);
+    // Even a snapshot that omits fields replaces everything.
+    source.emit("snapshot", { entries: [{ id: 3, kind: "pi.user" }] });
+    expect({
+      running: stream.running,
+      partial: stream.partial,
+      tools: stream.tools,
+      deferred: stream.deferredPoll,
+      compactionFailure: stream.compactionFailure,
+      failure: stream.failure,
+      entries: stream.entries.map((item) => item.id),
+    }).toEqual({
+      running: false,
+      partial: undefined,
+      tools: [],
+      deferred: undefined,
+      compactionFailure: undefined,
+      failure: undefined,
+      entries: [3],
+    });
   });
 });

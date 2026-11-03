@@ -43,14 +43,24 @@ async function snapshot(root: string, frozen = true) {
   return { path: root, digest: digest.digest("hex"), files, bytes };
 }
 
-/** The grader, task definitions and every starting snapshot: what a run must not be able to change. */
+/** The grader, task definitions, every starting snapshot and attachment: what a run must not be able to change. */
 export async function authority(): Promise<string> {
   const digest = createHash("sha256")
     .update(await readFile(grader))
     .update(await readFile(tasks));
   for (const task of TASKS)
-    digest.update((await snapshot(await realpath(join(fixtures, task.snapshot)), false)).digest);
+    for (const directory of [task.snapshot, ...(task.attachments === undefined ? [] : [task.attachments.snapshot])])
+      digest.update((await snapshot(await realpath(join(fixtures, directory)), false)).digest);
   return digest.digest("hex");
+}
+
+/** The files `task`'s first input attaches, with their bytes. */
+export async function attachmentFiles(task: Task) {
+  if (task.attachments === undefined) return [];
+  const root = await realpath(join(fixtures, task.attachments.snapshot));
+  return Promise.all(
+    task.attachments.files.map(async (file) => ({ ...file, bytes: await readFile(join(root, file.name)) })),
+  );
 }
 
 /** The starting repository a run copies for `task`. */

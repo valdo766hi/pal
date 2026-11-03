@@ -20,8 +20,8 @@ import { extensionScope, selectedExtensions, type ExtensionScope } from "./exten
 import { WorkspaceMode, workspaceMode } from "./workspaces.ts";
 import { HttpError } from "./http.ts";
 import type { Changes } from "./changes.ts";
-
-export const MAX_INPUT_CHARS = 100_000;
+import { type AttachmentLabel, UploadError } from "./uploads.ts";
+import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../protocol/limits.ts";
 
 export const ChatBody = Type.Object(
   {
@@ -51,7 +51,9 @@ export const InputBody = Type.Object(
     text: Type.String({ minLength: 1, maxLength: MAX_INPUT_CHARS }),
     whenBusy: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer")])),
     /** Upload IDs from this chat's project, in the order shown. */
-    attachments: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: 10 })),
+    attachments: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: MAX_INPUT_ATTACHMENTS }),
+    ),
     configuration: Type.Optional(ConfigurationRevision),
     feedback: Type.Optional(FeedbackBody),
   },
@@ -65,6 +67,13 @@ export class ChatNotFound extends Error {}
 export class ProjectUnavailable extends Error {}
 /** Admission stopped after a storage failure; the process must restart and reconcile before admitting again. */
 export class AdmissionStopped extends Error {}
+/** A recorded input whose attachments cannot be read; it blocks only its own chat, and later inputs wait behind it. */
+export class InputBlocked extends Error {}
+/** The reason a saved input is held when its chat's model or reasoning changed after it was recorded. */
+export const DESTINATION_CHANGED =
+  "This chat's model or reasoning changed after this message was saved. Switch back to retry it, or withdraw it.";
+/** A new input refused, not recorded, because an earlier one in its chat is blocked. */
+export class InputHeld extends Error {}
 
 /** Crash points between Pal's and Pi's commits, for deterministic recovery tests. */
 export type Barrier = "chat-recorded" | "chat-created" | "input-recorded" | "input-submitted" | "input-admitted";
@@ -75,8 +84,13 @@ export type ChatSummary = Chat & {
   readonly title: string | null;
   readonly createdAt: number;
   readonly extensions: ExtensionScope["selected"];
+  /** The input holding this chat back, until the owner retries or withdraws it. */
+  readonly blocked: BlockedInput | null;
 };
+export type BlockedInput = { readonly requestId: string; readonly text: string; readonly reason: string };
 export type Admission = { readonly chatId: string; readonly requestId: string; readonly submissionId: SubmissionId };
+export type InputRecord =
+  { readonly state: "admitted"; readonly admission: Admission } | { readonly state: "admitting" | "withdrawn" };
 
 /**
  * The Pal chat each Pi conversation was created for, written in the commit that creates the conversation: Pi has no
@@ -85,6 +99,7 @@ export type Admission = { readonly chatId: string; readonly requestId: string; r
 const ChatDoc = defineDocFamily({
   kind: "pal.chat",
   version: 1,
+  checkpointWhen: () => false,
   scope: "session",
   family: true,
   initial: (conversationId: ConversationId) => ({ conversationId }),
@@ -112,7 +127,10 @@ export type ChatServiceOptions = {
       projectId: string,
       ids: readonly string[],
     ): Promise<readonly { id: string; name: string; size: number; mediaType: string }[]>;
-    content(projectId: string, ids: readonly string[]): Promise<(TextContent | ImageContent)[]>;
+    content(
+      projectId: string,
+      ids: readonly string[],
+    ): Promise<{ content: (TextContent | ImageContent)[]; labels: AttachmentLabel[] }>;
   };
   readonly feedback?: Pick<Changes, "checkFeedback" | "admitFeedback">;
   /** Host authority frozen with the admission, not recomputed during retry or restart. */
@@ -151,7 +169,13 @@ export class ChatService {
         "SELECT a.chat_id, a.request_id, a.intent FROM pal_admissions a JOIN pal_chats c ON c.id = a.chat_id WHERE a.state = 'admitting' AND c.deleted_at IS NULL ORDER BY a.seq",
       ),
     );
-    for (const row of inputs) await service.#admit(row.chat_id, row.request_id, service.#input(row.intent), context);
+    for (const row of inputs) {
+      try {
+        await service.#admit(row.chat_id, row.request_id, service.#input(row.intent), context);
+      } catch (error) {
+        if (!(error instanceof InputBlocked)) throw error;
+      }
+    }
     return service;
   }
 
@@ -161,8 +185,15 @@ export class ChatService {
 
   async list(projectId: string): Promise<ChatSummary[]> {
     const rows = await this.#guard((db) =>
-      db.all<{ id: string; title: string | null; conversation_id: ConversationId; created_at: number; intent: string }>(
-        "SELECT id, title, conversation_id, created_at, intent FROM pal_chats WHERE project_id = ? AND state = 'ready' AND deleted_at IS NULL ORDER BY created_at DESC, rowid DESC",
+      db.all<{
+        id: string;
+        title: string | null;
+        conversation_id: ConversationId;
+        created_at: number;
+        intent: string;
+        blocked: string | null;
+      }>(
+        `SELECT id, title, conversation_id, created_at, intent, ${BLOCKED} FROM pal_chats WHERE project_id = ? AND state = 'ready' AND deleted_at IS NULL ORDER BY created_at DESC, rowid DESC`,
         projectId,
       ),
     );
@@ -173,6 +204,7 @@ export class ChatService {
       conversationId: row.conversation_id,
       createdAt: row.created_at,
       extensions: selectedExtensions(extensionScope(row.intent)),
+      blocked: blockedInput(row.blocked),
     }));
   }
 
@@ -195,8 +227,9 @@ export class ChatService {
         conversation_id: ConversationId;
         created_at: number;
         intent: string;
+        blocked: string | null;
       }>(
-        "SELECT project_id, title, conversation_id, created_at, intent FROM pal_chats WHERE id = ? AND state = 'ready' AND deleted_at IS NULL",
+        `SELECT project_id, title, conversation_id, created_at, intent, ${BLOCKED} FROM pal_chats WHERE id = ? AND state = 'ready' AND deleted_at IS NULL`,
         chatId,
       ),
     );
@@ -209,6 +242,7 @@ export class ChatService {
           conversationId: row.conversation_id,
           createdAt: row.created_at,
           extensions: selectedExtensions(extensionScope(row.intent)),
+          blocked: blockedInput(row.blocked),
         };
   }
 
@@ -217,7 +251,7 @@ export class ChatService {
     const title = body.title.trim();
     if (title === "") throw new InvalidRequest("enter a chat name");
     const renamed = await this.#guard((db) =>
-      db.get<Omit<ChatSummary, "extensions"> & { intent: string }>(
+      db.get<Omit<ChatSummary, "extensions" | "blocked"> & { intent: string }>(
         "UPDATE pal_chats SET title = ? WHERE id = ? AND state = 'ready' AND deleted_at IS NULL AND title IS ? RETURNING id, project_id AS projectId, conversation_id AS conversationId, title, created_at AS createdAt, intent",
         title,
         chatId,
@@ -226,7 +260,11 @@ export class ChatService {
     );
     if (renamed !== undefined) {
       const { intent, ...chat } = renamed;
-      return { ...chat, extensions: selectedExtensions(extensionScope(intent)) };
+      return {
+        ...chat,
+        extensions: selectedExtensions(extensionScope(intent)),
+        blocked: (await this.get(chatId))?.blocked ?? null,
+      };
     }
     if ((await this.get(chatId)) === undefined) throw new ChatNotFound("no such chat");
     throw new RequestConflict("The chat name changed. Close and reopen this dialog before trying again.");
@@ -308,6 +346,16 @@ export class ChatService {
       if (selection.expected !== undefined && selection.expected !== current) throw configurationChanged();
       const next = chatConfiguration(selection);
       if (next === current) return current;
+      // A held input keeps the destination it was recorded for until it is retried or withdrawn.
+      const held = await this.#guard((db) =>
+        db.get("SELECT 1 FROM pal_admissions WHERE chat_id = ? AND state = 'admitting'", chatId),
+      );
+      if (held !== undefined)
+        throw new HttpError(
+          409,
+          "configuration_busy",
+          "Retry or withdraw this chat's held message before changing models.",
+        );
       await conversation.commit(async (tx) => {
         const live = await tx.doc(LiveDoc, conversation.id);
         const inbox = await tx.doc(InboxDoc, conversation.id);
@@ -326,6 +374,67 @@ export class ChatService {
   /** Admit one input; repeating a request ID with the same body returns the same submission. */
   async submit(chatId: string, requestId: unknown, body: unknown, context: Context): Promise<Admission> {
     return this.#withConfiguration(chatId, () => this.#submit(chatId, requestId, body, context));
+  }
+
+  /** What became of one input request: undefined if Pal never recorded it, so its sender may safely send it again. */
+  async input(chatId: string, requestId: string): Promise<InputRecord | undefined> {
+    const row = await this.#guard((db) =>
+      db.get<Pick<AdmissionRow, "state" | "submission_id">>(
+        "SELECT state, submission_id FROM pal_admissions WHERE chat_id = ? AND request_id = ?",
+        chatId,
+        requestId,
+      ),
+    );
+    if (row === undefined) return undefined;
+    return row.submission_id === null
+      ? { state: row.state === "withdrawn" ? "withdrawn" : "admitting" }
+      : { state: "admitted", admission: { chatId, requestId, submissionId: row.submission_id } };
+  }
+
+  /** Admit a blocked input again with its recorded body, in turn with the chat's other admissions. */
+  async retry(chatId: string, requestId: string, context: Context): Promise<Admission> {
+    return this.#withConfiguration(chatId, async () => {
+      const row = await this.#recorded(chatId, requestId);
+      if (row.submission_id !== null) return { chatId, requestId, submissionId: row.submission_id };
+      if (row.state === "withdrawn") throw new RequestConflict(`request ${requestId} was withdrawn`);
+      return this.#admit(chatId, requestId, this.#input(row.intent), context);
+    });
+  }
+
+  /** Settle a blocked input as never sent, so the chat's later inputs can proceed. One Pi already admitted is kept. */
+  async withdraw(chatId: string, requestId: string, context: Context): Promise<void> {
+    return this.#withConfiguration(chatId, async () => {
+      const row = await this.#recorded(chatId, requestId);
+      if (row.state === "withdrawn") return;
+      const chat = await this.get(chatId);
+      if (chat === undefined) throw new ChatNotFound(`chat ${chatId} does not exist`);
+      if (row.state === "admitting") {
+        if ((await this.#piSubmission(chat.conversationId, requestId, context)) === undefined) {
+          await this.#guard((db) =>
+            db.run(
+              "UPDATE pal_admissions SET state = 'withdrawn', blocked = NULL WHERE chat_id = ? AND request_id = ? AND state = 'admitting'",
+              chatId,
+              requestId,
+            ),
+          );
+          return;
+        }
+        await this.#admit(chatId, requestId, this.#input(row.intent), context);
+      }
+      throw new RequestConflict("this message was already sent; it cannot be withdrawn");
+    });
+  }
+
+  async #recorded(chatId: string, requestId: string): Promise<AdmissionRow> {
+    const row = await this.#guard((db) =>
+      db.get<AdmissionRow>(
+        "SELECT digest, intent, state, submission_id FROM pal_admissions WHERE chat_id = ? AND request_id = ?",
+        chatId,
+        requestId,
+      ),
+    );
+    if (row === undefined) throw new ChatNotFound(`no input ${requestId} in this chat`);
+    return row;
   }
 
   async #withConfiguration<T>(chatId: string, work: () => Promise<T>): Promise<T> {
@@ -347,28 +456,25 @@ export class ChatService {
       configuration: value.configuration,
       feedback: value.feedback === undefined ? undefined : { ids: value.feedback.ids, scope: value.feedback.scope },
     }));
-    const attached = (body as InputBody).attachments ?? [];
-    if (attached.length > 0) {
-      const projectId = await this.#guard((db) =>
-        db.get<{ project_id: string }>("SELECT project_id FROM pal_chats WHERE id = ?", chatId),
-      );
-      if (projectId === undefined || this.#options.attachments === undefined) {
-        throw new ChatNotFound(`chat ${chatId} cannot take attachments`);
-      }
-      await this.#options.attachments.check(projectId.project_id, attached);
-    }
     const chat = await this.get(chatId);
     if (chat === undefined) throw new ChatNotFound(`chat ${chatId} does not exist`);
     const previous = await this.#guard((db) =>
       db.get<AdmissionRow>(
-        "SELECT digest, intent, submission_id FROM pal_admissions WHERE chat_id = ? AND request_id = ?",
+        "SELECT digest, intent, state, submission_id FROM pal_admissions WHERE chat_id = ? AND request_id = ?",
         chatId,
         key,
       ),
     );
     if (previous !== undefined && previous.digest !== digest)
       throw new RequestConflict(`request ${key} was admitted with a different body`);
+    if (previous?.state === "withdrawn") throw new RequestConflict(`request ${key} was withdrawn`);
+    // An acknowledged request answers from its receipt, even if its attachments are gone since.
     if (previous?.submission_id != null) return { chatId, requestId: key, submissionId: previous.submission_id };
+    const attached = (body as InputBody).attachments ?? [];
+    if (previous === undefined && attached.length > 0) {
+      if (this.#options.attachments === undefined) throw new ChatNotFound(`chat ${chatId} cannot take attachments`);
+      await this.#options.attachments.check(chat.projectId, attached);
+    }
     if (previous === undefined) this.#options.checkExtensions?.(chat.extensions);
     const expected = (body as InputBody).configuration;
     if (expected !== undefined) {
@@ -390,11 +496,14 @@ export class ChatService {
         );
         if (chat?.state !== "ready") return undefined;
         const existing = await tx.get<AdmissionRow>(
-          "SELECT digest, intent, submission_id FROM pal_admissions WHERE chat_id = ? AND request_id = ?",
+          "SELECT digest, intent, state, submission_id FROM pal_admissions WHERE chat_id = ? AND request_id = ?",
           chatId,
           key,
         );
         if (existing !== undefined) return existing;
+        // Inputs of one chat are admitted in order, so a blocked one holds back every later one.
+        const blocked = await tx.get("SELECT 1 FROM pal_admissions WHERE chat_id = ? AND state = 'admitting'", chatId);
+        if (blocked !== undefined) return "blocked";
         await tx.run(
           "INSERT INTO pal_admissions (chat_id, request_id, digest, intent, folder_scope, state, created_at) VALUES (?, ?, ?, ?, ?, 'admitting', ?)",
           chatId,
@@ -404,11 +513,14 @@ export class ChatService {
           scope ?? null,
           Date.now(),
         );
-        return { digest, intent, submission_id: null };
+        return { digest, intent, state: "admitting" as const, submission_id: null };
       }),
     );
     if (row === undefined) throw new ChatNotFound(`chat ${chatId} does not exist`);
+    if (row === "blocked")
+      throw new InputHeld("An earlier message in this chat couldn't be sent yet. Retry or withdraw it first.");
     if (row.digest !== digest) throw new RequestConflict(`request ${key} was admitted with a different body`);
+    if (row.state === "withdrawn") throw new RequestConflict(`request ${key} was withdrawn`);
     if (row.submission_id !== null) return { chatId, requestId: key, submissionId: row.submission_id };
     await this.#options.barrier?.("input-recorded");
     return this.#admit(chatId, key, this.#input(row.intent), context);
@@ -470,7 +582,7 @@ export class ChatService {
   /** Submit under the same request ID, which Pi deduplicates per conversation, then record the acknowledgement. */
   async #admit(chatId: string, requestId: string, intent: InputBody, context: Context): Promise<Admission> {
     if ((await this.get(chatId)) === undefined) throw new ChatNotFound("this chat was deleted before admission");
-    const submissionId = await this.#guard(async (db) => {
+    const { conversation, projectId } = await this.#guard(async (db) => {
       const row = await db.get<{ conversation_id: ConversationId; project_id: string }>(
         "SELECT conversation_id, project_id FROM pal_chats WHERE id = ?",
         chatId,
@@ -478,35 +590,40 @@ export class ChatService {
       const conversation =
         row === undefined ? undefined : await this.#options.harness.conversation(row.conversation_id, context);
       if (row === undefined || conversation === undefined) throw new Error(`chat ${chatId} has no conversation`);
-      const attached = intent.attachments ?? [];
-      const uploads = this.#options.attachments;
-      const withFiles =
-        attached.length === 0 || uploads === undefined
-          ? {}
-          : {
-              content: [
-                { type: "text" as const, text: intent.text },
-                ...(await uploads.content(row.project_id, attached)),
-              ],
-              // The transcript entry carries the labels the UI shows; the model sees the content above.
-              entry: {
-                kind: "pal.user",
-                data: {
-                  attachments: (await uploads.check(row.project_id, attached)).map(({ id, name, size, mediaType }) => ({
-                    id,
-                    name,
-                    size,
-                    mediaType,
-                  })),
-                },
-              },
-            };
-      const submission = await conversation.submit(
-        { type: "input", requestId, content: intent.text, whenBusy: intent.whenBusy ?? "followUp", ...withFiles },
-        context,
-      );
-      return submission.id;
+      return { conversation, projectId: row.project_id };
     });
+    let submissionId = await this.#piSubmission(conversation.id, requestId, context);
+    if (submissionId === undefined) {
+      const withFiles = await (async () => {
+        // A saved input reaches only the destination its sender confirmed, also on retry and after a restart.
+        if (
+          intent.configuration !== undefined &&
+          chatConfiguration(await conversation.agent(context)) !== intent.configuration
+        )
+          throw new InputBlocked(DESTINATION_CHANGED);
+        return this.#attachments(projectId, intent);
+      })().catch(async (error: unknown) => {
+        if (error instanceof InputBlocked)
+          await this.#guard((db) =>
+            db.run(
+              "UPDATE pal_admissions SET blocked = ? WHERE chat_id = ? AND request_id = ? AND state = 'admitting'",
+              error.message,
+              chatId,
+              requestId,
+            ),
+          );
+        throw error;
+      });
+      submissionId = await this.#guard(
+        async () =>
+          (
+            await conversation.submit(
+              { type: "input", requestId, content: intent.text, whenBusy: intent.whenBusy ?? "followUp", ...withFiles },
+              context,
+            )
+          ).id,
+      );
+    }
     await this.#options.barrier?.("input-submitted");
     if ((await this.get(chatId)) === undefined) {
       await this.abortDeleted(context);
@@ -515,7 +632,7 @@ export class ChatService {
     await this.#guard((db) =>
       db.transaction(async (tx) => {
         await tx.run(
-          "UPDATE pal_admissions SET state = 'admitted', submission_id = ? WHERE chat_id = ? AND request_id = ?",
+          "UPDATE pal_admissions SET state = 'admitted', submission_id = ?, blocked = NULL WHERE chat_id = ? AND request_id = ?",
           submissionId,
           chatId,
           requestId,
@@ -533,6 +650,33 @@ export class ChatService {
     );
     await this.#options.barrier?.("input-admitted");
     return { chatId, requestId, submissionId };
+  }
+
+  /** Pi may have admitted an input before a crash lost its acknowledgement: adopt that, never resubmit. */
+  async #piSubmission(conversationId: ConversationId, requestId: string, context: Context) {
+    const submission = await this.#guard(() =>
+      this.#options.harness.commit((tx) => tx.submissionByRequest(conversationId, requestId), context),
+    );
+    return submission?.id;
+  }
+
+  /** The model content of an input's attachments. An unreadable payload blocks this input, not admission. */
+  async #attachments(projectId: string, intent: InputBody) {
+    const attached = intent.attachments ?? [];
+    const uploads = this.#options.attachments;
+    if (attached.length === 0 || uploads === undefined) return {};
+    try {
+      const { content, labels } = await uploads.content(projectId, attached);
+      return {
+        content: [{ type: "text" as const, text: intent.text }, ...content],
+        // The transcript entry carries the labels the UI shows, with what of each the model saw above.
+        entry: { kind: "pal.user", data: { attachments: labels } },
+      };
+    } catch (error) {
+      if (error instanceof UploadError) throw new InputBlocked(error.message, { cause: error });
+      this.#stop();
+      throw new AdmissionStopped("admission stopped after a storage failure", { cause: error });
+    }
   }
 
   /**
@@ -573,7 +717,16 @@ function chatIntent(value: ChatBody) {
 }
 
 type ChatRow = { id: string; digest: string; conversation_id: ConversationId | null; deleted_at: number | null };
-type AdmissionRow = { digest: string; intent: string; submission_id: SubmissionId | null };
+type AdmissionRow = {
+  digest: string;
+  intent: string;
+  state: "admitting" | "admitted" | "withdrawn";
+  submission_id: SubmissionId | null;
+};
+/** Inputs are admitted in order, so at most one per chat is blocked. */
+const BLOCKED =
+  "(SELECT json_object('requestId', a.request_id, 'text', json_extract(a.intent, '$.text'), 'reason', a.blocked) FROM pal_admissions a WHERE a.chat_id = pal_chats.id AND a.state = 'admitting' AND a.blocked IS NOT NULL) AS blocked";
+const blockedInput = (raw: string | null) => (raw === null ? null : (JSON.parse(raw) as BlockedInput));
 
 /** A chat's first input names it: its first line, shortened at a word boundary. */
 function untitledName(text: string): string {

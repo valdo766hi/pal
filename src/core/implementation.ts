@@ -10,7 +10,9 @@ import { validate } from "./requests.ts";
 const MAX_FILES = 20_000;
 const MAX_BYTES = 256 * 1024 * 1024;
 const MAX_FILE_BYTES = 128 * 1024 * 1024;
+const MAX_NODE_BYTES = 256 * 1024 * 1024;
 const MAX_PACKAGES = 256;
+const mib = (bytes: number) => `${bytes / 1024 / 1024} MiB`;
 const Dependencies = Type.Record(Type.String({ pattern: "^(?:@[a-zA-Z0-9_.-]+/)?[a-zA-Z0-9_.-]+$" }), Type.String());
 const Metadata = Type.Object({
   name: Type.Optional(Type.String()),
@@ -131,20 +133,28 @@ export async function mutableIdentity(installRoot: string, privateDataRoot?: str
     let files = 0,
       entries = 0,
       total = 0;
-    async function file(path: string) {
+    /** The Node executable alone fills about half the package budget, so it has its own. */
+    async function file(path: string, node = false) {
       assertPublic(path, dataRoot);
       const info = await lstat(path, { bigint: true });
       assertPublic(path, dataRoot, info);
-      if (!info.isFile() || info.size > BigInt(MAX_FILE_BYTES))
-        throw new Error("linked, special or oversized implementation file");
-      if (++files > MAX_FILES || (total += Number(info.size)) > MAX_BYTES)
-        throw new Error("implementation exceeds its file/byte limits");
+      const limit = node ? MAX_NODE_BYTES : MAX_FILE_BYTES;
+      if (!info.isFile()) throw new Error("linked or special implementation file");
+      if (info.size > BigInt(limit))
+        throw new Error(
+          node
+            ? `the Node executable exceeds its ${mib(limit)} limit`
+            : `an implementation file exceeds the ${mib(limit)} per-file limit`,
+        );
+      if (!node && ++files > MAX_FILES) throw new Error(`implementation packages exceed their ${MAX_FILES}-file limit`);
+      if (!node && (total += Number(info.size)) > MAX_BYTES)
+        throw new Error(`implementation packages exceed their ${mib(MAX_BYTES)} limit`);
       const key = stamp(info),
         known = cache.get(path);
       let digest = known?.stamp === key ? known.digest : undefined;
       if (digest === undefined) {
         const hash = createHash("sha256");
-        const actual = await read(path, MAX_FILE_BYTES, (chunk) => hash.update(chunk), dataRoot, info);
+        const actual = await read(path, limit, (chunk) => hash.update(chunk), dataRoot, info);
         if (actual !== key) throw new Error("implementation changed while opening");
         digest = hash.digest("hex");
       }
@@ -212,7 +222,7 @@ export async function mutableIdentity(installRoot: string, privateDataRoot?: str
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
         let runtimeFiles = 0;
-        for (const directory of ["src", "dist"]) {
+        for (const directory of ["src", "plugins", "dist"]) {
           let info;
           try {
             info = await lstat(join(root, directory));
@@ -257,7 +267,7 @@ export async function mutableIdentity(installRoot: string, privateDataRoot?: str
     const executable = await realpath(process.execPath),
       immutableNode = nixOutput(executable);
     const node =
-      immutableNode === undefined ? await file(executable) : [immutableNode, relative(immutableNode, executable)];
+      immutableNode === undefined ? await file(executable, true) : [immutableNode, relative(immutableNode, executable)];
     return createHash("sha256")
       .update(
         JSON.stringify({

@@ -1,12 +1,6 @@
 {
   "version": 1,
   "skills": {
-    "dev": {
-      "source": "microsoft/playwright-cli",
-      "sourceType": "github",
-      "skillPath": ".claude/skills/dev/SKILL.md",
-      "computedHash": "f06900646055be153a5f10d78af5945bfb1a7e613e715c2109d5f5b0787c3cda"
-    },
     "frontend-design": {
       "source": "anthropics/skills",
       "sourceType": "github",

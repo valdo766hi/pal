@@ -2,12 +2,35 @@
 // includes credentials, tokens, server addresses, commands, outputs, or chat and file contents.
 import { arch, platform } from "node:os";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { watchEvents } from "@earendil-works/pi-durable";
+import { type ReportInfo, watchEvents } from "@earendil-works/pi-durable";
 import pkg from "../../package.json" with { type: "json" };
 import type { Pal } from "./app.ts";
 import { unfinishedWork } from "./backup.ts";
+import { DESTINATION_CHANGED } from "./chats.ts";
 
 const RECENT = 20;
+
+/** Pi's non-fatal reports by category; their errors are dropped, since an error's text can carry secrets or content. */
+export class Reports {
+  readonly #counts: Partial<Record<ReportInfo["type"], number>> = {};
+  readonly #recent: Record<string, string>[] = [];
+  record(info: ReportInfo, at: number): void {
+    this.#counts[info.type] = (this.#counts[info.type] ?? 0) + 1;
+    const task = "task" in info ? info.task?.kind : undefined;
+    this.#recent.push({
+      at: new Date(at).toISOString(),
+      type: info.type,
+      ...("extension" in info && info.extension !== undefined ? { extension: info.extension } : {}),
+      ...(task === undefined ? {} : { task }),
+      ...("reason" in info ? { reason: info.reason } : {}),
+      ...("callback" in info ? { callback: info.callback } : {}),
+    });
+    if (this.#recent.length > RECENT) this.#recent.shift();
+  }
+  view() {
+    return { counts: { ...this.#counts }, recent: [...this.#recent] };
+  }
+}
 
 type Entry = {
   readonly id: number;
@@ -54,6 +77,10 @@ export async function installationDiagnostics(pal: Pal) {
       approvedTools: server.tools.filter((tool) => tool.approved).length,
     })),
     unfinished: await unfinishedWork(database, tables),
+    admission: pal.chats.stopped
+      ? { stopped: true, recovery: "Restart Pal; saved inputs are reconciled before new ones are admitted." }
+      : { stopped: false },
+    reports: pal.reports.view(),
   };
 }
 
@@ -79,9 +106,19 @@ export async function chatDiagnostics(pal: Pal, chatId: string, conversationId: 
   const shells = snapshot.entries.flatMap((entry) =>
     entry.kind === "pal.shell" && entry.data?.shell !== undefined ? [{ entry: entry.id, ...entry.data.shell }] : [],
   );
+  const blocked = (await pal.chats.get(chatId))?.blocked ?? null;
   return {
     chat: chatId,
     workspace: workspace === undefined ? null : { mode: workspace.mode, state: workspace.state },
+    // The reason can name an attachment, so only its category; the chat itself shows the owner the full reason.
+    blocked:
+      blocked === null
+        ? null
+        : {
+            requestId: blocked.requestId,
+            cause: blocked.reason === DESTINATION_CHANGED ? "destination-changed" : "attachment-unreadable",
+            recovery: "Retry it with its recorded message, or withdraw it; this chat's later inputs wait behind it.",
+          },
     commandMode: await pal.approvals.mode(chatId),
     running: snapshot.run !== undefined,
     retrying: snapshot.generation?.retry === undefined ? null : failureCause(snapshot.generation.retry.error),

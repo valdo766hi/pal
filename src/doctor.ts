@@ -93,13 +93,13 @@ export async function runDoctor(options: { installRoot: string; dataRoot: string
     });
     release = await releaseIdentity(installRoot, privateRoot);
     checks.push({ check: "implementation", kind: "core", ok: true, detail: "Content identity verified." });
-  } catch {
+  } catch (error) {
     release = "unavailable";
     checks.push({
       check: "implementation",
       kind: "core",
       ok: false,
-      detail: "Implementation identity could not be verified.",
+      detail: `Implementation identity could not be verified: ${identityProblem(error)}.`,
       remedy: "Use an intact retained build and frozen dependencies before resuming work.",
     });
   }
@@ -279,4 +279,18 @@ export function formatDoctor(report: Awaited<ReturnType<typeof runDoctor>>): str
     report.core === "ok" ? "Core: ok" : "Core: broken; Pal cannot run reliably here until the FAIL items are fixed.",
   ];
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The most specific reason Pal itself gave, such as the limit an install exceeded. A system error's message can carry
+ * a path and a parser's can quote the file it read, so those contribute only their code or nothing.
+ */
+function identityProblem(error: unknown): string {
+  let reason = "unknown error";
+  for (let cause = error; cause instanceof Error; cause = cause.cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
+    if (code !== undefined) return code;
+    if (cause.constructor === Error) reason = cause.message.replace(/\.$/, "");
+  }
+  return reason;
 }

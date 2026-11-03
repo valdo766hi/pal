@@ -22,6 +22,8 @@
   import RenameChat from "./RenameChat.svelte";
   import Settings from "./Settings.svelte";
   import Sidebar from "./Sidebar.svelte";
+  import { panels } from "../lib/plugins.ts";
+  import type { IconName } from "../lib/icons.ts";
 
   let { onSignOut }: { onSignOut: () => void } = $props();
 
@@ -45,15 +47,16 @@
   const terminalPanel = () => import("./TerminalPanel.svelte");
   const contextPanel = () => import("./ContextPanel.svelte");
   const browserPanel = () => import("./BrowserPanel.svelte");
-  type PanelView = "Changes" | "Files" | "Terminal" | "Context" | "Browser";
+  /** A kernel panel's name or a plugin panel's ID. */
+  type PanelView = string;
   let panelView = $state<PanelView>("Changes");
-  const panelButtons = [
+  const kernelPanels: readonly { id: string; icon: IconName }[] = [
     { id: "Changes", icon: "changes" },
     { id: "Files", icon: "file" },
     { id: "Terminal", icon: "term" },
     { id: "Browser", icon: "globe" },
     { id: "Context", icon: "layers" },
-  ] as const;
+  ];
   type Dock = "bottom" | "side";
   /** Where Terminal sits beside the chat on desktop, and the share of the work area it takes, per position. */
   let dock: Dock = $state(readSetting("pal.terminalDock") === "side" ? "side" : "bottom");
@@ -118,7 +121,9 @@
       }
     | undefined = $state();
   let changesView: { refresh(): Promise<void> } | undefined = $state();
-  let changeStatus: { busy: boolean; files: number | undefined; add: number; del: number } | undefined = $state();
+  type ChangeStatus = { busy: boolean; files: number | undefined; add: number; del: number };
+  /** The Changes summary by workspace, so a chat never shows another workspace's badge. */
+  let changeStatuses: Record<string, ChangeStatus> = $state({});
   function openPanel(view: PanelView) {
     diffPath = undefined;
     panelRoute = app.route;
@@ -145,10 +150,25 @@
     }
     return undefined;
   });
+  const changesKey = $derived(located === undefined ? undefined : (located.chat.workspace?.id ?? located.project.id));
+  const changeStatus = $derived(changesKey === undefined ? undefined : changeStatuses[changesKey]);
+  /** A chat this tab hasn't listed, such as one another tab just created, is looked up before it counts as missing. */
+  let lookedUp: string | undefined = $state();
+  $effect(() => {
+    const id = chatId;
+    if (!loaded || id === undefined || located !== undefined || lookedUp === id) return;
+    void refreshProjects()
+      .catch(() => {})
+      .finally(() => (lookedUp = id));
+  });
 
+  const pluginPanels = $derived(located === undefined ? [] : panels(located.chat.extensions));
+  const pluginPanel = $derived(pluginPanels.find((item) => item.id === panelView));
+  const panelButtons = $derived([...kernelPanels, ...pluginPanels.map(({ id, icon }) => ({ id, icon }))]);
   const enabledPanels = $derived(
     new Set([
       "Context",
+      ...pluginPanels.map((item) => item.id),
       ...(app.extensions?.catalog ?? [])
         .filter((item) =>
           located?.chat.extensions.some((choice) => choice.id === item.id && choice.version === item.version),
@@ -161,6 +181,16 @@
     void Promise.all([refreshProjects(), refreshChatGPT(), refreshProviders(), refreshExtensions()])
       .catch((failure: unknown) => (error = failure instanceof Error ? failure.message : String(failure)))
       .finally(() => (loaded = true));
+    // Another tab or device may have renamed, added or removed chats while this one was in the background.
+    const returned = () => {
+      if (document.visibilityState === "visible") void refreshProjects().catch(() => {});
+    };
+    window.addEventListener("focus", returned);
+    document.addEventListener("visibilitychange", returned);
+    return () => {
+      window.removeEventListener("focus", returned);
+      document.removeEventListener("visibilitychange", returned);
+    };
   });
 
   let creatingChat = false;
@@ -317,7 +347,7 @@
                   project={located.project}
                   onNewChat={(mode) => newChat(located.project.id, mode)}
                   panels={panelButtons.filter((item) => enabledPanels.has(item.id))}
-                  onPanel={(id) => openPanel(id as PanelView)}
+                  onPanel={(id) => openPanel(id)}
                   changeCount={changeStatus?.files}
                 />{/key}
             </div>
@@ -374,6 +404,7 @@
                     >
                   </div>{/if}
                 {#key located.chat.workspace?.id ?? located.project.id}
+                  {@const statusKey = located.chat.workspace?.id ?? located.project.id}
                   {#if panelView === "Terminal"}
                     {#await terminalPanel()}<p role="status">Loading terminal…</p>
                     {:then { default: TerminalPanel }}
@@ -416,13 +447,18 @@
                         }}
                       />
                     {:catch failure}<p role="alert">Couldn't load files: {String(failure)}</p>{/await}
+                  {:else if pluginPanel !== undefined}
+                    {#await pluginPanel.load()}<p role="status">Loading {pluginPanel.name}…</p>
+                    {:then { default: Panel }}
+                      <Panel project={located.project} chat={located.chat} workspace={located.chat.workspace} />
+                    {:catch failure}<p role="alert">Couldn't load {pluginPanel.name}: {String(failure)}</p>{/await}
                   {:else}
                     {#await changesPanel()}
                       <p role="status">Loading changes…</p>
                     {:then { default: ChangesPanel }}
                       <ChangesPanel
                         bind:this={changesView}
-                        onStatus={(next) => (changeStatus = next)}
+                        onStatus={(next) => (changeStatuses[statusKey] = next)}
                         project={located.project}
                         workspace={located.chat.workspace}
                         initialPath={diffPath}
@@ -446,7 +482,7 @@
               {#if size === "tablet" || (size === "desktop" && !sidebarShown)}
                 <button class="b q" onclick={openSidebar}><Icon name="menu" />Projects</button>
               {/if}
-              <h1>{chatId === undefined ? "Pick a chat" : "Chat not found"}</h1>
+              <h1>{chatId === undefined ? "Pick a chat" : lookedUp === chatId ? "Chat not found" : "Loading chat…"}</h1>
               <p>Choose a chat in a project, or start a new one.</p>
               {#if ready}<button class="b p" onclick={() => newChat(ready.id)}
                   ><Icon name="plus" />New chat in {ready.name}</button

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, type ReleaseView, type ReleaseReview } from "../lib/api.ts";
   import ConfirmRemoval from "./ConfirmRemoval.svelte";
+  import { MAX_CHECK_ATTEMPTS, MAX_RETAINED_RELEASES } from "../../../src/protocol/limits.ts";
 
   let view: ReleaseView | undefined = $state.raw();
   let selectedDigest: string | undefined = $state();
@@ -100,7 +101,7 @@
     <div class="fine hash">Artifact: <span class="mono">{view.current.package}</span></div>
     {#if view.lastError}<div class="callout wa" role="status">{view.lastError}</div>{/if}
     <p class="fine">
-      {view.retained}/8 releases retained. Unfinished work blocks a change; old versions are never automatically
+      {view.retained}/{MAX_RETAINED_RELEASES} releases retained. Unfinished work blocks a change; old versions are never automatically
       deleted. Close all Terminal and Browser sessions first.
     </p>
     {#if view.previous}
@@ -122,7 +123,7 @@
       <pre
         class="command mono">{`${quote(view.evaluator + "/bin/pal")} check-release --candidate /absolute/worktree --data-dir ${quote(view.dataRoot)}`}</pre>
       <p class="fine">
-        At most eight attempts are retained. A different evaluator or a retention limit needs a reviewed host-side
+        At most {MAX_CHECK_ATTEMPTS} attempts are retained. A different evaluator or a retention limit needs a reviewed host-side
         handoff, not an automatic policy upgrade.
       </p>
     </details>

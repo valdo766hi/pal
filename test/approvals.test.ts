@@ -22,12 +22,18 @@ afterEach(async () => {
 const shell = (command: string, timeout = 5) =>
   `return await tools.shell_run({ command: ${JSON.stringify(command)}, timeout: ${timeout} });`;
 
-/** Point the open Pal at a fresh faux model that answers `codes` as scripts, then "done". */
-function answer(pal: Pal, codes: string[]) {
+type Turn = string | ReturnType<typeof fauxAssistantMessage>;
+
+/** Point the open Pal at a fresh faux model that answers `codes` as scripts or as given, then "done". */
+function answer(pal: Pal, codes: Turn[]) {
   const faux = fauxProvider();
   (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
   faux.setResponses([
-    ...codes.map((code) => fauxAssistantMessage(fauxToolCall("codemode", { code }), { stopReason: "toolUse" })),
+    ...codes.map((code) =>
+      typeof code === "string"
+        ? fauxAssistantMessage(fauxToolCall("codemode", { code }), { stopReason: "toolUse" })
+        : code,
+    ),
     fauxAssistantMessage("done"),
   ]);
   return faux.getModel();
@@ -55,7 +61,7 @@ async function setup(options: { approvalTtlMs?: number; dataRoot?: string } = {}
     return found;
   };
   let inputs = 0;
-  const start = async (...codes: string[]) => {
+  const start = async (...codes: Turn[]) => {
     const model = answer(pal, codes);
     await (await conversation()).configure({ model: { provider: model.provider, modelId: model.id } }, context);
     await pal.chats.submit(chat.id, `approval-input-${++inputs}`, { text: "run the fixture" }, context);
@@ -136,6 +142,26 @@ describe("command approval modes", () => {
     const view = await pal.approvals.view(chat.id);
     expect(view.approvals).toMatchObject([{ id: request.id, state: "approved" }]);
     expect(view.approvals[0]?.decidedAt).toEqual(expect.any(Number));
+  });
+
+  it("asks for a direct command under the turn that called it", async () => {
+    const fixture = await setup();
+    const { pal, chat } = fixture;
+    await fixture.start(
+      fauxAssistantMessage(fauxToolCall("shell_run", { command: "printf direct >> marker", timeout: 7 }), {
+        stopReason: "toolUse",
+      }),
+    );
+    const [request] = await fixture.waiting();
+    if (request === undefined) throw new Error("missing request");
+    const turn = (await (await fixture.conversation()).context(context)).entries.find(
+      (entry) => entry.kind === "pi.assistant",
+    );
+    expect(request).toMatchObject({ command: "printf direct >> marker", timeout: 7, assistant: turn?.id });
+    expect(await fixture.marker()).toBeUndefined();
+    await pal.approvals.decide(chat.id, request.id, "approve", request.digest);
+    await fixture.results();
+    expect(await fixture.marker()).toBe("direct");
   });
 
   it("denies, expires and stops a request without dispatching it", async () => {

@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
   type AssistantMessage,
   createModels,
+  type FauxResponseStep,
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
@@ -15,7 +16,14 @@ import { openPal } from "../src/core/app.ts";
 import { baselineHarness, externalHarness, type Harness, palHarness } from "../src/evaluation/harnesses.ts";
 import { markdown, summarize, wilson } from "../src/evaluation/report.ts";
 import { evaluate } from "../src/evaluation/run.ts";
-import { dependencyPlan, revisedDependencyPlan, TASKS } from "../src/evaluation/tasks.ts";
+import {
+  dependencyPlan,
+  helperResearch,
+  lostAttachment,
+  revisedDependencyPlan,
+  slowVerifierCheckout,
+  TASKS,
+} from "../src/evaluation/tasks.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -26,7 +34,8 @@ const fixtures = new URL("fixtures/evaluation/", import.meta.url);
 const read = (path: string) => readFile(new URL(path, fixtures), "utf8");
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const ANSWER = JSON.stringify({ importers: ["src/api.mjs", "src/cli.mjs", "src/db.mjs"] });
-const initialTasks = TASKS.filter((task) => task.id !== dependencyPlan.id && task.id !== revisedDependencyPlan.id);
+const laterTasks = [dependencyPlan, revisedDependencyPlan, helperResearch, slowVerifierCheckout, lostAttachment];
+const initialTasks = TASKS.filter((task) => !laterTasks.some((later) => later.id === task.id));
 
 /** Scripted model turns: these check the machinery and say nothing about any model's quality. */
 async function solutions() {
@@ -456,6 +465,159 @@ describe("evaluation runner", () => {
       await expect(readFile(join(output, "report.json"))).rejects.toMatchObject({ code: "ENOENT" });
     },
   );
+
+  it("gives each run the helpers, command limit and attachments its task requires, then restores the owner's", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "pal-evaluation-requirements-")));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const dataRoot = join(root, "data");
+    const pal = await openPal({ dataRoot, installRoot: join(root, "install") }, context);
+    cleanups.push(() => pal.close());
+    const faux = fauxProvider();
+    (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+    const model = faux.getModel();
+    const choice = { provider: model.provider, modelId: model.id, effort: "off" } as const;
+    const prices = await read("fixed/src/prices.mjs"),
+      receipt = await read("fixed/src/receipt.mjs");
+    const done = fauxAssistantMessage("done");
+    const code = (body: string) =>
+      fauxAssistantMessage(fauxToolCall("codemode", { code: body }), { stopReason: "toolUse" });
+    const write = (files: Record<string, string>) =>
+      fauxAssistantMessage(
+        Object.entries(files).map(([file, content]) => fauxToolCall("write_file", { path: file, content })),
+        { stopReason: "toolUse" },
+      );
+    const answers = JSON.stringify(helperResearch.answer.expected);
+    // The model learns the attachments' IDs from its request, and reads once the lost copy is gone.
+    const gone = async (id: string) => {
+      for (const project of await readdir(join(dataRoot, "uploads")))
+        if (
+          await access(join(dataRoot, "uploads", project, id, "data")).then(
+            () => true,
+            () => false,
+          )
+        )
+          return false;
+      return true;
+    };
+    const readAttachments: FauxResponseStep = async (request) => {
+      const labels = JSON.stringify(request.messages);
+      const id = (name: string) => new RegExp(`id=\\\\"([^\\\\"]+)\\\\" name=\\\\"${name}`).exec(labels)?.[1] ?? "";
+      while (!(await gone(id("returns.csv")))) await new Promise((resolve) => setTimeout(resolve, 10));
+      return code(`const pages = async (id) => {
+  const rows = [];
+  for (let offset = 1; ; ) {
+    const lines = (await tools.files_attachment({ id, offset })).text.split("\\n");
+    const end = lines.pop();
+    rows.push(...lines.map((line) => line.slice(line.indexOf("\\t") + 1)));
+    const next = /continue at offset (\\d+)/.exec(end);
+    if (next === null) return rows.slice(1);
+    offset = Number(next[1]);
+  }
+};
+const sum = (rows) => rows.reduce((total, row) => total + Number(row.split(",")[1]), 0);
+const orders = await pages("${id("orders.csv")}");
+let returnedCents = null;
+const unavailable = [];
+try { returnedCents = sum(await pages("${id("returns.csv")}")); } catch { unavailable.push("returns.csv"); }
+await tools.files_write({ path: "report.json", content: JSON.stringify({ orders: orders.length, totalCents: sum(orders), returnedCents, unavailable }), expectedHash: null });
+return "written";`);
+    };
+    const offered: string[] = [];
+    const firstRequests: string[] = [];
+    const turns: Record<string, Record<string, FauxResponseStep[]>> = {
+      pal: {
+        [helperResearch.id]: [
+          code(`await tools.files_write({path:"answers.json",content:${JSON.stringify(answers)},expectedHash:null});`),
+          done,
+        ],
+        [slowVerifierCheckout.id]: [
+          code(
+            `await tools.files_write({path:"src/prices.mjs",content:${JSON.stringify(prices)},expectedHash:${JSON.stringify(sha256(await read("buggy/src/prices.mjs")))}});` +
+              `await tools.files_write({path:"src/receipt.mjs",content:${JSON.stringify(receipt)},expectedHash:${JSON.stringify(sha256(await read("buggy/src/receipt.mjs")))}});`,
+          ),
+          // A direct call over the default 120 s runs only under the task's raised limit.
+          fauxAssistantMessage(fauxToolCall("shell_run", { command: "node test.mjs", timeout: 300 }), {
+            stopReason: "toolUse",
+          }),
+          done,
+        ],
+        [lostAttachment.id]: [readAttachments, done],
+      },
+      "baseline-loop": {
+        [helperResearch.id]: [write({ "answers.json": answers }), done],
+        [slowVerifierCheckout.id]: [
+          (request) => {
+            // Tool declarations travel in the request's system messages.
+            offered.push(JSON.stringify(request.messages));
+            return write({ "src/prices.mjs": prices, "src/receipt.mjs": receipt });
+          },
+          done,
+        ],
+        [lostAttachment.id]: [
+          (request) => {
+            firstRequests.push(JSON.stringify(request.messages));
+            return write({
+              "report.json": JSON.stringify({ orders: null, totalCents: null, returnedCents: null, unavailable: [] }),
+            });
+          },
+          done,
+        ],
+      },
+    };
+    const scripted = (harness: Harness): Harness => ({
+      ...harness,
+      run: (input) => {
+        faux.setResponses(
+          turns[harness.id]?.[TASKS.find((task) => input.runId.startsWith(`${task.id}-`))?.id ?? ""] ?? [],
+        );
+        return harness.run(input);
+      },
+    });
+    const report = await evaluate({
+      tasks: [helperResearch, slowVerifierCheckout, lostAttachment],
+      harnesses: [
+        scripted(palHarness(pal, choice)),
+        scripted(baselineHarness(() => pal.models, model, choice)),
+        externalHarness("external-cli", "true"),
+      ],
+      model: choice,
+      implementation: (await pal.extensions.view()).release,
+      budget: { seconds: 60, turns: 10 },
+      repeats: 1,
+      output: join(root, "report"),
+      modelKind: "fixture",
+    });
+    const run = (task: string, harness: string) => {
+      const found = report.runs.find((item) => item.task.id === task && item.harness.id === harness);
+      if (found === undefined) throw new Error(`no ${harness} run of ${task}`);
+      return found;
+    };
+    const trace = async (task: string, harness: string) =>
+      readFile(join(root, "report", run(task, harness).trace.path), "utf8");
+    for (const task of [helperResearch, slowVerifierCheckout, lostAttachment])
+      expect(run(task.id, "pal").grade).toMatchObject({ passed: true });
+    expect(await trace(helperResearch.id, "pal")).toContain('{"id":"helpers","version":1}');
+    expect(await trace(slowVerifierCheckout.id, "pal")).not.toContain('"id":"helpers"');
+    expect(run(slowVerifierCheckout.id, "pal").outcome).toMatchObject({ toolCalls: 2, failedToolCalls: 0 });
+    // The owner's own selection and limit are back once each run ends.
+    expect((await pal.extensions.view()).selected.map((choice) => choice.id)).not.toContain("helpers");
+    expect(await pal.settings.commandTimeout()).toBe(120);
+    // The baseline gets the same command limit and inline text, with no reader for the rest.
+    expect(offered[0]).toContain("Run a shell command in the workspace (300 s limit) and return its output.");
+    expect(offered[0]).not.toContain("(30 s limit)");
+    expect(firstRequests[0]).toContain('<attachment name=\\"orders.csv\\" type=\\"text/csv\\" size=\\"135221\\">');
+    expect(firstRequests[0]).toContain("[only the first 102400 bytes are shown]");
+    for (const task of [helperResearch, slowVerifierCheckout])
+      expect(run(task.id, "baseline-loop").grade).toMatchObject({ passed: true });
+    expect(run(lostAttachment.id, "baseline-loop").grade).toMatchObject({
+      passed: false,
+      failures: ["answer:incorrect_output"],
+    });
+    expect(run(lostAttachment.id, "external-cli").outcome).toMatchObject({
+      status: "harness_error",
+      error: "this external command cannot receive attachments",
+    });
+  });
 
   it("computes conservative intervals for small samples", () => {
     expect(wilson(0, 0)).toEqual({ low: 0, high: 1 });

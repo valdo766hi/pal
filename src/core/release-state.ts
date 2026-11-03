@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { SqliteExecutor } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
+import { MAX_RETAINED_RELEASES } from "../protocol/limits.ts";
 import { openDatabase } from "../storage/sqlite.ts";
 import { hash, type ReleaseManifest } from "./release-policy.ts";
 import { validate } from "./requests.ts";
@@ -20,7 +21,7 @@ const Selection = Type.Object(
     next: Type.Optional(Artifact),
     phase: Type.Enum(["stable", "trying"]),
     approved: Type.Array(ReleaseDigest, { maxItems: 8, uniqueItems: true }),
-    retained: Type.Array(Artifact, { minItems: 1, maxItems: 8 }),
+    retained: Type.Array(Artifact, { minItems: 1, maxItems: MAX_RETAINED_RELEASES }),
     lastError: Type.Optional(Type.String({ maxLength: 1000 })),
   },
   { additionalProperties: false },

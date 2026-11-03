@@ -52,6 +52,7 @@ const initial = (): Data => ({ goal: { revision: 0, text: "", constraints: [], a
 export const Working = defineDoc({
   kind: "pal.working-state",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "initial",

@@ -16,6 +16,7 @@ type BudgetState = { maxTurns: number; turns: number; deadline: number; task: nu
 const Budget = defineDoc({
   kind: "pal.evaluation-budget",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "current",

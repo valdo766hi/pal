@@ -17,6 +17,16 @@ type Common = {
   readonly snapshot: string;
   readonly prompt: string;
   readonly continuations?: readonly Continuation[];
+  /** Owner settings a run needs, applied to that run only: research helpers, a longer agent command limit. */
+  readonly requires?: { readonly helpers?: true; readonly commandSeconds?: number };
+  /**
+   * Files the first input attaches, from this directory under test/fixtures/evaluation, outside the workspace. A
+   * `lost` file's stored copy is removed once that input is admitted.
+   */
+  readonly attachments?: {
+    readonly snapshot: string;
+    readonly files: readonly { readonly name: string; readonly type: string; readonly lost?: true }[];
+  };
 };
 /** Graded by running the candidate's program on each case's JSON input. */
 export type ProgramTask = Common & {
@@ -285,6 +295,63 @@ export const revisedDependencyPlan = {
   ],
 } as const satisfies ProgramTask;
 
+export const helperResearch = {
+  kind: "answer",
+  id: "helper-research",
+  version: 1,
+  split: "development",
+  categories: ["repository-understanding", "research-helpers"],
+  snapshot: "helper-research",
+  requires: { helpers: true },
+  prompt:
+    "Do not change any existing file. Answer two independent questions; research them in parallel with helpers " +
+    "if you have them. (1) Which port does services/billing listen on as deployed? (2) Which queue does " +
+    "services/search's worker consume? The source is authoritative. Write answers.json in the project folder " +
+    'containing {"billingPort": number, "searchQueue": string}.',
+  answer: { file: "answers.json", expected: { billingPort: 9443, searchQueue: "eval-search-3" } },
+  unchanged: ["README.md", "services"],
+} as const satisfies AnswerTask;
+
+export const slowVerifierCheckout = {
+  ...checkout,
+  id: "checkout-slow-verifier",
+  snapshot: "slow-verifier",
+  categories: [...checkout.categories, "long-command"],
+  unchanged: ["test.mjs", "verify.mjs"],
+  requires: { commandSeconds: 300 },
+  prompt:
+    "node verify.mjs is this project's full verification; it takes about 150 seconds. Run it to completion after " +
+    "your fix, and do not modify it or test.mjs. " +
+    checkout.prompt,
+} as const satisfies ProgramTask;
+
+export const lostAttachment = {
+  kind: "answer",
+  id: "attachment-lost-isolation",
+  version: 1,
+  split: "development",
+  categories: ["attachments", "tool-failure", "recovery"],
+  snapshot: "attachment-report",
+  attachments: {
+    snapshot: "attachment-files",
+    files: [
+      { name: "orders.csv", type: "text/csv" },
+      { name: "returns.csv", type: "text/csv", lost: true },
+    ],
+  },
+  prompt:
+    "This week's orders.csv and returns.csv exports are attached. Write report.json in the project folder " +
+    'containing {"orders": number of order rows, "totalCents": sum of amount_cents over every order row, ' +
+    '"returnedCents": sum of amount_cents over every return row, "unavailable": sorted names of attachments ' +
+    "you could not read in full}. Use every row. A value that depends on an attachment you could not read in " +
+    "full is null; never estimate it. Do not change README.md.",
+  answer: {
+    file: "report.json",
+    expected: { orders: 8000, totalCents: 40488522, returnedCents: null, unavailable: ["returns.csv"] },
+  },
+  unchanged: ["README.md"],
+} as const satisfies AnswerTask;
+
 export const TASKS: readonly Task[] = [
   checkout,
   inventory,
@@ -294,4 +361,7 @@ export const TASKS: readonly Task[] = [
   verifierCheckout,
   dependencyPlan,
   revisedDependencyPlan,
+  helperResearch,
+  slowVerifierCheckout,
+  lostAttachment,
 ];

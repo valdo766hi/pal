@@ -37,7 +37,8 @@ Nix packages keep their immutable store-output identity. Source and other non-Ni
 snapshot the actual `src/` and `dist/` bytes, package/lock manifests, installed production/optional/peer
 dependency graph, and Node runtime/flags at startup. Dependency versions alone are not enough: edited
 installed files change the pin. Missing, linked, special or over-limit runtime files fail closed.
-The snapshot is bounded to 256 packages, 20,000 directory entries/files, 256 MiB total and 128 MiB per file.
+The snapshot is bounded to 256 packages, 20,000 directory entries/files, 256 MiB of package files and 128 MiB
+per file; a non-Nix Node executable is hashed separately, up to 256 MiB. A failure names the exceeded limit.
 
 **Stop Pal before editing, rebuilding or reinstalling its runtime, and keep it unchanged while running.**
 This startup snapshot is not an atomic filesystem snapshot, sandbox or custom-loader/monkeypatch guarantee.
@@ -96,8 +97,8 @@ All rows must pass on the same released artifact before full Linux/macOS support
 
 ### CI and coverage boundaries
 
-`.github/workflows/checks.yml` checks pushes and pull requests targeting `development`, using the exact
-pushed or PR-head commit, not an implicit merge commit. Dependencies come from the frozen lockfiles through
+`.github/workflows/checks.yml` checks pushes and pull requests targeting `main` or `development`, using the
+exact pushed or PR-head commit, not an implicit merge commit. Dependencies come from the frozen lockfiles through
 Nix. Hosted portable jobs currently use Ubuntu 24.04 x86-64 and macOS 15 Apple Silicon; the packaged Linux job
 uses Ubuntu 22.04. These are CI profiles, not minimum OS versions or acceptance of the owner's current Mac.
 Required branch-protection checks must be configured by the repository owner.
@@ -180,7 +181,15 @@ the main process RSS at readiness, then stops its own process group and removes 
 fails the run. JSON retains every sample, nearest-rank p50/p95, package/release and host identity, package NAR bytes
 and closure NAR bytes. NAR size is not compressed download size or filesystem allocation.
 
-Format 2 measures RSS through a fixed Node IPC preload rather than host process inspection (which Darwin's Nix
+Format 3 first launches the package once and reports it apart as `firstLaunch`, before the measured samples. A
+freshly realized package's first launch also pays one-time host costs, notably macOS assessing new executables and
+native modules, with nothing cached yet. With seven samples the nearest-rank p95 is the slowest one, so that single
+cold launch used to set the p95. In all 16 startup reports from 8 native macOS CI runs, the first sample was the
+slowest; in run 40039985822 it was 1869 ms against 541–806 ms for the rest, failing the 1500 ms p95 budget. A fresh
+local package showed the same: 1418 ms first, then 278–336 ms, and 260–302 ms once launched. The first launch is
+still measured, retained and held to the runner's 5000 ms startup deadline; it is just not a warm-cache sample.
+
+Formats 2 and 3 measure RSS through a fixed Node IPC preload rather than host process inspection (which Darwin's Nix
 sandbox denies). The observer's cost is included for both packages; compare only like instrumentation, not old
 format-1 measurements. It overwrites inherited Node preload options, runs no provider calls and does not extend
 the measured process lifetime. These are explicitly trusted packages: self-reported memory is not tamper-proof
@@ -206,14 +215,17 @@ nix build --out-link transcript-benchmark .#transcript-benchmark
 ```
 
 Each sample opens a fresh in-process Pal fixture with fake provider keys and 500 assistant history entries in a new
-1440×900 sandboxed Chromium context limited to loopback, then sends 60 live text updates through the chat's own
-event stream. JSON keeps every sample's Chromium task/script/layout/style time and animation-frame waits, their
-nearest-rank p50/p95, and web-bundle, browser and host identity. A sample fails unless all history and the exact
-live text render, the draft, focus and scroll position are unchanged, no provider request is made and the page
-reports no errors. Only the web bundle is selected: the server, fixture and browser come from the runner's tree,
-so compare bundles that speak the same API. These are not network, model or page-load latency results. CI runs
-the same pre-extraction baseline and candidate bundles on macOS and on Ubuntu 22.04; hosted Ubuntu 24.04 disallows
-the user namespaces Chromium's sandbox needs, and the runner never launches Chromium without its sandbox.
+1440×900 sandboxed Chromium context limited to loopback, then sends 60 live text updates through the chat's own event
+stream. JSON keeps every sample's Chromium task/script/layout/style time and animation-frame waits, their nearest-rank
+p50/p95, and web-bundle, browser and host identity. Before measuring, it scrolls a third of the way into older history
+(the transcript scroller is `column-reverse`, so history lies at negative offsets) and checks that a history row sits in
+the middle of the view. A sample fails unless all history and the exact live text render, that row stays within a pixel
+of its place through the live text, the answer's commit and a snapshot replacement, the draft and focus are unchanged,
+no provider request is made and the page reports no errors. Only the live updates are timed. Only the web bundle is
+selected: the server, fixture and browser come from the runner's tree, so compare bundles that speak the same API. These
+are not network, model or page-load latency results. CI runs the same pre-extraction baseline and candidate bundles on
+macOS and on Ubuntu 22.04; hosted Ubuntu 24.04 disallows the user namespaces Chromium's sandbox needs, and the runner
+never launches Chromium without its sandbox.
 
 ### Loopback MCP cache measurements
 
@@ -285,6 +297,7 @@ host before changing a limit. MiB/GiB below mean powers of 1024; paired limits u
 | Candidate metric | Maximum |
 | --- | --- |
 | Startup readiness p50 / p95 | baseline p50 × 1.35 + 50 ms / 1500 ms |
+| Startup first launch (one, reported apart) | 5000 ms |
 | Startup main RSS p50 / p95 | baseline p50 × 1.15 + 8 MiB / 192 MiB |
 | Package NAR / closure NAR | min(160 MiB, baseline × 1.10) / min(2 GiB Linux or 3 GiB Darwin, baseline × 1.05) |
 | MCP round trip p95, first / cached / forced live | 1500 / 750 / 750 ms |
@@ -417,6 +430,10 @@ allowances, even when no task is active. The migration changes no table layout o
 may use old code only while the stopped store remains compatible; after migration, preserve data and hold for a
 forward fix rather than attempting an old-code start or automatic database restore/rollback.
 
+Store format 23 comes before Pi Durable 1.4's one-way migration of its own tables, which older builds cannot open.
+An older store that still has unfinished work is refused unchanged, so the release that started that work can finish
+it first. Drain and stop Pal and verify a stopped-state backup before upgrading.
+
 ### Evaluations
 
 Tasks are versioned in `src/evaluation/tasks.ts`, each with a frozen starting repository under
@@ -431,6 +448,16 @@ are introduced, then explicitly superseded by root-only exclusions. Both checkpo
 idle restart; independent final cases require the corrected rule without losing the original graph constraints.
 Continuations are delivered after an idle checkpoint in the same conversation/history, not concatenated into the
 initial prompt. Scripted owner corrections count as interventions and remain visible in the trace.
+
+Three development tasks cover long commands, research helpers and attachments. `helper-research` asks two
+independent questions about a repository whose READMEs are stale; Pal's chat for that run gets research helpers.
+`checkout-slow-verifier` is the checkout fix plus a verifier that takes about 150 seconds. Pal's command limit is
+raised to 300 seconds for that run, and the baseline's `run` tool gets the same limit instead of 30 seconds.
+`attachment-lost-isolation` attaches two exports larger than 100 KiB, and the stored copy of one is removed once the
+input is admitted. The answer must total the other export in full and name the lost one as unavailable, with null
+instead of an estimate. The baseline gets the same first 100 KiB of each inline, with no way to read the rest;
+external commands refuse the task. A task's requirements only add to the evaluation directory's own settings, for
+that run, and are restored after it. Version 5 of the Pal and baseline adapters applies them.
 
 ```sh
 nix build --out-link evaluate .#evaluate
@@ -451,8 +478,8 @@ configure the CLI with an explicitly approved evaluation profile,
 never credentials in the command or prompt. Reports/traces are private and may contain repository content.
 
 `--seconds` sets one execution deadline, including Pal project/chat preparation; trace export and independent
-grading are outside it. Baseline shell calls use at most 30 seconds of the remaining time. Both use GNU timeout
-for an independent process-group deadline. Pal's turn/deadline reservation is a Pi document that survives
+grading are outside it. Baseline shell calls use at most 30 seconds, or the task's command limit, of the remaining
+time. Both use GNU timeout for an independent process-group deadline. Pal's turn/deadline reservation is a Pi document that survives
 reopen; exhausting it cancels the native generation task before another model request. Continuations share that
 original deadline and turn allowance, including owned research helpers. Native summary tasks also consume the
 allowance; their requests bypass Pi's generation request hook. Background summaries must settle within the same
@@ -524,6 +551,7 @@ src/
 web/src/
   components/      Svelte 5 views and panels
   lib/             API client, chat event stream, shared state, icons
+plugins/           plugins compiled into Pal: <id>/{manifest.ts, server.ts, ui/} and the index.ts inventory
 test/              Vitest suites and fixture services; e2e/ for Playwright
 nix/               package, checks and test derivations
 ```
@@ -532,15 +560,67 @@ See [architecture](architecture.md) for how the pieces connect.
 
 ## Adding capabilities
 
-Prefer extensions and reusable packages over adding more responsibilities to core. The aim is for people to build
-and share their own tools, integrations and customizations, not just use the bundled features. See
-[extension architecture](architecture.md#extensions-and-releases) for the current scope and trust boundaries.
+Pal keeps a small core. New abilities come from one of three places:
 
-- **Custom tools today:** implement an MCP server and connect it through [Settings → MCP servers](configuration.md#internet-tools-mcp).
-- **Built-in contributions today:** use `src/core/extensions.ts` and the existing native-tool and UI boundaries.
-  Interface-only extras do not need a model tool or new permissions.
-- **Shared guarantees:** keep owner consent, Code Mode-only model calls, durable receipts, version pins and resource
-  limits intact. New defaults must not change active chats or runs.
+| Add           | When                                                                                         | How                                                                                                                                  |
+| ------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| A skill       | A procedure the model should follow with the tools Pal already has. No code.                 | A `SKILL.md` in `~/.agents/skills/<name>/` or the project's `.agents/skills/<name>/` ([skill sources](architecture.md#skill-sources)). |
+| An MCP server | Tools from a separate process or service, added without rebuilding Pal.                      | Connect it in [Settings → MCP servers](configuration.md#internet-tools-mcp).                                                         |
+| A plugin      | Full integration: native tools, settings, panels, chat pieces and its own transcript entries. | TypeScript and Svelte in `plugins/<id>/`, compiled into Pal; rebuild and restart.                                                    |
+
+Whichever you choose, keep owner consent, Code Mode-only model calls, durable receipts, version pins and resource
+limits intact. New defaults must not change active chats or runs.
+
+**Trust.** A plugin runs inside Pal's process with full trust and can use any Node API. Its manifest's permissions,
+callers and tables are policy that Pal checks at its boundaries, not a sandbox. Review a plugin as you would Pal's own
+code, and never build one from a source you don't trust. Skills and MCP servers stay outside that boundary.
+
+### Writing a plugin
+
+`test/fixtures/plugins/example/` is a complete template: one tool, one setting, one panel and a renderer for the entry
+its tool records. `test/e2e/plugins.test.ts` follows these steps on a copy of the source, builds it and uses each part
+in a browser. See [extension architecture](architecture.md#extensions-and-releases) for what the kernel keeps.
+
+1. **Create the folder.** Copy the template to `plugins/<id>/`, where `<id>` is lowercase letters, digits and hyphens.
+   It moves two folders up, so drop two `../` from each import that leaves the folder (`../../../../src/` becomes
+   `../../src/`). Replace `example` everywhere: the ID, native name, namespace and tool prefix, panel and tab names,
+   entry kind and the `api.plugin("example", …)` call.
+2. **Describe it in `manifest.ts`.** It is plain data, which the web build also reads.
+   - `id`, `version` and `native`, which must be `pal.<id>`. Chats pin the version, and a chat whose version a build
+     lacks waits for its retained Pal release, so raise it only for an incompatible change.
+   - `core: { min: 2, max: 2 }`, the capability API it was written for; `name`, `description` and `order`, its place
+     in Settings → Extensions; `optIn: true` leaves it off until the owner enables it for new chats.
+   - `namespace` and `tools`. Each tool name starts with the namespace prefix and declares `callers: ["tools"]` (Code
+     Mode), its `replay` (`safe` only if repeating it has no external effect), `maxOutputBytes` and, if it reads the
+     chat's granted folders, `permissions: ["project.read"]`. Only tools already on the kernel's direct list may add
+     `"model"`.
+   - `ui`: Settings tabs, workspace `panels`, chat `slots` (`context` or `composer`) and `renderers` for its own
+     `pal.<id>` entries, each naming a component in `ui/`. Icons come from `web/src/lib/icons.ts`. Kernel panel and
+     tab names are refused.
+3. **Add a tool in `server.ts`.** `open(host)` returns the tools the manifest declares, with the same names, replay
+   and callers. Record what the owner should see with
+   `api.commit((tx) => tx.appendEntry(api.conversationId, { kind: "pal.<id>", data }), context)`. The `host` offers
+   narrow services: `settings`, `now()`, folder leases through `authorize`, the chat's `project` and SQL limited to
+   tables the manifest declares. Pal doesn't create tables for plugins, so keep state in settings or entries.
+4. **Add a setting.** `host.settings.get(name)` and `set(name, value)` keep JSON values of at most 16 KiB for this
+   plugin only. `api(request)` answers the owner's requests to `/api/plugins/<id>/…`: validate the body and throw
+   `HttpError` to refuse. The Settings tab calls it with `api.plugin("<id>", method, path, body)` from
+   `web/src/lib/api.ts`.
+5. **Add a panel.** A Svelte 5 component in `ui/` that receives `{ project, chat, workspace }`. It appears after the
+   kernel's panels in chats that selected the plugin; a component that fails to load says so in its place. A
+   renderer receives `{ entry }`.
+6. **List it.** Add one line to `plugins/index.ts`: `export { default as <id> } from "./<id>/server.ts";`. A plugin
+   with `scope: "browser"`, such as `pets`, has only interface pieces, no `server.ts` and no line.
+7. **Build, drain and restart.** Run `pnpm check` and `pnpm build`, let running chats finish, then restart Pal on the
+   new build. A changed plugin changes Pal's implementation identity, so the new build refuses to start while work is
+   unfinished; finish it on the previous build first. An installed Pal takes the new build through
+   [releases](configuration.md#releases).
+8. **Enable and test.** Turn it on in Settings → Extensions for new chats; existing chats keep the selection and
+   versions they started with. `test/capabilities.test.ts` shows the contract checks, and `test/e2e/plugins.test.ts`
+   the browser flow. Run `pnpm test` and `pnpm test:e2e`.
+
+Removing a plugin's line and folder removes its tools and interface. Its settings and entries stay, and chats that
+used it show its entries as a short note.
 
 ## Conventions
 

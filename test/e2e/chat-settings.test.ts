@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
 import type { CompiledCapability } from "../../src/capabilities/contract.ts";
-import { exampleCapability } from "../../src/capabilities/example.ts";
+import exampleCapability from "../fixtures/plugins/example/server.ts";
 import { startServer } from "../../src/core/server.ts";
 import { runGit } from "../../src/core/git.ts";
 import { GOOD_KEY, startProviderFixture } from "../fixtures/provider-server.ts";
@@ -708,7 +708,7 @@ describe("chat draft admission", () => {
     expect(errors).toEqual([]);
   });
 
-  it("keeps unsent drafts per chat but clears them on reload and sign-out", async () => {
+  it("keeps unsent drafts per chat across navigation and reload, and clears them on sign-out", async () => {
     const { page, base, saved, other, provider, errors } = await setup(1440);
     await page.goto(`${base}/#/chat/${saved.id}`);
     await page.getByLabel("Message", { exact: true }).fill("Unsent saved-chat draft");
@@ -720,9 +720,10 @@ describe("chat draft admission", () => {
     expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(1);
     await page.reload();
     await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
-    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
-    expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(0);
-    await page.getByLabel("Message", { exact: true }).fill("Discard this on sign-out");
+    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("Unsent saved-chat draft");
+    expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(1);
+    await navigateChat(page, other.id);
+    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("Other chat draft");
     await page.evaluate(() => {
       location.hash = "#/settings/general";
     });
@@ -730,9 +731,67 @@ describe("chat draft admission", () => {
     await page.getByLabel("Passphrase", { exact: true }).fill("correct horse battery");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Sign out of Pal", exact: true }).waitFor();
-    await navigateChat(page, saved.id);
-    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+    for (const chat of [saved, other]) {
+      await navigateChat(page, chat.id);
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+    }
+    expect(
+      await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft."))),
+    ).toEqual([]);
     expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("recovers a saved send after reload: clears it once admitted, or retries it once if it never arrived", async () => {
+    const { pal, page, base, saved, provider, errors } = await setup(1440);
+    const inputs = `${base}/api/chats/${saved.id}/inputs`;
+    const admitted = () =>
+      pal.store.database.all<{ state: string }>("SELECT state FROM pal_admissions WHERE chat_id = ?", saved.id);
+    const message = page.getByLabel("Message", { exact: true });
+    const lookup = () =>
+      page.waitForResponse((reply) => reply.request().method() === "GET" && reply.url().startsWith(`${inputs}/`));
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
+
+    // Pal admits the input, but the reply never reaches the tab.
+    await page.route(inputs, async (route) => {
+      await route.fetch();
+      await route.abort();
+    });
+    await message.fill("Admitted, reply lost");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "This send isn't confirmed" }).waitFor();
+    await page.unroute(inputs);
+    const [found] = await Promise.all([lookup(), page.reload()]);
+    expect(found.status()).toBe(200);
+    await expect.poll(() => message.inputValue()).toBe("");
+    expect(await page.getByRole("button", { name: "Retry saved send", exact: true }).count()).toBe(0);
+    await expect.poll(() => provider.requests.length).toBe(1);
+
+    // The tab reloads while its send is still on the way, so Pal never receives it.
+    const held = Promise.withResolvers<undefined>();
+    const reloaded = Promise.withResolvers<undefined>();
+    await page.route(inputs, async (route) => {
+      held.resolve(undefined);
+      await reloaded.promise;
+      await route.abort().catch(() => {});
+    });
+    await message.fill("Never reached Pal");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await held.promise;
+    const [missing] = await Promise.all([lookup(), page.reload()]);
+    reloaded.resolve(undefined);
+    await page.unroute(inputs);
+    expect(missing.status()).toBe(404);
+    expect(await admitted()).toEqual([{ state: "admitted" }]);
+    await page.getByRole("alert").filter({ hasText: "It never reached Pal." }).waitFor();
+    await page.getByRole("button", { name: "Retry saved send", exact: true }).click();
+    await expect.poll(() => message.inputValue()).toBe("");
+    await expect.poll(admitted).toEqual([{ state: "admitted" }, { state: "admitted" }]);
+    await expect.poll(() => provider.requests.length).toBe(2);
+    expect(
+      await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft."))),
+    ).toEqual([]);
     expect(errors).toEqual([]);
   });
 });
@@ -868,16 +927,18 @@ describe("review comment drafts", () => {
       await page.reload();
       if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
       await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
-      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+      // The copied feedback and its link survive the reload; Pal hasn't received it yet.
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe(composed);
       await page.getByRole("button", { name: "Changes", exact: true }).click();
-      await panel.getByText("Not sent", { exact: true }).waitFor();
+      await panel.getByText("In composer · not admitted", { exact: true }).waitFor();
       const legacy = await page.request.post(`${base}/api/projects/${project.id}/comments/sent`, {
         headers: { origin: base },
         data: { ids: [comment.id], workspace: workspace.id },
       });
       expect(legacy.status()).toBe(404);
       expect((await pal.changes.list(project.id, "normal", workspace.id)).comments[0]?.sent).toBe(false);
-      await panel.getByRole("button", { name: "Send feedback to chat (1)", exact: true }).click();
+      await panel.getByRole("button", { name: "Copy feedback again (1)", exact: true }).click();
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe(composed);
       if (width < 700) await panel.waitFor({ state: "detached" });
       const lost = Promise.withResolvers<string>();
       await page.route(
@@ -1294,9 +1355,9 @@ describe("compiled capability composition", () => {
     await page.goto(`${base}/#/settings/extensions`);
     const row = page.locator(".extension").filter({ has: page.getByText("Example echo", { exact: true }) });
     await row.getByRole("switch", { name: "Enable Example echo for new chats", exact: true }).waitFor();
-    expect(await row.innerText()).toContain("Core API 1–1");
+    expect(await row.innerText()).toContain("Core API 2–2");
     expect(await row.innerText()).toContain("example_echo · safe · project.read");
-    expect(await row.innerText()).toContain("Contributes: Context");
+    expect(await row.innerText()).toContain("Contributes: Example, Chat results");
     const item = (await pal.extensions.view()).catalog.find((item) => item.id === "example");
     if (item === undefined) throw new Error("missing compiled template");
     expect(await row.innerText()).toContain(item.implementation);
@@ -1987,9 +2048,29 @@ describe("long transcript updates", () => {
     });
     const input = page.getByLabel("Message", { exact: true });
     await input.fill("Keep this draft");
-    await page.locator(".scroller").evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
+    // The scroller is column-reverse: 0 is the newest end and older history lies at negative offsets.
+    const scroller = page.locator(".scroller");
+    await scroller.evaluate((node) => (node.scrollTop = -(node.scrollHeight - node.clientHeight) / 2));
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const scrollBefore = await page.locator(".scroller").evaluate((node) => node.scrollTop);
+    const anchor = await scroller.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const middle = box.top + box.height / 2;
+      const rows = [...node.querySelectorAll(".transcript > .item .md")].filter((row) =>
+        /^History \d+$/.test(row.textContent?.trim() ?? ""),
+      );
+      const distance = (row: Element) => Math.abs(row.getBoundingClientRect().top - middle);
+      const nearest = rows.reduce((best, row) => (distance(row) < distance(best) ? row : best));
+      return { scrollTop: node.scrollTop, text: nearest.textContent?.trim() ?? "" };
+    });
+    expect(anchor.scrollTop).toBeLessThan(0);
+    expect(anchor.text).not.toBe("History 79");
+    const offset = () =>
+      page
+        .getByText(anchor.text, { exact: true })
+        .evaluate(
+          (node) => node.getBoundingClientRect().top - (node.closest(".scroller")?.getBoundingClientRect().top ?? 0),
+        );
+    const visible = await offset();
     const order = () =>
       page
         .locator(".transcript > .item")
@@ -2005,7 +2086,7 @@ describe("long transcript updates", () => {
     await expect
       .poll(order)
       .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "echo loose", `Live${".".repeat(20)}`]);
-    expect(await page.locator(".scroller").evaluate((node) => node.scrollTop)).toBe(scrollBefore);
+    expect(Math.abs((await offset()) - visible)).toBeLessThanOrEqual(1);
     expect(await input.inputValue()).toBe("Keep this draft");
     expect(await input.evaluate((node) => node === document.activeElement)).toBe(true);
 
@@ -2651,4 +2732,90 @@ describe("saved working goals", () => {
       }
     },
   );
+});
+
+describe("workspace state and project dialog", () => {
+  it("keeps each workspace's Changes badge, resolves chats this tab hasn't listed and refreshes on return", async () => {
+    const { pal, page, base, saved, errors } = await reviewFixture(1440);
+    const changes = page.getByRole("button", { name: "Changes", exact: true });
+    await expect.poll(() => changes.getAttribute("data-tip")).toBe("Changes · 2 files");
+    await changes.click();
+    await page.getByRole("complementary", { name: "Workspace panel" }).waitFor({ state: "detached" });
+
+    // Created elsewhere after this tab listed its projects.
+    const elsewhere = await pal.projects.create("elsewhere-project", { name: "Elsewhere" });
+    const fresh = await pal.chats.createChat("elsewhere-chat", { projectId: elsewhere.id, title: "Fresh" }, context);
+    expect(await pal.workspaces.info(fresh.id)).toMatchObject({ state: "ready" });
+    await navigateChat(page, fresh.id);
+    expect(await page.getByRole("heading", { name: "Chat not found" }).count()).toBe(0);
+    expect(await changes.getAttribute("data-tip")).toBe("Changes");
+    await navigateChat(page, saved.id);
+    expect(await changes.getAttribute("data-tip")).toBe("Changes · 2 files");
+
+    await page.evaluate(() => {
+      location.hash = "#/chat/not-a-chat";
+    });
+    await page.getByRole("heading", { name: "Chat not found" }).waitFor();
+
+    await pal.projects.create("returned-project", { name: "Arrived while away" });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByText("Arrived while away", { exact: true }).waitFor();
+
+    // An older listing that arrives late never replaces a newer one.
+    const fetched = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const delivered = Promise.withResolvers<undefined>();
+    let held = false;
+    await page.route(`${base}/api/projects`, async (route) => {
+      if (held) return route.continue();
+      held = true;
+      const response = await route.fetch();
+      fetched.resolve(undefined);
+      await release.promise;
+      await route.fulfill({ response });
+      delivered.resolve(undefined);
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await fetched.promise;
+    await pal.projects.create("newest-project", { name: "Newest listing" });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByText("Newest listing", { exact: true }).waitFor();
+    release.resolve(undefined);
+    await delivered.promise;
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    expect(await page.getByText("Newest listing", { exact: true }).count()).toBe(1);
+    expect(errors).toEqual([]);
+  });
+
+  it("opens Create project as a native modal: initial focus, contained Tab, Escape and focus restore", async () => {
+    const { page, base, saved, errors } = await setup(1440);
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const opener = page.getByRole("button", { name: "New project", exact: true });
+    await opener.click();
+    const dialog = page.getByRole("dialog", { name: "Create project" });
+    await dialog.waitFor();
+    expect(await dialog.evaluate((node) => node.matches(":modal"))).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.getAttribute("placeholder")))
+      .toBe("e.g. Platform");
+    // Tab never reaches the inert page behind it; past the last control, focus may only leave for the browser itself.
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press("Tab");
+      const outside = await page.evaluate(() => {
+        const active = document.activeElement;
+        return active !== null && active !== document.body && active.closest("dialog") === null;
+      });
+      expect(outside).toBe(false);
+    }
+    // Escape leaves the folder picker first, then closes the dialog.
+    await dialog.getByRole("radio", { name: /Use existing folder/ }).check();
+    await dialog.getByRole("button", { name: "Choose folder…", exact: true }).click();
+    await page.getByRole("dialog", { name: "Choose a folder" }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.getByRole("heading", { name: "Create project" }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached" });
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe("New project");
+    expect(errors).toEqual([]);
+  });
 });

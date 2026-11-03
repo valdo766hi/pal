@@ -18,7 +18,7 @@ import {
   chatGPTProvider,
   OPENAI_CHATGPT,
 } from "../pi/chatgpt.ts";
-import { createPalCodemode } from "../pi/codemode.ts";
+import { createPalCodemode, MODEL_TOOLS } from "../pi/codemode.ts";
 import { evaluationBudget } from "../pi/evaluation-budget.ts";
 import { McpManager } from "../pi/mcp.ts";
 import { ModelProviders } from "../pi/providers.ts";
@@ -28,9 +28,9 @@ import { openStore, type Store } from "../storage/store.ts";
 import { CommandApprovals } from "./approvals.ts";
 import { BROWSER_NAMESPACE, browserTools } from "../pi/browser-tools.ts";
 import { type BrowserRuntime, browserRuntime, ProjectBrowsers } from "./browser.ts";
-import { chatConfiguration, ChatService } from "./chats.ts";
-import { AGENTS_NAMESPACE, helperBudget, HelperLinks, type HelperLimits, helperTools } from "./delegation.ts";
-import { BuiltinExtensions, releaseIdentity } from "./extensions.ts";
+import { type Barrier, chatConfiguration, ChatService } from "./chats.ts";
+import { helperBudget, HelperLinks, type HelperLimits } from "./delegation.ts";
+import { BuiltinExtensions, PLUGINS, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { WORKING_NAMESPACE, WorkingState } from "./working-state.ts";
 import { workspaceRevision } from "./workspace-revision.ts";
@@ -41,11 +41,10 @@ import { ProjectSkills, SKILLS_NAMESPACE } from "./skills.ts";
 import { Changes } from "./changes.ts";
 import { FILES_NAMESPACE, fileTools, projectFiles } from "./files.ts";
 import { FolderGrants } from "./folders.ts";
-import type { ProjectMemory } from "./memory.ts";
-import { COMPILED_CAPABILITIES } from "../capabilities/compiled.ts";
 import { CompiledCapabilities, type CompiledCapability } from "../capabilities/contract.ts";
 import { HttpError } from "./http.ts";
 import {
+  COMMAND_TIMEOUT,
   COMPACT_EXTENSION,
   compactOutput,
   HostCommands,
@@ -57,6 +56,7 @@ import { Owner } from "./owner.ts";
 import { type Project, Projects } from "./projects.ts";
 import { Schedules } from "./schedules.ts";
 import { ProjectSearch } from "./search.ts";
+import { Reports } from "./diagnostics.ts";
 import { Uploads } from "./uploads.ts";
 import { Terminals } from "./terminals.ts";
 import { WorkspacePurge } from "./workspace-purge.ts";
@@ -80,6 +80,10 @@ export type PalOptions = {
   readonly guidanceHome?: string;
   /** Research helper bounds, read at each check; tests lower them. */
   readonly helperLimits?: HelperLimits;
+  /** The Harness clock, which also times script and helper deadlines; tests pass a fake one. */
+  readonly now?: () => number;
+  /** Pauses admission between Pal's and Pi's commits; tests use it to reorder them deterministically. */
+  readonly admissionBarrier?: (point: Barrier) => void | Promise<void>;
 };
 
 /** One running installation: the store's single owner and every service built on it. */
@@ -90,8 +94,9 @@ export type Pal = {
   readonly projects: Projects;
   readonly folders: FolderGrants;
   readonly workspaces: Workspaces;
-  readonly memory: ProjectMemory;
   readonly capabilities: CompiledCapabilities;
+  /** Pi's non-fatal reports since Pal started, by category, for diagnostics. */
+  readonly reports: Reports;
   readonly context: ChatContext;
   readonly working: WorkingState;
   readonly instructions: ProjectInstructions;
@@ -135,6 +140,9 @@ export type Settings = {
   /** Deferring onboarding never chooses a model or grants permission to send. */
   modelSetupDeferred(): Promise<boolean>;
   setModelSetupDeferred(deferred: boolean): Promise<void>;
+  /** The longest timeout, in seconds, the model may give one command it calls directly. */
+  commandTimeout(): Promise<number>;
+  setCommandTimeout(seconds: number): Promise<void>;
 };
 
 // Subscription mode never reads the process environment, so an ambient OPENAI_API_KEY cannot be picked up.
@@ -143,9 +151,10 @@ const NO_AMBIENT_AUTH = { env: async () => undefined, fileExists: async () => fa
 export async function openPal(
   options: PalOptions,
   context: Context,
-  definitions: readonly CompiledCapability[] = COMPILED_CAPABILITIES,
+  definitions: readonly CompiledCapability[] = PLUGINS,
 ): Promise<Pal> {
   const store = await openStore(options.dataRoot);
+  const now = options.now ?? Date.now;
   options = { ...options, dataRoot: dirname(store.path) };
   const commands = new HostCommands();
   let search: ProjectSearch | undefined;
@@ -198,6 +207,16 @@ export async function openPal(
   };
   try {
     const { database } = store;
+    const setting = async (key: string, db: SqliteExecutor = database) =>
+      (await db.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = ?", key))?.value;
+    const save = (key: string, value: string, db: SqliteExecutor = database) =>
+      db.run(
+        "INSERT INTO pal_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        key,
+        value,
+      );
+    // Read by the shell hook, which can run while the Harness opens, before `settings` exists.
+    const commandTimeout = async () => Number((await setting("commands:timeout")) ?? COMMAND_TIMEOUT);
     const links = new HelperLinks(store.storage, database);
     const registry = createRegistry();
     const extensions = await BuiltinExtensions.open(
@@ -267,6 +286,9 @@ export async function openPal(
         return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
       },
       authorize: (api, ctx) => folders.forTool(api, ctx),
+      now,
+      // The helpers plugin's tool and the kernel's helper budget hooks share these bounds.
+      ...(options.helperLimits === undefined ? {} : { options: { helpers: options.helperLimits } }),
     });
     capabilities = openedCapabilities;
     const guidanceFiles = new GuidanceFiles({
@@ -368,12 +390,13 @@ export async function openPal(
         INSTRUCTIONS_NAMESPACE,
         SKILLS_NAMESPACE,
         WORKING_NAMESPACE,
-        AGENTS_NAMESPACE,
       ],
     });
     sandbox = codemode.sandbox;
     for (const extension of codemode.extensions) registry.install(extension);
     registry.install(extensions.extension);
+    // Before any tool can run: a replay-safe attachment read may resume while the Harness opens.
+    const uploads = await Uploads.open(database, options.dataRoot);
     registry.install(
       fileTools({
         root: projectRoot,
@@ -385,6 +408,22 @@ export async function openPal(
           list: (api, ctx) => folders.forRun(api, ctx),
           open: (api, ctx, id) => folders.forTool(api, ctx, id),
         },
+        // Only attachments this chat sent with an input Pi accepted, which the model has seen. Pal's own receipt can
+        // trail Pi's commit, so an input still admitting counts once Pi holds its submission.
+        attachment: async (conversation, id, offset, limit) => {
+          const inputs = await database.all<{ project: string; request: string; state: string }>(
+            "SELECT c.project_id AS project, a.request_id AS request, a.state FROM pal_chats c JOIN pal_admissions a ON a.chat_id = c.id WHERE c.conversation_id = ? AND c.deleted_at IS NULL AND a.state IN ('admitted', 'admitting') AND EXISTS (SELECT 1 FROM json_each(a.intent, '$.attachments') WHERE value = ?)",
+            conversation,
+            id,
+          );
+          for (const input of inputs)
+            if (
+              input.state === "admitted" ||
+              (await store.storage.submissionByRequest(conversation, input.request, context)) !== undefined
+            )
+              return uploads.read(input.project, id, offset, limit);
+          return undefined;
+        },
       }),
     );
     registry.install(
@@ -393,6 +432,7 @@ export async function openPal(
         commands,
         locks,
         verification: working.checks,
+        limit: commandTimeout,
         // Only calls that ran without an approval: Ask mode binds the owner's decision to the shown command.
         compact: async (conversation, task, ctx) => {
           if (approvals === undefined || (await approvals.asked(task))) return false;
@@ -403,12 +443,6 @@ export async function openPal(
     );
     registry.install(compactOutput);
     registry.install(browserTools(() => browsers));
-    registry.install(
-      helperTools({
-        project: async (conversation) => (await projectFor(conversation))?.id,
-        ...(options.helperLimits === undefined ? {} : { limits: options.helperLimits }),
-      }),
-    );
     const commandApprovals = new CommandApprovals({
       database,
       root: (conversation) => workspaceRoot(conversation, true),
@@ -436,7 +470,6 @@ export async function openPal(
           INSTRUCTIONS_NAMESPACE,
           SKILLS_NAMESPACE,
           WORKING_NAMESPACE,
-          AGENTS_NAMESPACE,
           ...namespaces,
         ]),
     });
@@ -455,7 +488,7 @@ export async function openPal(
       return harness;
     };
     const budget = evaluationBudget(currentHarness);
-    const helperBudgets = helperBudget(currentHarness, options.helperLimits);
+    const helperBudgets = helperBudget(currentHarness, options.helperLimits, now);
     // Existing conversations already select this mandatory extension; a new name would leave their core hooks out.
     registry.install({
       ...chatContext.extension,
@@ -479,7 +512,17 @@ export async function openPal(
         ...(helperBudgets.hooks ?? []),
       ],
     });
-    const running = await Harness.open(store.storage, { models, registry }, context);
+    for (const { tool } of registry.snapshot().tools())
+      if ((tool.callers ?? ["model"]).includes("model") && !MODEL_TOOLS.has(tool.name))
+        throw new Error(`${tool.name} is not on the kernel's list of tools the model may call directly`);
+    // Pi's default, chosen explicitly: a task that crashes Pal on five opens in a row is parked instead of crash-looping
+    // every start; Stop still runs its abort handler.
+    const reports = new Reports();
+    const running = await Harness.open(
+      store.storage,
+      { models, registry, now, settings: { restartLimit: 5 }, onReport: (_error, info) => reports.record(info, now()) },
+      context,
+    );
     harness = running;
     running.subscribeClose(() => {
       if (status !== "failed") status = "closing";
@@ -488,14 +531,6 @@ export async function openPal(
       status = status === "failed" || end.reason === "failed" ? "failed" : "closed";
     });
 
-    const setting = async (key: string, db: SqliteExecutor = database) =>
-      (await db.get<{ value: string }>("SELECT value FROM pal_settings WHERE key = ?", key))?.value;
-    const save = (key: string, value: string, db: SqliteExecutor = database) =>
-      db.run(
-        "INSERT INTO pal_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        key,
-        value,
-      );
     const settings: Settings = {
       model: () => setting("model"),
       setModel: (slug) => save("model", slug),
@@ -513,6 +548,8 @@ export async function openPal(
         }),
       modelSetupDeferred: async () => (await setting("setup:model-deferred")) === "true",
       setModelSetupDeferred: (deferred) => save("setup:model-deferred", String(deferred)),
+      commandTimeout,
+      setCommandTimeout: (seconds) => save("commands:timeout", String(seconds)),
     };
     changes = new Changes(database, openedProjects, options.dataRoot, privateFiles, locks, openedWorkspaces);
     const owner = new Owner(database);
@@ -532,7 +569,6 @@ export async function openPal(
     });
     browsers = openedBrowsers;
     const humanTerminals = terminals;
-    const uploads = await Uploads.open(database, options.dataRoot);
     const openedChats = await ChatService.open(
       {
         database,
@@ -544,6 +580,7 @@ export async function openPal(
         },
         attachments: uploads,
         feedback: changes,
+        ...(options.admissionBarrier === undefined ? {} : { barrier: options.admissionBarrier }),
         folderScope: (projectId, chatId) => folders.capture(projectId, chatId),
         extensions: () => extensions.capture(),
         checkExtensions: (selected) => extensions.check(selected),
@@ -593,15 +630,11 @@ export async function openPal(
       get status() {
         return status;
       },
+      reports,
       store,
       owner,
       projects: openedProjects,
       folders,
-      get memory() {
-        if (openedCapabilities.memory === undefined)
-          throw new HttpError(503, "capability_unavailable", "Memory is not included in this Pal build.");
-        return openedCapabilities.memory;
-      },
       capabilities: openedCapabilities,
       context: chatContext,
       working,

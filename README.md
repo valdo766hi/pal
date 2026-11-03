@@ -13,9 +13,10 @@ decide how much it may do without asking.
 Runs are durable: a chat keeps going when you close the tab, and a restart resumes interrupted work instead of
 silently repeating it.
 
-Unsent drafts and saved sends stay in this tab's memory: 32 chats, 100,000 characters and 10 files per draft.
-Navigation keeps them; reloading or signing out clears them. If a send was unconfirmed, inspect chat history before
-sending again. **Retry saved send** preserves the original request and destination.
+Unsent drafts and saved sends stay in this tab: 32 chats, 100,000 characters and 10 files per draft. Navigation and
+reloading keep them; signing out or closing the tab clears them. After a reload, Pal checks whether a send that was
+in flight arrived and clears it if it did; otherwise **Retry saved send** sends the original request to its original
+destination, and Pal never admits it twice.
 
 ## Philosophy
 
@@ -26,8 +27,11 @@ not an ever-growing core.
 The goal is for anyone to create extensions, add their own tools, customize Pal and share reusable packages.
 Built-ins are a starting point, not the limit.
 
-Today, Pal ships compiled, version-pinned built-ins and accepts custom tools through MCP. A public extension SDK
-and package installer are not available yet. See [extension architecture](docs/architecture.md#extensions-and-releases).
+Today you can add a skill (a `SKILL.md` procedure, no code), connect an MCP server (tools in a separate process, no
+rebuild) or write a plugin compiled into Pal (tools, settings, panels and chat pieces). Plugins are trusted code with
+full access to Pal's process; review them like Pal's own. A package installer and downloadable plugins are not
+available yet. See [adding capabilities](docs/development.md#adding-capabilities) and
+[extension architecture](docs/architecture.md#extensions-and-releases).
 
 ## Features
 
@@ -39,8 +43,8 @@ and package installer are not available yet. See [extension architecture](docs/a
   read-only reference folders and uploads from your device. Each chat runs in **Local** (the folder itself),
   **Worktree** (a separate Git worktree from `HEAD`) or **Read-only** mode.
 - **Agent tools through Code Mode.** The model writes small scripts in a QuickJS sandbox that call host tools: files
-  (list, read, find, search, write, edit), shell commands, project memory, internet tools and the browser. Each tool
-  call is a durable task with its own receipt.
+  (list, read, find, search, write, edit, attachments), shell commands, project memory, internet tools and the
+  browser. Each tool call is a durable task with its own receipt.
 - **Command approval.** Per chat, **Ask** (the default) shows each shell command, its folder and timeout, and waits
   for **Approve once** or **Deny**. **Full access** runs commands without asking.
 - **Internet tools (MCP).** Exa search/fetch and Context7 documentation presets, custom Streamable HTTP servers and

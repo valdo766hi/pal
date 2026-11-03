@@ -10,15 +10,27 @@ import {
   hook,
   type Harness,
   type EntryId,
+  type EntryRecord,
   type Storage,
 } from "@earendil-works/pi-durable";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { type Static, Type } from "typebox";
 import type { Chat } from "./chats.ts";
 import { HttpError } from "./http.ts";
-import { entryText } from "./memory.ts";
 import { MAX_UPLOAD_BYTES } from "./uploads.ts";
+import { MAX_INPUT_ATTACHMENTS } from "../protocol/limits.ts";
 import { validate } from "./requests.ts";
+
+export function entryText(entry: EntryRecord): string {
+  return (entry.model ?? [])
+    .flatMap((message) => {
+      if (message.role !== "user" && message.role !== "assistant") return [];
+      if (typeof message.content === "string") return [message.content.slice(0, 4000)];
+      return message.content.flatMap((block) => (block.type === "text" ? [block.text.slice(0, 4000)] : []));
+    })
+    .join("\n")
+    .slice(0, 4000);
+}
 
 const BUDGETS = { pinnedTokens: 1500, pinnedBytes: 6144, previewBytes: 65536 };
 const Pin = Type.Object(
@@ -28,6 +40,7 @@ const Pin = Type.Object(
 const PinnedInstructions = defineDoc({
   kind: "pal.pinnedInstructions",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "rewindable",
   fork: "asOf",
@@ -56,6 +69,7 @@ type Prepared = {
 const PreparedContext = defineDoc({
   kind: "pal.preparedContext",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "rewindable",
   fork: "initial",
@@ -81,7 +95,7 @@ const Uploads = Type.Object({
       size: Type.Integer({ minimum: 0, maximum: MAX_UPLOAD_BYTES }),
       mediaType: Type.String({ maxLength: 200 }),
     }),
-    { maxItems: 10 },
+    { maxItems: MAX_INPUT_ATTACHMENTS },
   ),
 });
 const Page = Type.Object({

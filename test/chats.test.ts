@@ -1,9 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { configure, createRegistry, Harness } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AdmissionStopped,
@@ -11,10 +12,14 @@ import {
   ChatNotFound,
   chatConfiguration,
   ChatService,
-  MAX_INPUT_CHARS,
+  DESTINATION_CHANGED,
+  InputBlocked,
+  InputHeld,
   ProjectUnavailable,
 } from "../src/core/chats.ts";
+import { MAX_INPUT_CHARS } from "../src/protocol/limits.ts";
 import { InvalidRequest, RequestConflict } from "../src/core/requests.ts";
+import { Uploads } from "../src/core/uploads.ts";
 import { openStore } from "../src/storage/store.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -37,12 +42,14 @@ async function open(dataRoot: string, barrier?: (point: Barrier) => void | Promi
   const store = await openStore(dataRoot);
   const harness = await Harness.open(store.storage, { models, registry: createRegistry() }, context);
   cleanups.push(() => harness.close(context).catch(() => {}));
+  const uploads = await Uploads.open(store.database, dataRoot);
   const chats = await ChatService.open(
     {
       database: store.database,
       harness,
       agentFor: async (projectId: string) =>
         projectId === "project-1" ? { model: { provider: model.provider, modelId: model.id } } : undefined,
+      attachments: uploads,
       ...(barrier === undefined ? {} : { barrier }),
     },
     context,
@@ -54,7 +61,7 @@ async function open(dataRoot: string, barrier?: (point: Barrier) => void | Promi
     };
     return messages.filter((message) => message.role === "user").length;
   };
-  return { store, harness, chats, userMessages, faux };
+  return { store, harness, chats, userMessages, faux, uploads };
 }
 
 /** Make the next write that needs a new database page fail with SQLITE_FULL. */
@@ -332,5 +339,182 @@ describe("chats", () => {
     const admission = await second.chats.submit(chat.id, "input-request-1", body, context);
     expect(await second.harness.submission(admission.submissionId, context)).toBeDefined();
     expect(await second.userMessages(chat.conversationId)).toBe(1);
+  });
+
+  async function attach(uploads: Uploads, dataRoot: string) {
+    const bytes = Buffer.from("notes\n");
+    const upload = await uploads.admit("project-1", { name: "notes.txt", size: bytes.length, type: "text/plain" });
+    await uploads.receive(upload.id, Readable.from([bytes]));
+    return { id: upload.id, payload: join(dataRoot, "uploads", "project-1", upload.id, "data") };
+  }
+
+  it.each(["missing", "damaged"])(
+    "blocks only its own chat, before and after restart, when an attachment is %s",
+    async (damage) => {
+      const dataRoot = await tempDir();
+      const first = await open(dataRoot);
+      const blocked = await first.chats.createChat("blocked-chat-request", { projectId: "project-1" }, context);
+      const other = await first.chats.createChat("other-chat-request", { projectId: "project-1" }, context);
+      const { id, payload } = await attach(first.uploads, dataRoot);
+      if (damage === "missing") await rm(payload);
+      else await writeFile(payload, "NOTES\n");
+      const body = { text: "read the notes", attachments: [id] };
+      const refused = async (chats: ChatService) => {
+        await expect(chats.submit(blocked.id, "blocked-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+        await expect(chats.submit(blocked.id, "later-input", { text: "and then" }, context)).rejects.toBeInstanceOf(
+          InputHeld,
+        );
+        expect((await chats.get(blocked.id))?.blocked).toEqual({
+          requestId: "blocked-input",
+          text: "read the notes",
+          reason: expect.stringMatching(/notes\.txt is missing or damaged/),
+        });
+        expect((await chats.get(other.id))?.blocked).toBeNull();
+      };
+
+      await refused(first.chats);
+      await first.chats.submit(other.id, "other-input-1", { text: "hello" }, context);
+      expect(first.chats.stopped).toBe(false);
+      await first.harness.close(context);
+
+      const second = await open(dataRoot);
+      await refused(second.chats);
+      await second.chats.submit(other.id, "other-input-2", { text: "again" }, context);
+      expect(second.chats.stopped).toBe(false);
+      // Nothing reached Pi in place of the unreadable input.
+      expect(await second.userMessages(blocked.conversationId)).toBe(0);
+      expect(await second.userMessages(other.conversationId)).toBe(2);
+    },
+  );
+
+  it("adopts an input Pi admitted before its acknowledgement was lost, after its payload is gone", async () => {
+    const dataRoot = await tempDir();
+    const lost = new Error("acknowledgement lost");
+    const first = await open(dataRoot, (point) => {
+      if (point === "input-submitted") throw lost;
+    });
+    const chat = await first.chats.createChat("ack-chat-request", { projectId: "project-1" }, context);
+    const { id, payload } = await attach(first.uploads, dataRoot);
+    const body = { text: "read the notes", attachments: [id] };
+    await expect(first.chats.submit(chat.id, "ack-input", body, context)).rejects.toBe(lost);
+    await first.harness.close(context);
+    await rm(payload);
+
+    const second = await open(dataRoot);
+    expect(await second.store.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
+    const admission = await second.chats.submit(chat.id, "ack-input", body, context);
+    expect(await second.harness.submission(admission.submissionId, context)).toBeDefined();
+    expect(await second.userMessages(chat.conversationId)).toBe(1);
+  });
+
+  it("retries a blocked input with its recorded body, or withdraws it so the chat's later inputs proceed", async () => {
+    const dataRoot = await tempDir();
+    const first = await open(dataRoot);
+    const chat = await first.chats.createChat("retry-chat-request", { projectId: "project-1" }, context);
+    const { id, payload } = await attach(first.uploads, dataRoot);
+    const body = { text: "read the notes", attachments: [id] };
+    await rm(payload);
+    await expect(first.chats.submit(chat.id, "retry-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+    await expect(first.chats.retry(chat.id, "retry-input", context)).rejects.toBeInstanceOf(InputBlocked);
+    await writeFile(payload, "notes\n");
+    const admission = await first.chats.retry(chat.id, "retry-input", context);
+    expect(await first.chats.retry(chat.id, "retry-input", context)).toEqual(admission);
+    expect((await first.chats.get(chat.id))?.blocked).toBeNull();
+    await expect(first.chats.withdraw(chat.id, "retry-input", context)).rejects.toBeInstanceOf(RequestConflict);
+
+    // Withdrawn: never sent, never admitted again under its ID, and later inputs go ahead.
+    await rm(payload);
+    await expect(first.chats.submit(chat.id, "withdraw-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+    await first.chats.withdraw(chat.id, "withdraw-input", context);
+    await first.chats.withdraw(chat.id, "withdraw-input", context);
+    expect((await first.chats.get(chat.id))?.blocked).toBeNull();
+    await first.chats.submit(chat.id, "after-withdraw", { text: "next" }, context);
+    await first.harness.close(context);
+
+    const second = await open(dataRoot);
+    await expect(second.chats.submit(chat.id, "withdraw-input", body, context)).rejects.toBeInstanceOf(RequestConflict);
+    await expect(second.chats.retry(chat.id, "withdraw-input", context)).rejects.toBeInstanceOf(RequestConflict);
+    expect(await second.userMessages(chat.conversationId)).toBe(2);
+  });
+
+  it.each(["retry", "withdraw"])(
+    "lets only one of a concurrent retry and withdraw win when %s is first",
+    async (lead) => {
+      const dataRoot = await tempDir();
+      const pal = await open(dataRoot);
+      const chat = await pal.chats.createChat("race-chat-request", { projectId: "project-1" }, context);
+      const { id, payload } = await attach(pal.uploads, dataRoot);
+      await rm(payload);
+      const body = { text: "read the notes", attachments: [id] };
+      await expect(pal.chats.submit(chat.id, "race-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+      await writeFile(payload, "notes\n");
+      const retry = () => pal.chats.retry(chat.id, "race-input", context);
+      const withdraw = () => pal.chats.withdraw(chat.id, "race-input", context);
+      const [won, lost] = await Promise.allSettled(lead === "retry" ? [retry(), withdraw()] : [withdraw(), retry()]);
+      expect([won?.status, lost?.status]).toEqual(["fulfilled", "rejected"]);
+      expect((lost as PromiseRejectedResult).reason).toBeInstanceOf(RequestConflict);
+      expect(await pal.store.database.all("SELECT state FROM pal_admissions")).toEqual([
+        { state: lead === "retry" ? "admitted" : "withdrawn" },
+      ]);
+      expect(await pal.userMessages(chat.conversationId)).toBe(lead === "retry" ? 1 : 0);
+    },
+  );
+
+  it("keeps a held input on the destination it was recorded for, through retry and restart", async () => {
+    const dataRoot = await tempDir();
+    const first = await open(dataRoot);
+    const chat = await first.chats.createChat("destination-chat-request", { projectId: "project-1" }, context);
+    const conversation = await first.harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing conversation");
+    const agent = await conversation.agent(context);
+    if (agent.model === undefined) throw new Error("missing model");
+    const recorded = { model: agent.model, thinkingLevel: agent.thinkingLevel };
+    const { id, payload } = await attach(first.uploads, dataRoot);
+    await rm(payload);
+    const body = { text: "read the notes", attachments: [id], configuration: chatConfiguration(recorded) };
+    await expect(first.chats.submit(chat.id, "held-input", body, context)).rejects.toBeInstanceOf(InputBlocked);
+    // The owner can't move a chat to another destination while it holds an input.
+    await expect(
+      first.chats.configure(chat.id, { model: recorded.model, thinkingLevel: "high" }, context),
+    ).rejects.toMatchObject({ status: 409, code: "configuration_busy" });
+
+    // A chat whose destination changed anyway (as before this rule) holds the input instead of sending it there.
+    await conversation.commit((tx) => configure(tx, conversation.id, { ...recorded, thinkingLevel: "high" }), context);
+    await writeFile(payload, "notes\n");
+    await expect(first.chats.retry(chat.id, "held-input", context)).rejects.toBeInstanceOf(InputBlocked);
+    expect((await first.chats.get(chat.id))?.blocked?.reason).toBe(DESTINATION_CHANGED);
+    expect(await first.userMessages(chat.conversationId)).toBe(0);
+    await first.harness.close(context);
+
+    // Startup recovery holds it the same way, without failing to start.
+    const second = await open(dataRoot);
+    expect((await second.chats.get(chat.id))?.blocked?.reason).toBe(DESTINATION_CHANGED);
+    expect(await second.userMessages(chat.conversationId)).toBe(0);
+    const reopened = await second.harness.conversation(chat.conversationId, context);
+    if (reopened === undefined) throw new Error("missing conversation");
+    await reopened.commit((tx) => configure(tx, reopened.id, recorded), context);
+    await second.chats.retry(chat.id, "held-input", context);
+    expect((await second.chats.get(chat.id))?.blocked).toBeNull();
+    expect(await second.userMessages(chat.conversationId)).toBe(1);
+  });
+
+  it("keeps an input Pi already admitted instead of withdrawing it", async () => {
+    const dataRoot = await tempDir();
+    let lose = true;
+    const lost = new Error("acknowledgement lost");
+    const pal = await open(dataRoot, (point) => {
+      if (point !== "input-submitted" || !lose) return;
+      lose = false;
+      throw lost;
+    });
+    const chat = await pal.chats.createChat("kept-chat-request", { projectId: "project-1" }, context);
+    const { id, payload } = await attach(pal.uploads, dataRoot);
+    await expect(pal.chats.submit(chat.id, "kept-input", { text: "read", attachments: [id] }, context)).rejects.toBe(
+      lost,
+    );
+    await rm(payload);
+    await expect(pal.chats.withdraw(chat.id, "kept-input", context)).rejects.toBeInstanceOf(RequestConflict);
+    expect(await pal.store.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
+    expect(await pal.userMessages(chat.conversationId)).toBe(1);
   });
 });

@@ -172,6 +172,15 @@ describe("API", () => {
     expect(await reopened.settings.defaultModel()).toBeUndefined();
   });
 
+  it("keeps the owner's command limit between the default and the ceiling", async () => {
+    const { api, pal } = await signedIn();
+    expect(await api("GET", "command-timeout")).toEqual({ status: 200, body: { seconds: 120 } });
+    for (const seconds of [119, 1801, 300.5, "300"])
+      expect((await api("PUT", "command-timeout", { seconds })).status).toBe(400);
+    expect(await api("PUT", "command-timeout", { seconds: 1800 })).toEqual({ status: 200, body: { seconds: 1800 } });
+    expect(await pal.settings.commandTimeout()).toBe(1800);
+  });
+
   it("stores an owner-only working goal without choosing a model, starting work or dropping stale edits", async () => {
     const { api, pal, fixture, base, cookie } = await signedIn();
     const project = await pal.projects.create("working-project", { name: "Working state" });
@@ -364,7 +373,7 @@ describe("API", () => {
     const { api, base, cookie, pal } = await signedIn();
     const project = (await api("POST", "projects", { requestId: "api-memory-project", name: "Context" })).body.project;
     const chat = (await api("POST", "chats", { requestId: "api-memory-chat", projectId: project.id })).body.chat;
-    const path = `projects/${project.id}/memory`;
+    const path = `plugins/memory/projects/${project.id}/items`;
     const input = {
       title: "Journal",
       body: "Keep durable state in SQLite",
@@ -397,10 +406,10 @@ describe("API", () => {
       (await api("PUT", item, { ...correction, revision: 2, source: { kind: "owner", trusted: true } })).status,
     ).toBe(400);
     const other = (await api("POST", "projects", { requestId: "api-foreign-memory", name: "Foreign" })).body.project;
-    expect((await api("GET", `projects/${other.id}/memory/${saved.body.id}/source`)).status).toBe(403);
-    expect((await api("GET", `projects/${other.id}/memory`)).body.items).toEqual([]);
+    expect((await api("GET", `plugins/memory/projects/${other.id}/items/${saved.body.id}/source`)).status).toBe(403);
+    expect((await api("GET", `plugins/memory/projects/${other.id}/items`)).body.items).toEqual([]);
     expect((await api("GET", `${path}?workspace=`)).status).toBe(400);
-    expect((await api("POST", `projects/${project.id}/memory-index`)).status).toBe(200);
+    expect((await api("POST", `plugins/memory/projects/${project.id}/index`)).status).toBe(200);
     expect((await api("DELETE", item, { revision: 1 })).status).toBe(409);
     expect((await api("DELETE", item, { revision: 2 })).status).toBe(200);
     expect((await api("GET", path)).body.items).toEqual([]);
@@ -1370,6 +1379,51 @@ describe("API", () => {
     expect(JSON.stringify(request?.body.input)).toContain("The launch is on Tuesday.");
     expect(JSON.stringify(request?.body.input)).toContain('name=\\"plan.txt\\"');
 
+    // A payload lost after its upload blocks only the chat that sends it.
+    const lost = (
+      await api("POST", `projects/${project.id}/uploads`, { name: "lost.txt", size: text.length, type: "text/plain" })
+    ).body.upload;
+    await putBytes(base, cookie(), lost.id, text);
+    await rm(join(pal.store.path, "..", "uploads", project.id, lost.id, "data"));
+    const blocked = (await api("POST", "chats", { requestId: "chat-request-3", projectId: project.id })).body.chat;
+    const refused = await api("POST", `chats/${blocked.id}/inputs`, {
+      requestId: "input-lost",
+      text: "Read it",
+      attachments: [lost.id],
+    });
+    expect([refused.status, refused.body.error]).toEqual([409, "input_blocked"]);
+    const held = await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-held", text: "Then this" });
+    expect([held.status, held.body.error]).toEqual([409, "input_held"]);
+    // A sender that lost its reply can find out what became of a request without sending it again.
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-lost`)).body).toEqual({ state: "admitting" });
+    // Diagnostics say which input holds the chat and how to recover, but not its text or attachment's name.
+    const diagnosed = (await api("GET", `chats/${blocked.id}/diagnostics`)).body;
+    expect(diagnosed.chat.blocked).toEqual({
+      requestId: "input-lost",
+      cause: "attachment-unreadable",
+      recovery: expect.stringContaining("Retry it with its recorded message, or withdraw it"),
+    });
+    expect(JSON.stringify(diagnosed)).not.toMatch(/Read it|lost\.txt/);
+    const never = await api("GET", `chats/${blocked.id}/inputs/input-held`);
+    expect([never.status, never.body.error]).toEqual([404, "input_not_found"]);
+    const listed = (await api("GET", "projects")).body.projects.find((item: { id: string }) => item.id === project.id);
+    expect(listed.chats.find((item: { id: string }) => item.id === blocked.id).blocked).toMatchObject({
+      requestId: "input-lost",
+      text: "Read it",
+    });
+    expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/retry`)).body.error).toBe("input_blocked");
+    expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/withdraw`)).body).toEqual({ withdrawn: true });
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-lost`)).body).toEqual({ state: "withdrawn" });
+    const after = await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-after", text: "Now this" });
+    expect(after.status).toBe(200);
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-after`)).body).toEqual({
+      state: "admitted",
+      admission: after.body.admission,
+    });
+    expect(
+      (await api("POST", `chats/${chat.id}/inputs`, { requestId: "input-request-2", text: "Still?" })).status,
+    ).toBe(200);
+
     // An upload left unfinished is dropped when Pal next opens.
     const pending = (
       await api("POST", `projects/${project.id}/uploads`, { name: "b.txt", size: 5, type: "text/plain" })
@@ -1435,9 +1489,12 @@ describe("API", () => {
       providers: expect.arrayContaining([{ id: "openrouter", enabled: false, hasKey: true }]),
       chatgpt: { connected: false },
       unfinished: { tasks: 0, approvals: 0 },
+      admission: { stopped: false },
+      reports: { counts: {}, recent: [] },
     });
     expect(body.chat).toMatchObject({
       chat: chat.id,
+      blocked: null,
       workspace: { mode: "local", state: "failed" },
       running: false,
       inputs: [{ requestId: "diagnostics-input", state: "admitted", submissionId: expect.any(Number) }],

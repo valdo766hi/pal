@@ -31,12 +31,14 @@
   import ModelControl, { type Group } from "./ModelControl.svelte";
   import ProjectMcpSettings from "./ProjectMcpSettings.svelte";
   import WorkspaceMode from "./WorkspaceMode.svelte";
-  import { drafts, MAX_DRAFT_CHARS, MAX_DRAFT_FILES, type PendingInput } from "../lib/drafts.svelte.ts";
+  import { drafts, type PendingInput } from "../lib/drafts.svelte.ts";
+  import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../../../src/protocol/limits.ts";
   import type { ReviewFeedback } from "../../../src/core/feedback.ts";
   import { codeCopy, copyText } from "../lib/copy.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { rise } from "../lib/motion.ts";
   import { app, navigate, refreshChatGPT, refreshProjects, viewport } from "../lib/state.svelte.ts";
+  import { loadFailures, type Piece, type RendererProps, renderer, slots } from "../lib/plugins.ts";
 
   let {
     chat,
@@ -57,6 +59,21 @@
     onAdmitted?: () => void;
   } = $props();
   const workspace = $derived(chat.workspace);
+  const composerPieces = $derived(slots("composer", chat.extensions));
+  /**
+   * This build's contributions as `id@version`, once known: entries of a plugin a chat pinned at a version this build
+   * lacks get a plain note.
+   */
+  const available = $derived(
+    app.extensions === undefined
+      ? undefined
+      : new Set(
+          app.extensions.catalog.filter((item) => item.available !== false).map((item) => `${item.id}@${item.version}`),
+        ),
+  );
+  /** Room each composer piece asks for above the transcript's end. */
+  let spaces: Record<string, number> = $state({});
+  const reserved = $derived(Math.max(0, ...Object.values(spaces)));
   const root = $derived(workspace?.root ?? project.root);
   const ready = $derived(workspace == null || workspace.state === "ready");
   let preparing = $state(false);
@@ -92,6 +109,7 @@
         live: boolean;
       }
     | { kind: "note"; id: string; text: string }
+    | { kind: "plugin"; id: string; entry: Entry; piece: Piece<RendererProps> | "missing" }
     | { kind: "shell"; id: string; receipt: ShellReceipt }
     | { kind: "mcp"; id: string; receipt: McpReceipt }
     | { kind: "helper"; id: string; task: number; purpose: string; status: "answered" | "unanswered" | undefined }
@@ -201,7 +219,8 @@
   async function copyDiagnostics() {
     diagnostics = "copying";
     try {
-      const copied = await copyText(JSON.stringify(await api.chatDiagnostics(chat.id), null, 2));
+      const report = { ...(await api.chatDiagnostics(chat.id)), interface: { pluginLoadFailures: loadFailures } };
+      const copied = await copyText(JSON.stringify(report, null, 2));
       diagnostics = copied ? "copied" : "idle";
       if (!copied) error = "The browser refused to copy diagnostics.";
     } catch (failure) {
@@ -212,6 +231,8 @@
 
   let stopping = $state(false);
   let stopError: string | undefined = $state();
+  let resolving = $state(false);
+  let resolveError: string | undefined = $state();
   async function stop() {
     stopping = true;
     stopError = undefined;
@@ -381,7 +402,9 @@
     };
     const receipts = new Map(
       entries.flatMap((entry) =>
-        entry.data?.shell?.status === "finished" ? [[entry.data.shell.callId, entry.data.shell] as const] : [],
+        entry.kind === "pal.shell" && entry.data?.shell?.status === "finished"
+          ? [[entry.data.shell.callId, entry.data.shell] as const]
+          : [],
       ),
     );
     const answers = new Map(
@@ -426,6 +449,11 @@
           id: String(entry.id),
           receipt: receipts.get(entry.data.shell.callId) ?? entry.data.shell,
         });
+        continue;
+      }
+      const piece = renderer(entry.kind, chat.extensions, available);
+      if (piece !== undefined) {
+        built.push({ kind: "plugin", id: String(entry.id), entry, piece });
         continue;
       }
       const message = entry.model?.[0];
@@ -473,6 +501,13 @@
         if (writing.pending !== undefined) writing.reject(writing.pending);
         if (epoch === loadEpoch) settingsFailure(failure);
         else writing.error = failure.message;
+      } else if (failure instanceof ApiError && failure.code === "input_blocked") {
+        // Pal keeps this input as blocked; the chat's blocked notice offers Retry and Withdraw.
+        void refreshProjects();
+      } else if (failure instanceof ApiError && failure.code === "input_held") {
+        if (writing.pending !== undefined) writing.reject(writing.pending);
+        writing.error = failure.message;
+        void refreshProjects();
       } else {
         if (
           failure instanceof ApiError &&
@@ -534,6 +569,52 @@
       if (writing.active) await deliver(writing.stage(requestId(), snapshot, selected), epoch);
     });
   }
+
+  /** Retry or withdraw the input Pal holds as blocked, in turn with this chat's other inputs. */
+  async function resolveBlocked(action: "retry" | "withdraw") {
+    const blocked = chat.blocked;
+    if (blocked === null || resolving) return;
+    const id = chat.id;
+    const pending = writing.pending?.requestId === blocked.requestId ? writing.pending : undefined;
+    resolving = true;
+    resolveError = undefined;
+    try {
+      if (action === "retry") {
+        const { admission } = await api.retryInput(id, blocked.requestId);
+        if (pending !== undefined) writing.confirm(pending, admission);
+      } else {
+        await api.withdrawInput(id, blocked.requestId);
+        // The withdrawn text stays in this chat's draft when it is still there.
+        if (pending !== undefined) writing.reject(pending);
+      }
+    } catch (failure) {
+      resolveError = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      resolving = false;
+      void refreshProjects();
+    }
+  }
+
+  /** A send saved before a reload: cleared if Pal admitted it, otherwise kept for an explicit, idempotent retry. */
+  async function recover(envelope: PendingInput) {
+    try {
+      const input = await api.input(envelope.chatId, envelope.requestId);
+      if (input.state === "admitted") writing.confirm(envelope, input.admission);
+      else if (input.state === "withdrawn") writing.reject(envelope);
+      else writing.recovered = false;
+    } catch (failure) {
+      if (!writing.active || writing.pending !== envelope) return;
+      writing.recovered = false;
+      writing.error =
+        failure instanceof ApiError && failure.code === "input_not_found"
+          ? "It never reached Pal."
+          : "Pal couldn't confirm whether it arrived; retrying won't send it twice.";
+    }
+  }
+  $effect(() => {
+    const envelope = writing.pending;
+    if (writing.recovered && envelope !== undefined) untrack(() => void recover(envelope));
+  });
 
   async function retrySaved() {
     const envelope = writing.pending;
@@ -631,8 +712,8 @@
     const projectId = project.id;
     for (const file of files) {
       if (!writing.active || writing.blocked) return;
-      if (writing.attachments.length + writing.uploading >= MAX_DRAFT_FILES) {
-        writing.error = `A draft can attach at most ${MAX_DRAFT_FILES} files.`;
+      if (writing.attachments.length + writing.uploading >= MAX_INPUT_ATTACHMENTS) {
+        writing.error = `A draft can attach at most ${MAX_INPUT_ATTACHMENTS} files.`;
         return;
       }
       writing.touch();
@@ -652,6 +733,13 @@
   function size(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     return bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1048576).toFixed(1)} MB`;
+  }
+
+  /** What of a sent attachment the message gave the model, when not all of it. */
+  function received(attachment: Attachment): string {
+    const got = attachment.received;
+    if (got?.kind === "binary") return " · contents not sent";
+    return got?.kind === "text" && got.bytes < attachment.size ? ` · first ${size(got.bytes)} sent` : "";
   }
 
   function onKey(event: KeyboardEvent) {
@@ -680,9 +768,21 @@
     return "Outcome unconfirmed";
   }
 
-  /** One quiet line for an assistant turn's scripts, counted from the tool calls that came back. */
+  /** A command's live slot while it runs, model-issued or from a script; its receipt names the tool task. */
+  function runningCommand(receipt: ShellReceipt) {
+    return [...(stream?.tools ?? []), ...(stream?.nested ?? [])].find(
+      (slot) => slot.status === "running" && String(slot.taskId) === receipt.callId,
+    );
+  }
+
+  /** One quiet line for an assistant turn's tool calls: its scripts and the calls that came back, or direct calls. */
   function summary(steps: Step[], live: boolean): string {
-    const calls = steps.flatMap((step) => step.result?.calls ?? []);
+    const scripts = steps.filter((step) => step.name === "codemode").length;
+    // A direct call counts like a call a script made.
+    const calls = [
+      ...steps.filter((step) => step.name !== "codemode"),
+      ...steps.flatMap((step) => step.result?.calls ?? []),
+    ];
     const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
     const commands = calls.filter((call) => call.name === "shell_run").length;
     const edits = calls.filter((call) => call.name === "files_write" || call.name === "files_edit").length;
@@ -695,14 +795,18 @@
     if (steps.some((step) => step.result?.isError)) did.push("with errors");
     const unresolved = steps.map((step) => phase(step, live)).find((state) => state !== "Done" && state !== "Failed");
     if (unresolved !== undefined) did.push(unresolved.toLowerCase());
+    if (scripts === 0) {
+      const line = did.join(", ");
+      return unresolved === undefined && commands > 0 ? `Ran ${line}` : line.charAt(0).toUpperCase() + line.slice(1);
+    }
     const ran =
       unresolved === undefined
-        ? steps.length === 1
+        ? scripts === 1
           ? "Ran a script"
-          : `Ran ${steps.length} scripts`
-        : steps.length === 1
+          : `Ran ${scripts} scripts`
+        : scripts === 1
           ? "Script"
-          : `${steps.length} scripts`;
+          : `${scripts} scripts`;
     return did.length > 0 ? `${ran} · ${did.join(", ")}` : ran;
   }
 
@@ -756,7 +860,7 @@
     <div
       class="transcript"
       style:padding-inline={phone ? "18px" : "24px"}
-      style:padding-bottom={app.pet.enabled ? "54px" : undefined}
+      style:padding-bottom={reserved > 0 ? `${reserved}px` : undefined}
     >
       {#if helperUpdates > 0 && helpersError !== undefined}
         <div class="callout er" role="alert">
@@ -789,7 +893,9 @@
                 <div class="chips end">
                   {#each item.attachments as attachment (attachment.id)}
                     <span class="chip plain"
-                      ><Icon name="file" />{attachment.name}<span class="dim">{size(attachment.size)}</span></span
+                      ><Icon name="file" />{attachment.name}<span class="dim"
+                        >{size(attachment.size)}{received(attachment)}</span
+                      ></span
                     >
                   {/each}
                 </div>
@@ -798,6 +904,18 @@
             </div>
           {:else if item.kind === "note"}
             <div class="note"><Icon name="info" /><span>{item.text}</span></div>
+          {:else if item.kind === "plugin"}
+            {#if item.piece === "missing"}
+              <div class="note"><Icon name="info" /><span>Recorded by a plugin this build doesn't include.</span></div>
+            {:else}
+              {@const piece = item.piece}
+              {#await piece.load() then { default: Renderer }}<Renderer entry={item.entry} />{:catch failure}<p
+                  class="dim small"
+                  role="alert"
+                >
+                  Couldn't show {piece.name}'s result: {String(failure)}
+                </p>{/await}
+            {/if}
           {:else if item.kind === "mcp"}
             <InternetSources receipt={item.receipt} />
           {:else if item.kind === "helper"}
@@ -860,6 +978,7 @@
               </div>
             {/if}
           {:else if item.kind === "shell"}
+            {@const running = item.receipt.status === "finished" ? undefined : runningCommand(item.receipt)}
             <details class="activity">
               <summary class="acth"
                 >Host command · not sandboxed ·
@@ -868,7 +987,11 @@
                     ? "Timed out"
                     : item.receipt.exitCode !== undefined
                       ? `Exit ${item.receipt.exitCode}`
-                      : "Outcome unconfirmed"}
+                      : running !== undefined
+                        ? stream?.connected
+                          ? "Running"
+                          : "Last observed running"
+                        : "Outcome unconfirmed"}
                 </span><Icon name="chevR" size={13} />
               </summary>
               <div class="small dim mono ellipsis" title={item.receipt.callId}>Call {item.receipt.callId}</div>
@@ -878,8 +1001,9 @@
                   Ran as <code>{item.receipt.executed}</code>; output condensed by rtk.
                 </p>{/if}
               {#if item.receipt.output !== undefined}<pre class="out">{item.receipt.output}</pre>{/if}
+              {#if running?.output !== undefined}<pre class="out">{running.output}</pre>{/if}
               {#if item.receipt.truncated}<p class="small dim">Output truncated to the last 64 KiB.</p>{/if}
-              {#if item.receipt.status !== "finished"}<p class="small dim">
+              {#if item.receipt.status !== "finished" && running === undefined}<p class="small dim">
                   No completion receipt yet. If interrupted, inspect the workspace before retrying.
                 </p>{/if}
             </details>
@@ -920,6 +1044,21 @@
                           {#if state === "Outcome unconfirmed"}<p class="dim small">
                               No result was recorded. Inspect the workspace before repeating an action.
                             </p>{/if}
+                          {#if tool?.taskId !== undefined}
+                            {#each stream?.nested.filter((call) => call.parentTaskId === tool.taskId) ?? [] as call (call.callId)}
+                              <div class="steprow call">
+                                {#if call.status !== "done"}<span class="ring spin" aria-hidden="true"></span><span
+                                    class="sr">Running</span
+                                  >
+                                {:else if call.summary?.isError !== false}<span class="tick er" aria-hidden="true"
+                                    >✕</span
+                                  ><span class="sr">Failed</span>
+                                {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span
+                                  >{/if}
+                                <span>{toolLabel(call.name)}</span>
+                              </div>
+                            {/each}
+                          {/if}
                         {/if}
                         {#if step.code !== undefined}<pre class="out">{step.code}</pre>{/if}
                         {#each step.result?.calls ?? [] as call (call.id)}
@@ -982,11 +1121,16 @@
 
   <div class="dock">
     <div class="dockin">
-      {#if app.pet.enabled}
-        {#await import("./Pet.svelte") then { default: Pet }}
-          <Pet id={app.pet.id} running={stream?.running ?? false} active={typing || writing.text !== ""} />
+      {#each composerPieces as piece (piece.key)}
+        <!-- A piece that fails to load is left out; the composer works without it. -->
+        {#await piece.load() then { default: Piece }}
+          <Piece
+            running={stream?.running ?? false}
+            active={typing || writing.text !== ""}
+            onSpace={(pixels) => (spaces[piece.key] = pixels)}
+          />
         {/await}
-      {/if}
+      {/each}
       {#if !ready}
         <div class="callout wa" role="status">
           {workspace?.error ?? "Preparing this chat's working folder. Messages stay disabled until it is ready."}
@@ -1040,6 +1184,21 @@
       {/if}
       {#if stream?.retry !== undefined}
         <div class="callout wa" role="status">The model request failed; Pal retries shortly. {stream.retry.error}</div>
+      {:else if stream?.running && stream.deferredPoll !== undefined}
+        <div class="callout wa" role="status">
+          The provider is still preparing its answer; Pal checks again shortly.
+        </div>
+      {/if}
+      {#if (stream?.compactions.length ?? 0) > 0}
+        <div class="callout ac" role="status">Summarizing earlier messages to make room…</div>
+      {:else if stream?.compactionFailure !== undefined}
+        <div class="callout er" role="alert">Summarizing earlier messages failed. {stream.compactionFailure.error}</div>
+      {/if}
+      {#if stream?.failure !== undefined}
+        <div class="callout er" role="alert">
+          <span class="grow">Part of this chat's work failed. {stream.failure.message}</span>
+          {@render diagnosticsButton()}
+        </div>
       {/if}
       {#if stream?.running}
         <div class="running" role="status">
@@ -1075,7 +1234,24 @@
         </div>
       {/if}
       {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
-      {#if writing.pending !== undefined && !writing.sending}
+      {#if chat.blocked !== null}
+        <div class="callout er" role="alert">
+          <span class="grow"
+            ><strong>A message couldn't be sent.</strong>
+            {chat.blocked.reason} Later messages in this chat wait until you retry or withdraw it.</span
+          >
+          <button class="b sm" disabled={resolving} onclick={() => resolveBlocked("retry")}>Retry</button>
+          <button class="b sm" disabled={resolving} onclick={() => resolveBlocked("withdraw")}>Withdraw</button>
+        </div>
+        <details class="activity">
+          <summary class="acth" title={`Request ${chat.blocked.requestId}`}
+            >Blocked message<Icon name="chevR" size={13} /></summary
+          >
+          <pre class="out">{chat.blocked.text}</pre>
+        </details>
+        {#if resolveError !== undefined}<div class="callout er" role="alert">{resolveError}</div>{/if}
+      {/if}
+      {#if writing.pending !== undefined && !writing.sending && !writing.recovered && writing.pending.requestId !== chat.blocked?.requestId}
         <div class="callout wa" role="alert">
           <span class="grow"
             >This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.
@@ -1092,6 +1268,9 @@
         </details>
       {:else if writing.error !== undefined}<div class="callout er" role="alert">{writing.error}</div>{/if}
       {#if writing.notice !== undefined}<div class="callout ac" role="status">{writing.notice}</div>{/if}
+      {#if !writing.saved}<div class="callout wa" role="status">
+          This tab couldn't save your draft, so reloading would lose it.
+        </div>{/if}
       {#if phone && stream?.running}{@render busySwitch()}{/if}
 
       <div class="cbx" class:oneline={phone}>
@@ -1125,9 +1304,9 @@
               ? "Steer or queue"
               : "Steer the run or queue a follow-up"
             : "Message Pal"}
-          maxlength={MAX_DRAFT_CHARS}
+          maxlength={MAX_INPUT_CHARS}
           disabled={writing.blocked || !writing.active}
-          title="Drafts stay in this tab only. Reloading or signing out clears them."
+          title="Drafts stay in this tab, across reloads, until you send them or sign out."
           bind:value={writing.text}
           onfocus={() => (typing = true)}
           onblur={() => (typing = false)}

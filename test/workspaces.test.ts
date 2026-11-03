@@ -82,7 +82,8 @@ const script = (code: string) => fauxAssistantMessage(fauxToolCall("codemode", {
 async function run(
   pal: Awaited<ReturnType<typeof openPal>>,
   chat: { id: string; conversationId: Parameters<typeof pal.harness.conversation>[0] },
-  codes: string[],
+  /** Scripts, or a direct call's whole answer. */
+  codes: (string | ReturnType<typeof fauxAssistantMessage>)[],
 ) {
   const faux = fauxProvider();
   (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
@@ -90,7 +91,10 @@ async function run(
   if (conversation === undefined) throw new Error("fixture conversation missing");
   const model = faux.getModel();
   await conversation.configure({ model: { provider: model.provider, modelId: model.id } }, context);
-  faux.setResponses([...codes.map(script), fauxAssistantMessage("done")]);
+  faux.setResponses([
+    ...codes.map((code) => (typeof code === "string" ? script(code) : code)),
+    fauxAssistantMessage("done"),
+  ]);
   await pal.chats.submit(chat.id, `input-${Date.now()}`, { text: "exercise workspace tools" }, context);
   await conversation.waitForIdle(context);
   const history = await conversation.context(context);
@@ -226,11 +230,15 @@ describe("immutable per-chat workspaces", () => {
       'return await tools.files_read({path:"file.txt"});',
       'return await tools.files_write({path:"bad.txt",content:"bad",expectedHash:null});',
       'return await tools.shell_run({command:"printf bad > bad.txt",timeout:2});',
+      fauxAssistantMessage(fauxToolCall("shell_run", { command: "printf bad > bad.txt", timeout: 2 }), {
+        stopReason: "toolUse",
+      }),
     ]);
     expect(output[0]).toMatchObject({ error: false, text: expect.stringContaining('"access":"read"') });
     expect(output[1]).toMatchObject({ error: false, text: expect.stringContaining("committed needle") });
     expect(output[2]?.error).toBe(true);
     expect(output[3]?.error).toBe(true);
+    expect(output[4]).toMatchObject({ error: true, text: expect.stringContaining("shell_run is not granted") });
     await expect(access(join(source, "bad.txt"))).rejects.toThrow();
     const tools = fileTools({
       root: async () => source,

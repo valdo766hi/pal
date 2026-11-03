@@ -9,8 +9,11 @@ import {
   checkpointCheckout,
   continuedCheckout,
   dependencyPlan,
+  helperResearch,
   inventory,
+  lostAttachment,
   revisedDependencyPlan,
+  slowVerifierCheckout,
   slug,
   verifierCheckout,
 } from "./tasks.ts";
@@ -74,6 +77,12 @@ for (const [task, name, passed] of [
   [dependencyPlan, "dependency-plan-fixed", true],
   [revisedDependencyPlan, "dependency-plan", false],
   [revisedDependencyPlan, "dependency-plan-fixed", true],
+  [helperResearch, "helper-research", false],
+  [helperResearch, "helper-research-solved", true],
+  [slowVerifierCheckout, "slow-verifier", false],
+  [slowVerifierCheckout, "slow-verifier-fixed", true],
+  [lostAttachment, "attachment-report", false],
+  [lostAttachment, "attachment-report-solved", true],
 ] as const) {
   const result = await grade(join(fixtures, name), task);
   assert.equal(result.passed, passed, name);
