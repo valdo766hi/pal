@@ -68,7 +68,7 @@
         {#if item.capability}
           <p class="fine">Core API {item.capability.core.min}–{item.capability.core.max}</p>
           {#each item.capability.tools as tool (tool.name)}<p class="fine mono">
-              {tool.name} · {tool.replay} · {tool.permissions.join(", ")}
+              {[tool.name, tool.replay, ...tool.permissions].join(" · ")}
             </p>{/each}
         {/if}
         {#if item.implementation}<p class="fine hash">

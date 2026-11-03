@@ -68,18 +68,6 @@ const KERNEL_BUILTINS: readonly KernelBuiltin[] = [
       "Sandboxed project browser. Agent access still needs an explicit, expiring handoff and action approvals.",
   },
   {
-    id: "helpers",
-    version: 1,
-    order: 50,
-    name: "Research helpers",
-    native: "pal.helpers",
-    panels: [],
-    // Off until chosen: each helper spends model requests on the chat's provider.
-    optIn: true,
-    description:
-      "The agent may hand self-contained research questions to helpers that use this chat's model, granted folders (read-only) and internet tools. Helpers can't write files, run commands, use the browser or start helpers; at most 4 per run, each with its own request, token and time limits.",
-  },
-  {
     id: "compact",
     version: 1,
     order: 60,

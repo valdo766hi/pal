@@ -29,7 +29,7 @@ import { CommandApprovals } from "./approvals.ts";
 import { BROWSER_NAMESPACE, browserTools } from "../pi/browser-tools.ts";
 import { type BrowserRuntime, browserRuntime, ProjectBrowsers } from "./browser.ts";
 import { chatConfiguration, ChatService } from "./chats.ts";
-import { helperBudget, HelperLinks, type HelperLimits, helperTools } from "./delegation.ts";
+import { helperBudget, HelperLinks, type HelperLimits } from "./delegation.ts";
 import { BuiltinExtensions, PLUGINS, releaseIdentity } from "./extensions.ts";
 import { ChatContext } from "./context.ts";
 import { WORKING_NAMESPACE, WorkingState } from "./working-state.ts";
@@ -281,6 +281,9 @@ export async function openPal(
         return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
       },
       authorize: (api, ctx) => folders.forTool(api, ctx),
+      now,
+      // The helpers plugin's tool and the kernel's helper budget hooks share these bounds.
+      ...(options.helperLimits === undefined ? {} : { options: { helpers: options.helperLimits } }),
     });
     capabilities = openedCapabilities;
     const guidanceFiles = new GuidanceFiles({
@@ -428,13 +431,6 @@ export async function openPal(
     );
     registry.install(compactOutput);
     registry.install(browserTools(() => browsers));
-    registry.install(
-      helperTools({
-        project: async (conversation) => (await projectFor(conversation))?.id,
-        ...(options.helperLimits === undefined ? {} : { limits: options.helperLimits }),
-        now,
-      }),
-    );
     const commandApprovals = new CommandApprovals({
       database,
       root: (conversation) => workspaceRoot(conversation, true),

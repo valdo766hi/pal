@@ -96,6 +96,7 @@ function host(pal: Pal): KernelServices {
       return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
     },
     authorize: (api, ctx) => pal.folders.forTool(api, ctx),
+    now: Date.now,
   };
 }
 function traced(base: CompiledCapability, events: string[], output?: string): CompiledCapability {
@@ -304,7 +305,7 @@ describe("compiled capability contract", () => {
   it("removes memory at composition time without removing core guidance or the owner's other capabilities", async () => {
     const f = await fixture([]);
     const view = await f.pal.extensions.view();
-    expect(view.catalog.map((item) => item.id)).toEqual(["files", "shell", "browser", "helpers", "compact"]);
+    expect(view.catalog.map((item) => item.id)).toEqual(["files", "shell", "browser", "compact"]);
     expect(view.selected.map((item) => item.id)).not.toContain("memory");
     expect(view.selected.map((item) => item.id)).not.toContain("helpers");
     expect(f.pal.capabilities.namespaces).toEqual([]);

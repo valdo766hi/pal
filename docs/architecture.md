@@ -235,8 +235,9 @@ Its new-chat switch and manifest/identity appear in Settings; Context inspects r
 are bundled from `plugins/<id>/ui/` at build time and load only in chats that selected it, never downloaded UI.
 `test/capabilities.test.ts` exercises the contract and composition boundaries.
 
-- `src/core/extensions.ts`: built-in contributions (files, shell, memory, browser, compact) can be switched for new
-  chats. Each chat freezes its selection and the implementation versions it ran with. Compact output is opt-in: in
+- `src/core/extensions.ts`: the kernel's contributions (files, shell, browser, compact) and the plugins (memory,
+  research helpers) can be switched for new chats. The helpers plugin offers `agents_delegate`; helper conversations,
+  their links and budget hooks stay in the kernel (`src/core/delegation.ts`). Each chat freezes its selection and the implementation versions it ran with. Compact output is opt-in: in
   a chat that selected it, `shell_run` asks `rtk rewrite` for an equivalent before recording its intent, runs that
   instead and returns it as `executed`, but only for calls no owner approved and whose output reaches the model.
 - `pal check-release` (`src/core/release-check.ts`): builds and tests a candidate Git worktree with the running

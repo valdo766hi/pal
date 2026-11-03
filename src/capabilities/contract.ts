@@ -106,6 +106,10 @@ export type CapabilityIdentity = { id: string; version: number; digest: string }
 export type CapabilityHost = {
   /** SQL limited to the manifest's declared tables, a policy check on trusted code. */
   sql: SqliteDatabase;
+  /** The Harness clock, which also times script deadlines. */
+  now(): number;
+  /** This plugin's options from the embedding, such as lower test bounds; the plugin validates them. */
+  options?: unknown;
   storage: Storage;
   folders: FolderGrants;
   deny: readonly string[];
@@ -114,7 +118,11 @@ export type CapabilityHost = {
   authorize(api: ToolExecutionApi, context: Context): Promise<FolderLease>;
 };
 /** What the kernel opens a plugin with: its services, before they are narrowed to that plugin. */
-export type KernelServices = Omit<CapabilityHost, "sql"> & { database: SqliteDatabase };
+export type KernelServices = Omit<CapabilityHost, "sql" | "options"> & {
+  database: SqliteDatabase;
+  /** Options by plugin ID. */
+  options?: Readonly<Record<string, unknown>>;
+};
 /** One owner request under `/api/plugins/<id>/`; `path` is what follows the plugin's ID. */
 export type CapabilityRequest = {
   readonly method: string;
@@ -246,11 +254,15 @@ export class CompiledCapabilities {
         names.add(tool.name);
       }
     }
-    const { database, ...services } = kernel;
+    const { database, options, ...services } = kernel;
     const opened = new CompiledCapabilities();
     try {
       for (const { definition, manifest } of prepared) {
-        const runtime = await definition.open({ ...services, sql: scopedSql(database, manifest) });
+        const runtime = await definition.open({
+          ...services,
+          sql: scopedSql(database, manifest),
+          options: options?.[manifest.id],
+        });
         const record = { manifest, runtime, extension: defineExtension({ name: manifest.native }) };
         opened.#opened.push(record);
         const declarations = manifest.tools ?? [];
