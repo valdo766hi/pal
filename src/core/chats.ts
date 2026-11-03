@@ -86,6 +86,8 @@ export type ChatSummary = Chat & {
 };
 export type BlockedInput = { readonly requestId: string; readonly text: string; readonly reason: string };
 export type Admission = { readonly chatId: string; readonly requestId: string; readonly submissionId: SubmissionId };
+export type InputRecord =
+  { readonly state: "admitted"; readonly admission: Admission } | { readonly state: "admitting" | "withdrawn" };
 
 /**
  * The Pal chat each Pi conversation was created for, written in the commit that creates the conversation: Pi has no
@@ -359,6 +361,21 @@ export class ChatService {
   /** Admit one input; repeating a request ID with the same body returns the same submission. */
   async submit(chatId: string, requestId: unknown, body: unknown, context: Context): Promise<Admission> {
     return this.#withConfiguration(chatId, () => this.#submit(chatId, requestId, body, context));
+  }
+
+  /** What became of one input request: undefined if Pal never recorded it, so its sender may safely send it again. */
+  async input(chatId: string, requestId: string): Promise<InputRecord | undefined> {
+    const row = await this.#guard((db) =>
+      db.get<Pick<AdmissionRow, "state" | "submission_id">>(
+        "SELECT state, submission_id FROM pal_admissions WHERE chat_id = ? AND request_id = ?",
+        chatId,
+        requestId,
+      ),
+    );
+    if (row === undefined) return undefined;
+    return row.submission_id === null
+      ? { state: row.state === "withdrawn" ? "withdrawn" : "admitting" }
+      : { state: "admitted", admission: { chatId, requestId, submissionId: row.submission_id } };
   }
 
   /** Admit a blocked input again with its recorded body, in turn with the chat's other admissions. */

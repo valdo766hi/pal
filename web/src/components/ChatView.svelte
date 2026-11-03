@@ -587,6 +587,27 @@
     }
   }
 
+  /** A send saved before a reload: cleared if Pal admitted it, otherwise kept for an explicit, idempotent retry. */
+  async function recover(envelope: PendingInput) {
+    try {
+      const input = await api.input(envelope.chatId, envelope.requestId);
+      if (input.state === "admitted") writing.confirm(envelope, input.admission);
+      else if (input.state === "withdrawn") writing.reject(envelope);
+      else writing.recovered = false;
+    } catch (failure) {
+      if (!writing.active || writing.pending !== envelope) return;
+      writing.recovered = false;
+      writing.error =
+        failure instanceof ApiError && failure.code === "input_not_found"
+          ? "It never reached Pal."
+          : "Pal couldn't confirm whether it arrived; retrying won't send it twice.";
+    }
+  }
+  $effect(() => {
+    const envelope = writing.pending;
+    if (writing.recovered && envelope !== undefined) untrack(() => void recover(envelope));
+  });
+
   async function retrySaved() {
     const envelope = writing.pending;
     if (envelope !== undefined) await attempt((epoch) => deliver(envelope, epoch));
@@ -1222,7 +1243,7 @@
         </details>
         {#if resolveError !== undefined}<div class="callout er" role="alert">{resolveError}</div>{/if}
       {/if}
-      {#if writing.pending !== undefined && !writing.sending && writing.pending.requestId !== chat.blocked?.requestId}
+      {#if writing.pending !== undefined && !writing.sending && !writing.recovered && writing.pending.requestId !== chat.blocked?.requestId}
         <div class="callout wa" role="alert">
           <span class="grow"
             >This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.
@@ -1239,6 +1260,9 @@
         </details>
       {:else if writing.error !== undefined}<div class="callout er" role="alert">{writing.error}</div>{/if}
       {#if writing.notice !== undefined}<div class="callout ac" role="status">{writing.notice}</div>{/if}
+      {#if !writing.saved}<div class="callout wa" role="status">
+          This tab couldn't save your draft, so reloading would lose it.
+        </div>{/if}
       {#if phone && stream?.running}{@render busySwitch()}{/if}
 
       <div class="cbx" class:oneline={phone}>
@@ -1274,7 +1298,7 @@
             : "Message Pal"}
           maxlength={MAX_INPUT_CHARS}
           disabled={writing.blocked || !writing.active}
-          title="Drafts stay in this tab only. Reloading or signing out clears them."
+          title="Drafts stay in this tab, across reloads, until you send them or sign out."
           bind:value={writing.text}
           onfocus={() => (typing = true)}
           onblur={() => (typing = false)}

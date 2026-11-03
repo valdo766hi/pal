@@ -708,7 +708,7 @@ describe("chat draft admission", () => {
     expect(errors).toEqual([]);
   });
 
-  it("keeps unsent drafts per chat but clears them on reload and sign-out", async () => {
+  it("keeps unsent drafts per chat across navigation and reload, and clears them on sign-out", async () => {
     const { page, base, saved, other, provider, errors } = await setup(1440);
     await page.goto(`${base}/#/chat/${saved.id}`);
     await page.getByLabel("Message", { exact: true }).fill("Unsent saved-chat draft");
@@ -720,9 +720,10 @@ describe("chat draft admission", () => {
     expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(1);
     await page.reload();
     await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
-    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
-    expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(0);
-    await page.getByLabel("Message", { exact: true }).fill("Discard this on sign-out");
+    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("Unsent saved-chat draft");
+    expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(1);
+    await navigateChat(page, other.id);
+    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("Other chat draft");
     await page.evaluate(() => {
       location.hash = "#/settings/general";
     });
@@ -730,9 +731,67 @@ describe("chat draft admission", () => {
     await page.getByLabel("Passphrase", { exact: true }).fill("correct horse battery");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Sign out of Pal", exact: true }).waitFor();
-    await navigateChat(page, saved.id);
-    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+    for (const chat of [saved, other]) {
+      await navigateChat(page, chat.id);
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+    }
+    expect(
+      await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft."))),
+    ).toEqual([]);
     expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("recovers a saved send after reload: clears it once admitted, or retries it once if it never arrived", async () => {
+    const { pal, page, base, saved, provider, errors } = await setup(1440);
+    const inputs = `${base}/api/chats/${saved.id}/inputs`;
+    const admitted = () =>
+      pal.store.database.all<{ state: string }>("SELECT state FROM pal_admissions WHERE chat_id = ?", saved.id);
+    const message = page.getByLabel("Message", { exact: true });
+    const lookup = () =>
+      page.waitForResponse((reply) => reply.request().method() === "GET" && reply.url().startsWith(`${inputs}/`));
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
+
+    // Pal admits the input, but the reply never reaches the tab.
+    await page.route(inputs, async (route) => {
+      await route.fetch();
+      await route.abort();
+    });
+    await message.fill("Admitted, reply lost");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "This send isn't confirmed" }).waitFor();
+    await page.unroute(inputs);
+    const [found] = await Promise.all([lookup(), page.reload()]);
+    expect(found.status()).toBe(200);
+    await expect.poll(() => message.inputValue()).toBe("");
+    expect(await page.getByRole("button", { name: "Retry saved send", exact: true }).count()).toBe(0);
+    await expect.poll(() => provider.requests.length).toBe(1);
+
+    // The tab reloads while its send is still on the way, so Pal never receives it.
+    const held = Promise.withResolvers<undefined>();
+    const reloaded = Promise.withResolvers<undefined>();
+    await page.route(inputs, async (route) => {
+      held.resolve(undefined);
+      await reloaded.promise;
+      await route.abort().catch(() => {});
+    });
+    await message.fill("Never reached Pal");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await held.promise;
+    const [missing] = await Promise.all([lookup(), page.reload()]);
+    reloaded.resolve(undefined);
+    await page.unroute(inputs);
+    expect(missing.status()).toBe(404);
+    expect(await admitted()).toEqual([{ state: "admitted" }]);
+    await page.getByRole("alert").filter({ hasText: "It never reached Pal." }).waitFor();
+    await page.getByRole("button", { name: "Retry saved send", exact: true }).click();
+    await expect.poll(() => message.inputValue()).toBe("");
+    await expect.poll(admitted).toEqual([{ state: "admitted" }, { state: "admitted" }]);
+    await expect.poll(() => provider.requests.length).toBe(2);
+    expect(
+      await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft."))),
+    ).toEqual([]);
     expect(errors).toEqual([]);
   });
 });
@@ -868,16 +927,18 @@ describe("review comment drafts", () => {
       await page.reload();
       if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
       await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
-      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+      // The copied feedback and its link survive the reload; Pal hasn't received it yet.
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe(composed);
       await page.getByRole("button", { name: "Changes", exact: true }).click();
-      await panel.getByText("Not sent", { exact: true }).waitFor();
+      await panel.getByText("In composer · not admitted", { exact: true }).waitFor();
       const legacy = await page.request.post(`${base}/api/projects/${project.id}/comments/sent`, {
         headers: { origin: base },
         data: { ids: [comment.id], workspace: workspace.id },
       });
       expect(legacy.status()).toBe(404);
       expect((await pal.changes.list(project.id, "normal", workspace.id)).comments[0]?.sent).toBe(false);
-      await panel.getByRole("button", { name: "Send feedback to chat (1)", exact: true }).click();
+      await panel.getByRole("button", { name: "Copy feedback again (1)", exact: true }).click();
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe(composed);
       if (width < 700) await panel.waitFor({ state: "detached" });
       const lost = Promise.withResolvers<string>();
       await page.route(

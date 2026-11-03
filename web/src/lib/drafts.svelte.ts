@@ -30,26 +30,150 @@ type FeedbackBlock = Readonly<{ text: string; receipt: ReviewFeedback }>;
 const freezeFeedback = (feedback: ReviewFeedback) =>
   Object.freeze({ ids: Object.freeze([...feedback.ids]), scope: feedback.scope });
 
+/** Where a tab keeps its drafts across reloads: `sessionStorage` in the browser, so each tab has its own. */
+export type DraftStore = Pick<Storage, "getItem" | "setItem" | "removeItem" | "key" | "length">;
+const KEY = "pal.draft.";
+type Saved = {
+  v: 1;
+  revision: number;
+  text: string;
+  attachments: readonly Upload[];
+  whenBusy: BusyMode;
+  feedback: readonly FeedbackBlock[];
+  pending?: PendingInput | undefined;
+};
+const strings = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+const receipt = (value: unknown): value is ReviewFeedback =>
+  typeof value === "object" &&
+  value !== null &&
+  strings((value as ReviewFeedback).ids) &&
+  ["normal", "include-ignored"].includes((value as ReviewFeedback).scope);
+const busy = (value: unknown): value is BusyMode => value === "followUp" || value === "steer";
+
+/** A saved draft this code wrote, or undefined for anything else; storage is shared with whatever runs on the origin. */
+function parse(raw: string | null, chatId: string): Saved | undefined {
+  let value: Partial<Saved>;
+  try {
+    value = raw === null ? {} : (JSON.parse(raw) as Partial<Saved>);
+  } catch {
+    return undefined;
+  }
+  const pending = value.pending;
+  const valid =
+    value.v === 1 &&
+    Number.isSafeInteger(value.revision) &&
+    typeof value.text === "string" &&
+    value.text.length <= MAX_INPUT_CHARS &&
+    Array.isArray(value.attachments) &&
+    value.attachments.length <= MAX_INPUT_ATTACHMENTS &&
+    value.attachments.every(
+      (file) =>
+        typeof file?.id === "string" &&
+        typeof file.name === "string" &&
+        typeof file.mediaType === "string" &&
+        Number.isSafeInteger(file.size) &&
+        file.state === "ready",
+    ) &&
+    busy(value.whenBusy) &&
+    Array.isArray(value.feedback) &&
+    value.feedback.every((block) => typeof block?.text === "string" && receipt(block.receipt)) &&
+    (pending === undefined ||
+      (pending.chatId === chatId &&
+        typeof pending.requestId === "string" &&
+        Number.isSafeInteger(pending.revision) &&
+        typeof pending.body?.text === "string" &&
+        strings(pending.body.attachments) &&
+        busy(pending.body.whenBusy) &&
+        typeof pending.body.configuration === "string" &&
+        (pending.body.feedback === undefined || receipt(pending.body.feedback))));
+  return valid ? (value as Saved) : undefined;
+}
+
 export class ChatDraft {
   readonly chatId: string;
   readonly blocked: boolean;
   readonly #controller = new AbortController();
+  readonly #store: DraftStore | undefined;
   #active = $state(true);
   #text = $state("");
   #attachments = $state.raw<readonly Readonly<Upload>[]>([]);
   #feedback = $state.raw<readonly FeedbackBlock[]>([]);
   #revision = 0;
-  whenBusy = $state<BusyMode>("followUp");
+  #whenBusy = $state<BusyMode>("followUp");
+  #pending = $state.raw<PendingInput | undefined>();
   sending = $state(false);
   uploading = $state(0);
-  pending = $state.raw<PendingInput | undefined>();
   error = $state<string | undefined>();
   notice = $state<string | undefined>();
+  /** False once this tab couldn't save the draft; it then lives only in memory until the next successful save. */
+  saved = $state(true);
+  /** True for a saved send restored after a reload, until its admission is looked up. */
+  recovered = $state(false);
 
-  constructor(chatId: string, problem?: string) {
+  constructor(chatId: string, problem?: string, store?: DraftStore) {
     this.chatId = chatId;
     this.blocked = problem !== undefined;
     this.error = problem;
+    this.#store = this.blocked ? undefined : store;
+    let raw: string | null = null;
+    try {
+      raw = this.#store?.getItem(KEY + chatId) ?? null;
+    } catch {
+      this.saved = false;
+    }
+    if (raw === null) return;
+    const saved = parse(raw, chatId);
+    if (saved === undefined) {
+      this.#save();
+      return;
+    }
+    this.#revision = saved.revision;
+    this.#text = saved.text;
+    this.#attachments = Object.freeze(saved.attachments.map((file) => Object.freeze({ ...file })));
+    this.#whenBusy = saved.whenBusy;
+    this.#feedback = Object.freeze(
+      saved.feedback.map((block) => Object.freeze({ text: block.text, receipt: freezeFeedback(block.receipt) })),
+    );
+    if (saved.pending !== undefined) {
+      this.#pending = freezeEnvelope(saved.pending);
+      this.recovered = true;
+    }
+  }
+
+  /** Mirrors this draft to the tab's store; an empty draft leaves nothing behind. Inactive drafts never write. */
+  #save() {
+    if (!this.active || this.#store === undefined) return;
+    try {
+      if (this.#text === "" && this.#attachments.length === 0 && this.#pending === undefined)
+        this.#store.removeItem(KEY + this.chatId);
+      else
+        this.#store.setItem(
+          KEY + this.chatId,
+          JSON.stringify({
+            v: 1,
+            revision: this.#revision,
+            text: this.#text,
+            attachments: this.#attachments.filter((file) => file.state === "ready"),
+            whenBusy: this.#whenBusy,
+            feedback: this.#feedback,
+            pending: this.#pending,
+          } satisfies Saved),
+        );
+      this.saved = true;
+    } catch {
+      this.saved = false;
+    }
+  }
+  get whenBusy() {
+    return this.#whenBusy;
+  }
+  set whenBusy(value: BusyMode) {
+    this.#whenBusy = value;
+    this.#save();
+  }
+  get pending() {
+    return this.#pending;
   }
 
   get active() {
@@ -71,6 +195,7 @@ export class ChatDraft {
     this.#feedback = this.#feedback.filter((block) => value.includes(block.text));
     this.#revision++;
     if (this.pending === undefined) this.error = undefined;
+    this.#save();
   }
   get attachments() {
     return this.#attachments;
@@ -83,6 +208,7 @@ export class ChatDraft {
     }
     this.#attachments = Object.freeze(value.map((file) => Object.freeze({ ...file })));
     this.#revision++;
+    this.#save();
   }
   get empty() {
     return (
@@ -131,6 +257,7 @@ export class ChatDraft {
     }
     if (!this.append(text)) return false;
     this.#feedback = [...this.#feedback, Object.freeze({ text, receipt: freezeFeedback(receipt) })];
+    this.#save();
     return true;
   }
   unlinkFeedback(ids: readonly string[]) {
@@ -139,6 +266,7 @@ export class ChatDraft {
   }
   touch() {
     this.#revision++;
+    this.#save();
   }
   snapshot(running: boolean): DraftSnapshot {
     if (!this.active || this.blocked || this.text.trim() === "") throw new Error("This draft cannot be sent.");
@@ -152,19 +280,15 @@ export class ChatDraft {
   }
   stage(requestId: string, snapshot: DraftSnapshot, configuration: string): PendingInput {
     if (!this.active || this.blocked || this.pending !== undefined) throw new Error("Resolve the saved send first.");
-    const envelope = Object.freeze({
+    const envelope = freezeEnvelope({
       chatId: this.chatId,
       requestId,
       revision: snapshot.revision,
-      body: Object.freeze({
-        text: snapshot.text,
-        attachments: Object.freeze([...snapshot.attachments]),
-        whenBusy: snapshot.whenBusy,
-        configuration,
-        feedback: snapshot.feedback === undefined ? undefined : freezeFeedback(snapshot.feedback),
-      }),
+      body: { ...snapshot, configuration },
     });
-    this.pending = envelope;
+    // Saved before the caller sends it, so a reload during the request can find out what became of it.
+    this.#pending = envelope;
+    this.#save();
     return envelope;
   }
   confirm(envelope: PendingInput, admission: Admission) {
@@ -178,11 +302,16 @@ export class ChatDraft {
       this.#revision++;
       this.notice = undefined;
     } else this.notice = "The earlier message was admitted. Your newer draft is kept.";
-    this.pending = undefined;
+    this.#pending = undefined;
+    this.recovered = false;
     this.error = undefined;
+    this.#save();
   }
   reject(envelope: PendingInput) {
-    if (this.pending === envelope) this.pending = undefined;
+    if (this.pending !== envelope) return;
+    this.#pending = undefined;
+    this.recovered = false;
+    this.#save();
   }
   dispose() {
     this.#active = false;
@@ -190,14 +319,34 @@ export class ChatDraft {
     this.#text = "";
     this.#attachments = [];
     this.#feedback = [];
-    this.pending = undefined;
+    this.#pending = undefined;
     this.error = undefined;
     this.notice = undefined;
   }
 }
 
+function freezeEnvelope(envelope: PendingInput): PendingInput {
+  const { text, attachments, whenBusy, configuration, feedback } = envelope.body;
+  return Object.freeze({
+    chatId: envelope.chatId,
+    requestId: envelope.requestId,
+    revision: envelope.revision,
+    body: Object.freeze({
+      text,
+      attachments: Object.freeze([...attachments]),
+      whenBusy,
+      configuration,
+      feedback: feedback === undefined ? undefined : freezeFeedback(feedback),
+    }),
+  });
+}
+
 export class ChatDrafts {
   readonly #drafts = new SvelteMap<string, ChatDraft>();
+  readonly #store: DraftStore | undefined;
+  constructor(store: DraftStore | undefined = browserStore()) {
+    this.#store = store;
+  }
   open(chatId: string): ChatDraft {
     return untrack(() => {
       const known = this.#drafts.get(chatId);
@@ -212,14 +361,29 @@ export class ChatDrafts {
         this.#drafts.size >= MAX_DRAFT_CHATS
           ? `This tab holds ${MAX_DRAFT_CHATS} drafts. Confirm a saved send, or clear another chat's unsent text and files, before drafting here.`
           : undefined;
-      const draft = new ChatDraft(chatId, problem);
+      const draft = new ChatDraft(chatId, problem, this.#store);
       if (!draft.blocked) this.#drafts.set(chatId, draft);
       return draft;
     });
   }
+  /** Signing out forgets every draft this tab kept, in memory and in its store. */
   clear() {
     for (const draft of this.#drafts.values()) draft.dispose();
     this.#drafts.clear();
+    try {
+      const keys = Array.from({ length: this.#store?.length ?? 0 }, (_, i) => this.#store?.key(i));
+      for (const key of keys) if (key?.startsWith(KEY)) this.#store?.removeItem(key);
+    } catch {
+      // Nothing saved is reachable either.
+    }
+  }
+}
+
+function browserStore(): DraftStore | undefined {
+  try {
+    return globalThis.sessionStorage;
+  } catch {
+    return undefined;
   }
 }
 

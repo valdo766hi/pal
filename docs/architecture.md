@@ -41,7 +41,9 @@ parses the command line (see [configuration](configuration.md)) and starts the H
 A chat is a Pal record mapped to a Pi conversation (`src/core/chats.ts`).
 
 1. `POST /api/chats/:id/inputs` carries a client request ID. Admission is bound to that ID and a digest of the
-   body, so a retried request is admitted once, and a different body under the same ID is refused.
+   body, so a retried request is admitted once, and a different body under the same ID is refused. The tab saves the
+   request in `sessionStorage` before sending it; after a reload, `GET /api/chats/:id/inputs/:request` says whether
+   Pal admitted, holds or withdrew it, or never received it, from the same admission records.
 2. Pi admits the input. The response is sent only after admission is durable, then a generation task streams the
    model's answer. A recorded input whose attachment is missing or damaged is not sent without it: it holds back
    only its own chat's later inputs, across restarts, until the owner retries it with its recorded body or

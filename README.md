@@ -13,9 +13,10 @@ decide how much it may do without asking.
 Runs are durable: a chat keeps going when you close the tab, and a restart resumes interrupted work instead of
 silently repeating it.
 
-Unsent drafts and saved sends stay in this tab's memory: 32 chats, 100,000 characters and 10 files per draft.
-Navigation keeps them; reloading or signing out clears them. If a send was unconfirmed, inspect chat history before
-sending again. **Retry saved send** preserves the original request and destination.
+Unsent drafts and saved sends stay in this tab: 32 chats, 100,000 characters and 10 files per draft. Navigation and
+reloading keep them; signing out or closing the tab clears them. After a reload, Pal checks whether a send that was
+in flight arrived and clears it if it did; otherwise **Retry saved send** sends the original request to its original
+destination, and Pal never admits it twice.
 
 ## Philosophy
 

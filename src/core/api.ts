@@ -845,6 +845,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
             ),
           );
       }
+      if (action === "inputs" && path.length === 4 && method === "GET") {
+        const input = await pal.chats.input(chat.id, path[3] ?? "");
+        if (input === undefined) throw new HttpError(404, "input_not_found", "Pal has no record of this input.");
+        return send(200, input);
+      }
       if (action === "inputs" && path.length === 5 && path[4] === "withdraw" && method === "POST") {
         await pal.chats.withdraw(chat.id, path[3] ?? "", context);
         return send(200, { withdrawn: true });

@@ -3,7 +3,13 @@ import { Value } from "typebox/value";
 import { InputBody } from "../src/core/chats.ts";
 import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../src/protocol/limits.ts";
 import type { Admission, Upload } from "../web/src/lib/api.ts";
-import { ChatDraft, ChatDrafts, MAX_DRAFT_CHATS, type PendingInput } from "../web/src/lib/drafts.svelte.ts";
+import {
+  ChatDraft,
+  ChatDrafts,
+  type DraftStore,
+  MAX_DRAFT_CHATS,
+  type PendingInput,
+} from "../web/src/lib/drafts.svelte.ts";
 
 const file = (id = "upload-one"): Upload => ({
   id,
@@ -221,5 +227,111 @@ describe("per-chat draft ownership", () => {
     expect(() => old.snapshot(false)).toThrow();
     expect(drafts.open("one").text).toBe("");
     expect(drafts.open("one")).not.toBe(old);
+  });
+});
+
+class MemoryStore implements DraftStore {
+  readonly items = new Map<string, string>();
+  fail = false;
+  get length() {
+    return this.items.size;
+  }
+  key(index: number) {
+    return [...this.items.keys()][index] ?? null;
+  }
+  getItem(key: string) {
+    return this.items.get(key) ?? null;
+  }
+  setItem(key: string, value: string) {
+    if (this.fail) throw new Error("QuotaExceededError");
+    this.items.set(key, value);
+  }
+  removeItem(key: string) {
+    this.items.delete(key);
+  }
+}
+
+describe("drafts across reloads", () => {
+  it("restores text, files, busy mode, feedback and a saved send written before it was sent", () => {
+    const store = new MemoryStore();
+    const draft = new ChatDrafts(store).open("one");
+    draft.appendFeedback("Review feedback: tighten this", { ids: ["comment-one"], scope: "normal" });
+    draft.attachments = [file()];
+    draft.whenBusy = "steer";
+    const envelope = pending(draft);
+    expect(JSON.parse(store.getItem("pal.draft.one") ?? "{}").pending).toEqual(JSON.parse(JSON.stringify(envelope)));
+
+    const reloaded = new ChatDrafts(store).open("one");
+    expect(reloaded).toMatchObject({ text: "Review feedback: tighten this", whenBusy: "steer", recovered: true });
+    expect(reloaded.attachments).toEqual([file()]);
+    expect(reloaded.feedback).toEqual({ ids: ["comment-one"], scope: "normal" });
+    expect(reloaded.pending).toEqual(envelope);
+    expect(Object.isFrozen(reloaded.pending?.body)).toBe(true);
+    const restored = reloaded.pending;
+    if (restored === undefined) throw new Error("missing restored send");
+    reloaded.confirm(restored, ack(restored));
+    expect(reloaded.text).toBe("");
+    expect(reloaded.recovered).toBe(false);
+    expect(store.getItem("pal.draft.one")).toBeNull();
+  });
+
+  it("keeps a newer draft when the restored send turns out to be admitted", () => {
+    const store = new MemoryStore();
+    const draft = new ChatDrafts(store).open("one");
+    draft.text = "original";
+    pending(draft);
+    draft.text = "newer";
+    const reloaded = new ChatDrafts(store).open("one");
+    const restored = reloaded.pending;
+    if (restored === undefined) throw new Error("missing restored send");
+    reloaded.confirm(restored, ack(restored));
+    expect(reloaded.text).toBe("newer");
+    expect(reloaded.notice).toContain("newer draft is kept");
+    expect(new ChatDrafts(store).open("one")).toMatchObject({ text: "newer", pending: undefined, recovered: false });
+  });
+
+  it("forgets every saved draft on sign-out and ignores late writes", () => {
+    const store = new MemoryStore();
+    store.setItem("pal.theme", "dark");
+    const drafts = new ChatDrafts(store);
+    const one = drafts.open("one");
+    one.text = "first";
+    drafts.open("two").text = "second";
+    drafts.clear();
+    one.text = "written after sign-out";
+    expect([...store.items.keys()]).toEqual(["pal.theme"]);
+    expect(new ChatDrafts(store).open("one").text).toBe("");
+  });
+
+  it("keeps the draft in memory and says so while the tab can't save it", () => {
+    const store = new MemoryStore();
+    const draft = new ChatDrafts(store).open("one");
+    store.fail = true;
+    draft.text = "unsaved";
+    expect(draft).toMatchObject({ text: "unsaved", saved: false });
+    store.fail = false;
+    draft.text = "saved again";
+    expect(draft.saved).toBe(true);
+    expect(new ChatDrafts(store).open("one").text).toBe("saved again");
+  });
+
+  it("ignores saved data it didn't write", () => {
+    const store = new MemoryStore();
+    store.setItem("pal.draft.one", "not json");
+    store.setItem(
+      "pal.draft.two",
+      JSON.stringify({
+        v: 1,
+        revision: 1,
+        text: "x",
+        attachments: [],
+        whenBusy: "followUp",
+        feedback: [],
+        pending: { chatId: "elsewhere" },
+      }),
+    );
+    expect(new ChatDrafts(store).open("one")).toMatchObject({ text: "", pending: undefined });
+    expect(store.getItem("pal.draft.one")).toBeNull();
+    expect(new ChatDrafts(store).open("two")).toMatchObject({ text: "", pending: undefined });
   });
 });

@@ -9,8 +9,8 @@ import type { McpServerInput, McpServerView as McpServer } from "../../../src/pi
 export type { McpAuth, McpState } from "../../../src/pi/mcp.ts";
 export type { McpServer, McpServerInput };
 
-import type { Admission, BlockedInput } from "../../../src/core/chats.ts";
-export type { Admission, BlockedInput };
+import type { Admission, BlockedInput, InputRecord } from "../../../src/core/chats.ts";
+export type { Admission, BlockedInput, InputRecord };
 import type { ScheduleInput, ScheduleNotice, ScheduleView } from "../../../src/core/schedules.ts";
 export type { ScheduleInput, ScheduleNotice, ScheduleView };
 export type { HelperView } from "../../../src/core/delegation.ts";
@@ -374,6 +374,8 @@ export const api = {
     return data.upload;
   },
   /** Send a blocked input again with the body Pal recorded for it. */
+  input: (id: string, requestId: string) =>
+    call<InputRecord>("GET", `chats/${id}/inputs/${encodeURIComponent(requestId)}`),
   retryInput: (id: string, requestId: string) =>
     call<{ admission: Admission }>("POST", `chats/${id}/inputs/${encodeURIComponent(requestId)}/retry`),
   withdrawInput: (id: string, requestId: string) =>

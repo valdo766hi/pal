@@ -1394,6 +1394,10 @@ describe("API", () => {
     expect([refused.status, refused.body.error]).toEqual([409, "input_blocked"]);
     const held = await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-held", text: "Then this" });
     expect([held.status, held.body.error]).toEqual([409, "input_held"]);
+    // A sender that lost its reply can find out what became of a request without sending it again.
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-lost`)).body).toEqual({ state: "admitting" });
+    const never = await api("GET", `chats/${blocked.id}/inputs/input-held`);
+    expect([never.status, never.body.error]).toEqual([404, "input_not_found"]);
     const listed = (await api("GET", "projects")).body.projects.find((item: { id: string }) => item.id === project.id);
     expect(listed.chats.find((item: { id: string }) => item.id === blocked.id).blocked).toMatchObject({
       requestId: "input-lost",
@@ -1401,9 +1405,13 @@ describe("API", () => {
     });
     expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/retry`)).body.error).toBe("input_blocked");
     expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/withdraw`)).body).toEqual({ withdrawn: true });
-    expect(
-      (await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-after", text: "Now this" })).status,
-    ).toBe(200);
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-lost`)).body).toEqual({ state: "withdrawn" });
+    const after = await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-after", text: "Now this" });
+    expect(after.status).toBe(200);
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-after`)).body).toEqual({
+      state: "admitted",
+      admission: after.body.admission,
+    });
     expect(
       (await api("POST", `chats/${chat.id}/inputs`, { requestId: "input-request-2", text: "Still?" })).status,
     ).toBe(200);
