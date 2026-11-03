@@ -2713,3 +2713,89 @@ describe("saved working goals", () => {
     },
   );
 });
+
+describe("workspace state and project dialog", () => {
+  it("keeps each workspace's Changes badge, resolves chats this tab hasn't listed and refreshes on return", async () => {
+    const { pal, page, base, saved, errors } = await reviewFixture(1440);
+    const changes = page.getByRole("button", { name: "Changes", exact: true });
+    await expect.poll(() => changes.getAttribute("data-tip")).toBe("Changes · 2 files");
+    await changes.click();
+    await page.getByRole("complementary", { name: "Workspace panel" }).waitFor({ state: "detached" });
+
+    // Created elsewhere after this tab listed its projects.
+    const elsewhere = await pal.projects.create("elsewhere-project", { name: "Elsewhere" });
+    const fresh = await pal.chats.createChat("elsewhere-chat", { projectId: elsewhere.id, title: "Fresh" }, context);
+    expect(await pal.workspaces.info(fresh.id)).toMatchObject({ state: "ready" });
+    await navigateChat(page, fresh.id);
+    expect(await page.getByRole("heading", { name: "Chat not found" }).count()).toBe(0);
+    expect(await changes.getAttribute("data-tip")).toBe("Changes");
+    await navigateChat(page, saved.id);
+    expect(await changes.getAttribute("data-tip")).toBe("Changes · 2 files");
+
+    await page.evaluate(() => {
+      location.hash = "#/chat/not-a-chat";
+    });
+    await page.getByRole("heading", { name: "Chat not found" }).waitFor();
+
+    await pal.projects.create("returned-project", { name: "Arrived while away" });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByText("Arrived while away", { exact: true }).waitFor();
+
+    // An older listing that arrives late never replaces a newer one.
+    const fetched = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const delivered = Promise.withResolvers<undefined>();
+    let held = false;
+    await page.route(`${base}/api/projects`, async (route) => {
+      if (held) return route.continue();
+      held = true;
+      const response = await route.fetch();
+      fetched.resolve(undefined);
+      await release.promise;
+      await route.fulfill({ response });
+      delivered.resolve(undefined);
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await fetched.promise;
+    await pal.projects.create("newest-project", { name: "Newest listing" });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByText("Newest listing", { exact: true }).waitFor();
+    release.resolve(undefined);
+    await delivered.promise;
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    expect(await page.getByText("Newest listing", { exact: true }).count()).toBe(1);
+    expect(errors).toEqual([]);
+  });
+
+  it("opens Create project as a native modal: initial focus, contained Tab, Escape and focus restore", async () => {
+    const { page, base, saved, errors } = await setup(1440);
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const opener = page.getByRole("button", { name: "New project", exact: true });
+    await opener.click();
+    const dialog = page.getByRole("dialog", { name: "Create project" });
+    await dialog.waitFor();
+    expect(await dialog.evaluate((node) => node.matches(":modal"))).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.getAttribute("placeholder")))
+      .toBe("e.g. Platform");
+    // Tab never reaches the inert page behind it; past the last control, focus may only leave for the browser itself.
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press("Tab");
+      const outside = await page.evaluate(() => {
+        const active = document.activeElement;
+        return active !== null && active !== document.body && active.closest("dialog") === null;
+      });
+      expect(outside).toBe(false);
+    }
+    // Escape leaves the folder picker first, then closes the dialog.
+    await dialog.getByRole("radio", { name: /Use existing folder/ }).check();
+    await dialog.getByRole("button", { name: "Choose folder…", exact: true }).click();
+    await page.getByRole("dialog", { name: "Choose a folder" }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.getByRole("heading", { name: "Create project" }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached" });
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe("New project");
+    expect(errors).toEqual([]);
+  });
+});

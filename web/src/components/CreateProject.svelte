@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { api, ApiError, type FolderListing, type Project, requestId } from "../lib/api.ts";
   import Icon from "../lib/Icon.svelte";
   import { viewport } from "../lib/state.svelte.ts";
@@ -16,6 +17,16 @@
   // One key per dialog: a retried Create after a lost response returns the same project.
   const key = requestId();
   const phone = $derived(viewport() === "phone");
+  let dialog: HTMLDialogElement;
+  let nameInput: HTMLInputElement | undefined = $state();
+
+  // A native modal keeps focus inside and the page behind it inert; closing returns focus to what opened it.
+  onMount(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+    dialog.showModal();
+    nameInput?.focus();
+    return () => opener?.focus();
+  });
 
   const crumbs = $derived(
     listing === undefined
@@ -61,189 +72,180 @@
       busy = false;
     }
   }
-
-  function onKeydown(event: KeyboardEvent) {
-    if (event.key === "Escape") {
-      if (picking) picking = false;
-      else onClose();
-    }
-  }
 </script>
 
-<svelte:window onkeydown={onKeydown} />
-
-<div class="overlay" class:phone>
-  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="create-title">
-    <div class="top">
-      <div class="heading">
-        <h2 id="create-title">{picking ? "Choose a folder" : "Create project"}</h2>
-        <div class="step">{picking ? "A folder on this server" : "Name and where its files live"}</div>
-      </div>
-      <button class="b i q tip end" aria-label="Close" data-tip="Close" onclick={onClose}><Icon name="x" /></button>
+<dialog
+  bind:this={dialog}
+  class:phone
+  aria-labelledby="create-title"
+  oncancel={(event) => {
+    event.preventDefault();
+    if (picking) picking = false;
+    else onClose();
+  }}
+>
+  <div class="top">
+    <div class="heading">
+      <h2 id="create-title">{picking ? "Choose a folder" : "Create project"}</h2>
+      <div class="step">{picking ? "A folder on this server" : "Name and where its files live"}</div>
     </div>
+    <button class="b i q tip end" aria-label="Close" data-tip="Close" onclick={onClose}><Icon name="x" /></button>
+  </div>
 
-    {#if picking}
-      <div class="picker">
-        <div class="pathbar">
-          <div class="pathrow">
-            <button
-              class="b i tip start"
-              aria-label="Parent folder"
-              data-tip="Parent folder"
-              onclick={() => open(listing?.parent)}
-              disabled={listing?.parent === undefined}
-            >
-              <Icon name="chevL" />
-            </button>
-            <label for="picker-path" class="sr">Folder path</label>
-            <input
-              id="picker-path"
-              class="f mono"
-              bind:value={pathInput}
-              onkeydown={(event) => event.key === "Enter" && open(pathInput)}
-              autocomplete="off"
-              spellcheck="false"
-            />
-            <button class="b" onclick={() => open(pathInput)}>Go</button>
-          </div>
-          <nav aria-label="Path" class="crumbs">
-            <button class="b sm q mono" onclick={() => open("/")}>/</button>
-            {#each crumbs as crumb, index (crumb.path)}
-              {#if index > 0}<span aria-hidden="true" class="sep">/</span>{/if}
-              <button class="b sm q mono" aria-current={crumb.path === listing?.path} onclick={() => open(crumb.path)}
-                >{crumb.label}</button
-              >
-            {/each}
-          </nav>
-        </div>
-        <div class="entries">
-          {#if listing?.problem === "denied"}
-            <div role="alert" class="callout er">
-              <strong>Permission denied.</strong> Pal can't read <span class="mono">{listing.path}</span>. Pick another
-              folder or change its permissions on the server.
-            </div>
-          {:else if listing?.problem === "missing"}
-            <div role="alert" class="callout wa">
-              <strong>No such folder.</strong> <span class="mono">{listing.path}</span> doesn't exist.
-            </div>
-          {:else if listing?.problem === "not_directory"}
-            <div role="alert" class="callout wa">
-              <strong>Not a folder.</strong> <span class="mono">{listing.path}</span> is a file.
-            </div>
-          {:else if listing !== undefined && listing.entries.length === 0}
-            <p class="empty">No subfolders.</p>
-          {/if}
-          <ul role="list">
-            {#each listing?.entries ?? [] as entry (entry.path)}
-              <li>
-                <button class="frow" onclick={() => open(entry.path)}>
-                  <Icon name="folder" />
-                  <span class="mono grow">{entry.name}</span>
-                  {#if entry.git}<span class="pill">Git</span>{/if}
-                  <Icon name="chevR" />
-                </button>
-              </li>
-            {/each}
-          </ul>
-          {#if listing?.truncated}<p class="empty">Showing the first 500 folders. Type a path to go further.</p>{/if}
-        </div>
-        <div class="foot">
-          <span class="note mono">{listing?.problem === undefined ? listing?.path : ""}</span>
-          <button class="b" onclick={() => (picking = false)}>Cancel</button>
+  {#if picking}
+    <div class="picker">
+      <div class="pathbar">
+        <div class="pathrow">
           <button
-            class="b p"
-            disabled={listing === undefined || listing.problem !== undefined}
-            onclick={() => {
-              folder = listing?.path;
-              picking = false;
-            }}>Select folder</button
+            class="b i tip start"
+            aria-label="Parent folder"
+            data-tip="Parent folder"
+            onclick={() => open(listing?.parent)}
+            disabled={listing?.parent === undefined}
           >
+            <Icon name="chevL" />
+          </button>
+          <label for="picker-path" class="sr">Folder path</label>
+          <input
+            id="picker-path"
+            class="f mono"
+            bind:value={pathInput}
+            onkeydown={(event) => event.key === "Enter" && open(pathInput)}
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button class="b" onclick={() => open(pathInput)}>Go</button>
         </div>
+        <nav aria-label="Path" class="crumbs">
+          <button class="b sm q mono" onclick={() => open("/")}>/</button>
+          {#each crumbs as crumb, index (crumb.path)}
+            {#if index > 0}<span aria-hidden="true" class="sep">/</span>{/if}
+            <button class="b sm q mono" aria-current={crumb.path === listing?.path} onclick={() => open(crumb.path)}
+              >{crumb.label}</button
+            >
+          {/each}
+        </nav>
       </div>
-    {:else}
-      <div class="body">
-        <label class="fl"
-          >Project name<input class="f" bind:value={name} placeholder="e.g. Platform" maxlength="120" /></label
-        >
-        <fieldset>
-          <legend>Where the project's files live</legend>
-          <label class="choice">
-            <input type="radio" name="mode" value="managed" bind:group={mode} />
-            <span>
-              <span class="cname">Create managed workspace</span>
-              <span class="optd">Pal creates a new folder for this project in its data directory on this server.</span>
-            </span>
-          </label>
-          <label class="choice">
-            <input type="radio" name="mode" value="existing" bind:group={mode} />
-            <span>
-              <span class="cname">Use existing folder on this server</span>
-              <span class="optd"
-                >The project points at a folder that already exists here. Pal doesn't copy or move it.</span
-              >
-            </span>
-          </label>
-        </fieldset>
-        {#if mode === "existing"}
-          {#if folder === undefined}
-            <div><button class="b" onclick={startPicking}><Icon name="folder" />Choose folder…</button></div>
-          {:else}
-            <div class="fold chosen">
-              <Icon name="folder" /><span class="mono grow">{folder}</span>
-              <button class="b sm" onclick={startPicking}>Change…</button>
-            </div>
-          {/if}
+      <div class="entries">
+        {#if listing?.problem === "denied"}
+          <div role="alert" class="callout er">
+            <strong>Permission denied.</strong> Pal can't read <span class="mono">{listing.path}</span>. Pick another
+            folder or change its permissions on the server.
+          </div>
+        {:else if listing?.problem === "missing"}
+          <div role="alert" class="callout wa">
+            <strong>No such folder.</strong> <span class="mono">{listing.path}</span> doesn't exist.
+          </div>
+        {:else if listing?.problem === "not_directory"}
+          <div role="alert" class="callout wa">
+            <strong>Not a folder.</strong> <span class="mono">{listing.path}</span> is a file.
+          </div>
+        {:else if listing !== undefined && listing.entries.length === 0}
+          <p class="empty">No subfolders.</p>
         {/if}
-        <p class="note">
-          High-trust host workspace: Pal can write files and run commands as its server user. Commands are not
-          sandboxed; the working folder does not confine their access.
-        </p>
-        {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
+        <ul role="list">
+          {#each listing?.entries ?? [] as entry (entry.path)}
+            <li>
+              <button class="frow" onclick={() => open(entry.path)}>
+                <Icon name="folder" />
+                <span class="mono grow">{entry.name}</span>
+                {#if entry.git}<span class="pill">Git</span>{/if}
+                <Icon name="chevR" />
+              </button>
+            </li>
+          {/each}
+        </ul>
+        {#if listing?.truncated}<p class="empty">Showing the first 500 folders. Type a path to go further.</p>{/if}
       </div>
       <div class="foot">
-        <span class="note">Folders stay where they are on the server.</span>
+        <span class="note mono">{listing?.problem === undefined ? listing?.path : ""}</span>
+        <button class="b" onclick={() => (picking = false)}>Cancel</button>
         <button
           class="b p"
-          onclick={create}
-          disabled={busy || name.trim() === "" || (mode === "existing" && folder === undefined)}>Create project</button
+          disabled={listing === undefined || listing.problem !== undefined}
+          onclick={() => {
+            folder = listing?.path;
+            picking = false;
+          }}>Select folder</button
         >
       </div>
-    {/if}
-  </div>
-</div>
+    </div>
+  {:else}
+    <div class="body">
+      <label class="fl"
+        >Project name<input
+          class="f"
+          bind:this={nameInput}
+          bind:value={name}
+          placeholder="e.g. Platform"
+          maxlength="120"
+        /></label
+      >
+      <fieldset>
+        <legend>Where the project's files live</legend>
+        <label class="choice">
+          <input type="radio" name="mode" value="managed" bind:group={mode} />
+          <span>
+            <span class="cname">Create managed workspace</span>
+            <span class="optd">Pal creates a new folder for this project in its data directory on this server.</span>
+          </span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="mode" value="existing" bind:group={mode} />
+          <span>
+            <span class="cname">Use existing folder on this server</span>
+            <span class="optd"
+              >The project points at a folder that already exists here. Pal doesn't copy or move it.</span
+            >
+          </span>
+        </label>
+      </fieldset>
+      {#if mode === "existing"}
+        {#if folder === undefined}
+          <div><button class="b" onclick={startPicking}><Icon name="folder" />Choose folder…</button></div>
+        {:else}
+          <div class="fold chosen">
+            <Icon name="folder" /><span class="mono grow">{folder}</span>
+            <button class="b sm" onclick={startPicking}>Change…</button>
+          </div>
+        {/if}
+      {/if}
+      <p class="note">
+        High-trust host workspace: Pal can write files and run commands as its server user. Commands are not sandboxed;
+        the working folder does not confine their access.
+      </p>
+      {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
+    </div>
+    <div class="foot">
+      <span class="note">Folders stay where they are on the server.</span>
+      <button
+        class="b p"
+        onclick={create}
+        disabled={busy || name.trim() === "" || (mode === "existing" && folder === undefined)}>Create project</button
+      >
+    </div>
+  {/if}
+</dialog>
 
 <style>
-  .overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 60;
-    animation: fade var(--mid) var(--ease);
-    background: var(--scrim);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-  }
-  .dialog {
+  dialog {
     width: 660px;
-    max-width: 100%;
+    max-width: calc(100% - 48px);
     height: min(640px, 92%);
-    max-height: 100%;
-    display: flex;
+    max-height: calc(100% - 48px);
+    padding: 0;
     flex-direction: column;
-    background: var(--bg2);
-    border: 1px solid var(--line2);
-    border-radius: 14px;
-    box-shadow: var(--shadow);
-    animation: pop-in var(--mid) var(--ease);
     transform-origin: center;
   }
-  .phone {
-    padding: 0;
+  dialog[open] {
+    display: flex;
   }
-  .phone .dialog {
+  dialog.phone {
     width: 100%;
+    max-width: none;
     height: 100%;
+    max-height: none;
+    margin: 0;
     border-radius: 0;
   }
   .top {

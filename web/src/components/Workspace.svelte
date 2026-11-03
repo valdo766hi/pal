@@ -121,7 +121,9 @@
       }
     | undefined = $state();
   let changesView: { refresh(): Promise<void> } | undefined = $state();
-  let changeStatus: { busy: boolean; files: number | undefined; add: number; del: number } | undefined = $state();
+  type ChangeStatus = { busy: boolean; files: number | undefined; add: number; del: number };
+  /** The Changes summary by workspace, so a chat never shows another workspace's badge. */
+  let changeStatuses: Record<string, ChangeStatus> = $state({});
   function openPanel(view: PanelView) {
     diffPath = undefined;
     panelRoute = app.route;
@@ -148,6 +150,17 @@
     }
     return undefined;
   });
+  const changesKey = $derived(located === undefined ? undefined : (located.chat.workspace?.id ?? located.project.id));
+  const changeStatus = $derived(changesKey === undefined ? undefined : changeStatuses[changesKey]);
+  /** A chat this tab hasn't listed, such as one another tab just created, is looked up before it counts as missing. */
+  let lookedUp: string | undefined = $state();
+  $effect(() => {
+    const id = chatId;
+    if (!loaded || id === undefined || located !== undefined || lookedUp === id) return;
+    void refreshProjects()
+      .catch(() => {})
+      .finally(() => (lookedUp = id));
+  });
 
   const pluginPanels = $derived(located === undefined ? [] : panels(located.chat.extensions));
   const pluginPanel = $derived(pluginPanels.find((item) => item.id === panelView));
@@ -168,6 +181,16 @@
     void Promise.all([refreshProjects(), refreshChatGPT(), refreshProviders(), refreshExtensions()])
       .catch((failure: unknown) => (error = failure instanceof Error ? failure.message : String(failure)))
       .finally(() => (loaded = true));
+    // Another tab or device may have renamed, added or removed chats while this one was in the background.
+    const returned = () => {
+      if (document.visibilityState === "visible") void refreshProjects().catch(() => {});
+    };
+    window.addEventListener("focus", returned);
+    document.addEventListener("visibilitychange", returned);
+    return () => {
+      window.removeEventListener("focus", returned);
+      document.removeEventListener("visibilitychange", returned);
+    };
   });
 
   let creatingChat = false;
@@ -381,6 +404,7 @@
                     >
                   </div>{/if}
                 {#key located.chat.workspace?.id ?? located.project.id}
+                  {@const statusKey = located.chat.workspace?.id ?? located.project.id}
                   {#if panelView === "Terminal"}
                     {#await terminalPanel()}<p role="status">Loading terminal…</p>
                     {:then { default: TerminalPanel }}
@@ -434,7 +458,7 @@
                     {:then { default: ChangesPanel }}
                       <ChangesPanel
                         bind:this={changesView}
-                        onStatus={(next) => (changeStatus = next)}
+                        onStatus={(next) => (changeStatuses[statusKey] = next)}
                         project={located.project}
                         workspace={located.chat.workspace}
                         initialPath={diffPath}
@@ -458,7 +482,7 @@
               {#if size === "tablet" || (size === "desktop" && !sidebarShown)}
                 <button class="b q" onclick={openSidebar}><Icon name="menu" />Projects</button>
               {/if}
-              <h1>{chatId === undefined ? "Pick a chat" : "Chat not found"}</h1>
+              <h1>{chatId === undefined ? "Pick a chat" : lookedUp === chatId ? "Chat not found" : "Loading chat…"}</h1>
               <p>Choose a chat in a project, or start a new one.</p>
               {#if ready}<button class="b p" onclick={() => newChat(ready.id)}
                   ><Icon name="plus" />New chat in {ready.name}</button

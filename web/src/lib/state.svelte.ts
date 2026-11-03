@@ -76,8 +76,12 @@ export function viewport(): "phone" | "tablet" | "desktop" {
   return "desktop";
 }
 
+let projectsEpoch = 0;
+/** Lists projects and chats again; a response that arrives after a newer request's is dropped. */
 export async function refreshProjects(): Promise<void> {
-  app.projects = (await api.projects()).projects;
+  const epoch = ++projectsEpoch;
+  const { projects } = await api.projects();
+  if (epoch === projectsEpoch) app.projects = projects;
 }
 
 export async function refreshChatGPT(): Promise<void> {
