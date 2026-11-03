@@ -132,7 +132,7 @@ export async function sampleTranscript(browser: Browser, webRoot: string, entrie
           if (!String(url).includes("/events")) return;
           // The first snapshot, which the benchmark later sends again as a reconnect would.
           this.addEventListener("snapshot", (event) => {
-            (window as unknown as { palBenchmarkSnapshot?: string }).palBenchmarkSnapshot ??= (
+            (window as Window & { palBenchmarkSnapshot?: string }).palBenchmarkSnapshot ??= (
               event as MessageEvent<string>
             ).data;
           });
@@ -210,7 +210,7 @@ export async function sampleTranscript(browser: Browser, webRoot: string, entrie
         JSON.stringify(data),
       ] as const);
     const snapshot = JSON.parse(
-      await page.evaluate(() => (window as unknown as { palBenchmarkSnapshot?: string }).palBenchmarkSnapshot ?? "{}"),
+      await page.evaluate(() => (window as Window & { palBenchmarkSnapshot?: string }).palBenchmarkSnapshot ?? "{}"),
     ) as { entries?: { id: number }[] };
     const history = snapshot.entries ?? [];
     assert.equal(history.length, entries, "The page did not receive the fixture's snapshot.");
