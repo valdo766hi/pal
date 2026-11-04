@@ -292,15 +292,19 @@ describe("Pal in a browser", () => {
     const events = "**/api/chats/*/events";
     const text = "Stream recovered after invalid frames";
     const snapshot = {
-      entries: [{ id: 1, kind: "pi.user", model: [{ role: "user", content: text }] }],
-      inbox: [],
+      view: {
+        conversation: { id: 1 },
+        entries: [{ id: 1, kind: "pi.user", model: [{ role: "user", content: text }] }],
+        docs: { "pi.inbox": { items: [] } },
+      },
+      earlier: [],
     };
     page.on("pageerror", recordError);
     await page.route(events, (route) =>
       route.fulfill({
         contentType: "text/event-stream",
         body:
-          "event: snapshot\ndata: {\n\nevent: event\ndata: invalid\n\nevent: approvals\ndata: invalid\n\n" +
+          "event: snapshot\ndata: {\n\nevent: change\ndata: invalid\n\nevent: approvals\ndata: invalid\n\n" +
           `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n` +
           'event: approvals\ndata: {"mode":"ask","approvals":[]}\n\n',
       }),

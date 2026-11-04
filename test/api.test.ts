@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { watchEvents } from "@earendil-works/pi-durable";
+import { applyImmutable, decoder } from "@earendil-works/chord/delta";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import type { ConversationView } from "@earendil-works/pi-durable";
 import { commentFeedback } from "../src/core/feedback.ts";
 import { afterEach, describe, expect, it } from "vitest";
 import { startMcpFixture } from "./fixtures/mcp-server.ts";
@@ -19,6 +20,7 @@ import { browse, startOpenAIFixture } from "./fixtures/openai-server.ts";
 import { fakeReleaseControl } from "./fixtures/releases.ts";
 import type { ReleaseRpc } from "../src/core/release-rpc.ts";
 import { MIGRATIONS } from "../src/storage/migrations.ts";
+import { history } from "../src/core/transcript.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -968,25 +970,22 @@ describe("API", () => {
     expect(fixture.calls.map((call) => call.name)).toEqual(["fetch"]);
     const chat = (await pal.chats.list(b.id))[0];
     if (chat === undefined) throw new Error("missing chat");
-    const events = await watchEvents(pal.harness, chat.conversationId, context);
-    try {
-      const receipts = events.snapshot.entries.filter((entry) => entry.kind === "pal.mcp");
-      expect(receipts).toHaveLength(1);
-      expect(receipts[0]).toMatchObject({
-        data: {
-          mcp: {
-            server: server.id,
-            serverName: "Scoped",
-            tool: "fetch",
-            isError: false,
-            sources: [{ url: "https://fixture.invalid/durable", kind: "requested" }],
-          },
+    const chatConversation = await pal.harness.conversation(chat.conversationId, context);
+    if (chatConversation === undefined) throw new Error("missing conversation");
+    const receipts = (await history(chatConversation, context)).filter((entry) => entry.kind === "pal.mcp");
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      data: {
+        mcp: {
+          server: server.id,
+          serverName: "Scoped",
+          tool: "fetch",
+          isError: false,
+          sources: [{ url: "https://fixture.invalid/durable", kind: "requested" }],
         },
-      });
-      expect(receipts[0]?.model ?? []).toEqual([]);
-    } finally {
-      await events.stop();
-    }
+      },
+    });
+    expect(receipts[0]?.model ?? []).toEqual([]);
   });
 
   it.each(["https://pal.example", "http://100.64.0.10:7337"])(
@@ -1167,21 +1166,37 @@ describe("API", () => {
 
     const events = await fetch(`${base}/api/chats/${chat.id}/events`, { headers: { cookie: cookie() } });
     expect(events.headers.get("content-type")).toMatch(/text\/event-stream/);
-    const reader = events.body?.getReader();
+    const reader = events.body?.pipeThrough(new TextDecoderStream()).getReader();
     if (reader === undefined) throw new Error("no event stream");
-    let text = "";
-    const first = await reader.read();
-    text += new TextDecoder().decode(first.value);
-    expect(text).toMatch(/^event: snapshot/);
+    // The view as the browser rebuilds it: each snapshot replaces it, and each change applies to it.
+    let view: ConversationView | undefined;
+    let codec = decoder();
+    let pending = "";
+    const read = async () => {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("event stream ended early");
+      pending += value;
+      for (let end = pending.indexOf("\n\n"); end >= 0; end = pending.indexOf("\n\n")) {
+        const block = pending.slice(0, end);
+        pending = pending.slice(end + 2);
+        const [, event, data] = /^event: (.*)\ndata: (.*)$/.exec(block) ?? [];
+        if (event === "snapshot") {
+          view = (JSON.parse(data ?? "") as { view: ConversationView }).view;
+          codec = decoder();
+        } else if (event === "change" && view !== undefined) {
+          view = applyImmutable(view, codec.decode(JSON.parse(data ?? "") as unknown[]));
+        }
+      }
+    };
+    await read();
+    expect(view).toMatchObject({ entries: [] });
 
     const admitted = await api("POST", `chats/${chat.id}/inputs`, { requestId: "input-request-1", text: "hi" });
     expect(admitted.status).toBe(200);
-    while (!text.includes('"type":"run_end"')) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("event stream ended early");
-      text += new TextDecoder().decode(value);
-    }
-    expect(text).toContain('"text":"Hello"');
+    const answered = () =>
+      view?.docs["pi.live"]?.run === undefined && JSON.stringify(view?.entries).includes('"text":"Hello"');
+    while (!answered()) await read();
+    expect([view?.entries[0]?.kind, view?.entries.at(-1)?.kind]).toEqual(["pi.user", "pi.assistant"]);
     await reader.cancel();
 
     const projects = (await api("GET", "projects")).body.projects;

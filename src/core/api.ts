@@ -2,7 +2,14 @@ import { once } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type ProviderAuthInteraction } from "@earendil-works/pi-ai";
-import { type AgentEvent, type Conversation, watchEvents } from "@earendil-works/pi-durable";
+import { encoder } from "@earendil-works/chord/delta";
+import type {
+  Conversation,
+  ConversationId,
+  ConversationView,
+  ConversationWatch,
+  EntryId,
+} from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import {
   CHATGPT_PROVIDER,
@@ -39,6 +46,7 @@ import { FolderError } from "./projects.ts";
 import { InvalidRequest, RequestConflict, validate } from "./requests.ts";
 import { UploadBody, UploadError } from "./uploads.ts";
 import { TerminalSize } from "./terminals.ts";
+import { history } from "./transcript.ts";
 import type { ReleaseRpc } from "./release-rpc.ts";
 import { ReleaseDigest } from "./release-state.ts";
 import type { ScheduleNotice, ScheduleView } from "./schedules.ts";
@@ -906,23 +914,27 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
   }
 
   /**
-   * Server-sent events: the conversation's snapshot, then one event batch per commit until the client leaves, the
-   * owner session ends or expires, or the stream closes. The chat's command approvals arrive as whole `approvals`
-   * views, first with the snapshot and again on every change. Cleanup is registered before the first write, and a
-   * write blocked by backpressure also ends when the stream does, so a vanished client never holds the handler.
+   * Server-sent events: a `snapshot` of the conversation's view with every entry before its window, then each
+   * `change` to that view as Chord ops, encoded from the latest snapshot on, until the client leaves, the owner session
+   * ends or expires, or the stream closes. A window that no longer continues what the client has, after a backlog,
+   * arrives as a new snapshot. The chat's command approvals arrive as whole `approvals` views, first with the snapshot
+   * and again on every change. Cleanup is registered before the first write, and a write blocked by backpressure also
+   * ends when the stream does, so a vanished client never holds the handler.
    */
   async function observe(
     response: ServerResponse,
     chatId: string,
-    conversationId: Parameters<typeof watchEvents>[1],
+    conversationId: ConversationId,
     token: string | undefined,
   ): Promise<void> {
     const expiry = await pal.owner.sessionExpiry(token);
     if (expiry === undefined) throw new HttpError(401, "signed_out", "sign in to Pal first");
+    const conversation = await pal.harness.conversation(conversationId, context);
+    if (conversation === undefined) throw new HttpError(404, "not_found", "no such chat");
     const scope = new AbortController();
     // What `end` must release, filled in as the stream starts.
     const live: {
-      stream?: Awaited<ReturnType<typeof watchEvents>>;
+      watch?: ConversationWatch;
       heartbeat?: ReturnType<typeof setInterval>;
       unwatch?: () => void;
     } = {};
@@ -934,7 +946,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       clearTimeout(expiryTimer);
       clearInterval(live.heartbeat);
       live.unwatch?.();
-      void live.stream?.stop();
+      void live.watch?.stop();
       if (revoked) response.destroy();
       else if (!response.writableEnded) response.end();
     };
@@ -945,10 +957,10 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     response.once("close", () => end(true));
     response.once("error", () => end(true));
 
-    const stream = await watchEvents(pal.harness, conversationId, context);
-    live.stream = stream;
+    const watch = await conversation.watch(context);
+    live.watch = watch;
     if (scope.signal.aborted) {
-      void stream.stop();
+      void watch.stop();
       return;
     }
     response.writeHead(200, {
@@ -962,7 +974,16 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         await once(response, "drain", { signal: scope.signal }).catch(() => undefined);
       }
     };
-    await write("snapshot", stream.snapshot);
+    // Ops after a snapshot are encoded with a dictionary that starts at it, as the client's decoder does.
+    let encoding = encoder();
+    let newest: EntryId | undefined;
+    const snapshot = async (view: ConversationView) => {
+      encoding = encoder();
+      newest = view.entries.at(-1)?.id ?? view.before;
+      const earlier = view.before === undefined ? [] : await history(conversation, context, view.before);
+      await write("snapshot", { view, earlier });
+    };
+    await snapshot(watch.value);
     if (scope.signal.aborted) return;
     // Views are written in order; a change during a write is folded into the next one.
     let approvals: Promise<void> = Promise.resolve();
@@ -985,11 +1006,15 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     live.heartbeat = setInterval(() => {
       if (!scope.signal.aborted && !response.writableNeedDrain) response.write(": keep-alive\n\n");
     }, HEARTBEAT_MS);
-    stream.start(async (events: readonly AgentEvent[]) => {
-      // An overflowed watch replaces its undelivered batches with a snapshot, which the client applies as a reset.
-      for (const event of events) await write(event.type === "snapshot" ? "snapshot" : "event", event);
+    watch.start(async (call) => {
+      // Pi ends a conversation watch when its source fails, so a recoverable `failed` call never comes.
+      if (call.kind !== "value") return;
+      const { value } = call;
+      if (value.before !== undefined && (newest === undefined || value.before > newest)) return snapshot(value);
+      await write("change", encoding.encode(call.ops));
+      newest = value.entries.at(-1)?.id ?? value.before ?? newest;
     });
-    void stream.closed.then(() => end(false));
+    void watch.closed.then(() => end(false));
   }
 
   const unavailable = new HttpError(

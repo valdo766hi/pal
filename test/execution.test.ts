@@ -17,12 +17,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { HostCommands, WorkspaceLocks, outputReachesModel, shellTools } from "../src/core/execution.ts";
-import {
-  type ConversationId,
-  type ToolExecutionApi,
-  type ToolRegistration,
-  watchEvents,
-} from "@earendil-works/pi-durable";
+import { currentView, liveDocs } from "../src/core/transcript.ts";
+import { type ConversationId, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -244,11 +240,9 @@ describe("direct commands", () => {
         faux.setResponses([...turns, fauxAssistantMessage("done")]);
         await pal.chats.submit(created.id, `direct-input-${++inputs}`, { text: "go" }, context);
       },
-      /** The snapshot a newly opened chat page gets; the watch ends at once, as a closed tab's does. */
+      /** The live state a newly opened chat page gets; the watch ends at once, as a closed tab's does. */
       async snapshot() {
-        const watch = await watchEvents(pal.harness, created.conversationId, context);
-        await watch.stop();
-        return watch.snapshot;
+        return { tools: liveDocs(await currentView(conversation, context)).live.tools ?? [] };
       },
       async results() {
         await conversation.waitForIdle(context);

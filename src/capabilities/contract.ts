@@ -339,6 +339,10 @@ function scopedSql(database: SqliteDatabase, manifest: CapabilityManifest): Sqli
       check(sql);
       return target.run(sql, ...params);
     },
+    runCounted: async (sql: string, ...params: SqliteValue[]) => {
+      check(sql);
+      return target.runCounted(sql, ...params);
+    },
     get: async <T extends object>(sql: string, ...params: SqliteValue[]) => {
       check(sql);
       return target.get<T>(sql, ...params);

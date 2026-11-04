@@ -50,6 +50,8 @@ const HELPER_TOOLS = new Set([
 ]);
 /** Extensions a helper's conversation never selects, whatever its parent has. */
 const EXCLUDED = [HELPERS_EXTENSION, "pal.shell", "pal.browser", "pal.compact"];
+/** Diagnostic codes of the results Pi writes for a tool call it cut off rather than one that finished. */
+const UNCONFIRMED = new Set(["interrupted", "restart_limit", "aborted", "abandoned"]);
 
 type Effect = { task: number; tool: string; state: "started" | "finished" };
 type Outcome = { id: string; status: "answered" | "unanswered"; reason: string; unknown: Effect[] };
@@ -392,6 +394,9 @@ export function helperBudget(harness: () => Harness, limits: HelperLimits = HELP
           return undefined;
         },
         afterTool: async (_call, result, api, context) => {
+          // Pi also passes the results it writes for a call cut off by a crash or an abort; that call may have
+          // reached its server, so its effect stays unknown.
+          if (result.diagnostics?.some((diagnostic) => UNCONFIRMED.has(diagnostic.code ?? ""))) return result;
           const helper = await api.snapshot(Helper, api.conversationId, context);
           if (helper?.effects.some((effect) => effect.task === api.taskId && effect.state === "started"))
             await harness().commit(async (tx) => {

@@ -358,7 +358,11 @@
       usable,
   );
 
-  function build(entries: Entry[], partial: Message | undefined, approvals: readonly CommandApproval[]): Item[] {
+  function build(
+    entries: readonly Entry[],
+    partial: Message | undefined,
+    approvals: readonly CommandApproval[],
+  ): Item[] {
     // A result belongs to the call of that ID in the latest assistant message before it; IDs may repeat across turns.
     const results: Record<string, { text: string; isError: boolean; calls: NestedCall[] }> = {};
     const caller: Record<string, number> = {};

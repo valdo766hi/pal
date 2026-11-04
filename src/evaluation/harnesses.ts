@@ -23,13 +23,13 @@ import {
   type EntryRecord,
   type JsonObject,
   UsageDoc,
-  watchEvents,
 } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { Pal } from "../core/app.ts";
 import { MAX_TEXT_BYTES } from "../core/uploads.ts";
 import { readFileSnapshot, resolveProjectPath } from "../core/files.ts";
 import { gnuTimeout } from "../core/timeout.ts";
+import { currentView, history, liveDocs } from "../core/transcript.ts";
 import { evaluationBudgetExceeded, evaluationBudgetTurns, setEvaluationBudget } from "../pi/evaluation-budget.ts";
 import { CHATGPT_PROVIDER } from "../pi/chatgpt.ts";
 import type { Continuation, Task } from "./tasks.ts";
@@ -340,16 +340,12 @@ export function palHarness(
           }
           if (await evaluationBudgetExceeded(pal.harness, chat.conversationId, context)) break;
           if (stage <= continuations.length) {
-            const watch = await watchEvents(pal.harness, chat.conversationId, context);
-            const messages = watch.snapshot.entries.flatMap((entry) => entry.model ?? []) as Message[];
-            await watch.stop();
+            const messages = (await history(conversation, context)).flatMap((entry) => entry.model ?? []) as Message[];
             const last = messages.findLast((message) => message.role === "assistant");
             if (last?.stopReason === "error" || last?.stopReason === "aborted") break;
           }
         }
-        const watch = await watchEvents(pal.harness, chat.conversationId, context);
-        const compactions = watch.snapshot.compactions;
-        await watch.stop();
+        const compactions = liveDocs(await currentView(conversation, context, { min: 1 })).live.compactions ?? [];
         if (
           (await Promise.race([
             Promise.all(compactions.map((task) => pal.harness.waitForTask(task.taskId, context))),

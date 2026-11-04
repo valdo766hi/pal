@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { diffRevisions, type JsonValue } from "@earendil-works/chord/delta";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { type Browser, chromium, type Page, type WebSocketRoute } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -301,8 +302,14 @@ describe("saved chat settings", () => {
         constructor(url: string | URL, options?: EventSourceInit) {
           super(url, options);
           if (new URL(url, location.href).pathname !== `/api/chats/${id}/events`) return;
-          const host = window as typeof window & { runEvent?: (type: string) => void };
-          host.runEvent = (type) => this.dispatchEvent(new MessageEvent("event", { data: JSON.stringify({ type }) }));
+          const host = window as typeof window & { setRunning?: (running: boolean) => void };
+          // Pi's run state as the server sends a change to it: the whole `pi.live` document.
+          host.setRunning = (running) => {
+            const live = running ? { run: { taskId: 1, inputs: [1], turns: 0 } } : {};
+            this.dispatchEvent(
+              new MessageEvent("change", { data: JSON.stringify([["s", ["docs", "pi.live"], live]]) }),
+            );
+          };
         }
       };
     }, saved.id);
@@ -316,9 +323,9 @@ describe("saved chat settings", () => {
     await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
     const publish = (running: boolean) =>
       page.evaluate((running) => {
-        const host = window as typeof window & { runEvent?: (type: string) => void };
-        if (host.runEvent === undefined) throw new Error("missing fixture stream");
-        host.runEvent(running ? "run_start" : "run_end");
+        const host = window as typeof window & { setRunning?: (running: boolean) => void };
+        if (host.setRunning === undefined) throw new Error("missing fixture stream");
+        host.setRunning(running);
       }, running);
     if (busy) await publish(true);
     await page.getByLabel("Message", { exact: true }).fill("Keep this pointer submission");
@@ -1709,7 +1716,17 @@ describe("chat code rendering", () => {
   });
 });
 
-/** Marks the chat stream's first snapshot and approvals view, and returns a way to send it events as the server would. */
+type ChatEntry = { id: number } & Record<string, unknown>;
+type ChatView = { conversation: unknown; entries: ChatEntry[]; before?: number; docs: Record<string, unknown> };
+type ChatSnapshot = { view: ChatView; earlier: ChatEntry[] };
+const RUN = { taskId: 1, inputs: [1], turns: 0 };
+/** The view with `live` as its run state and an empty queue, as Pi's `pi.live` and `pi.inbox` documents hold them. */
+const withLive = (view: ChatView, live: Record<string, unknown>): ChatView => ({
+  ...view,
+  docs: { ...view.docs, "pi.live": live, "pi.inbox": { items: [] } },
+});
+
+/** Marks the chat stream's first snapshot and approvals view, and returns ways to send it events as the server would. */
 async function bridgeChatEvents(page: Page) {
   await page.addInitScript(() => {
     const Native = window.EventSource;
@@ -1730,11 +1747,30 @@ async function bridgeChatEvents(page: Page) {
       }
     };
   });
-  return (name: string, data?: unknown) =>
+  const emit = (name: string, data?: unknown) =>
     page.evaluate(
       (detail) => dispatchEvent(new CustomEvent("chat-test-event", { detail })),
       data === undefined ? { name } : { name, data: JSON.stringify(data) },
     );
+  /** The first snapshot the server sent this page. */
+  const first = async () =>
+    JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as ChatSnapshot;
+  let current: ChatView | undefined;
+  return {
+    emit,
+    first,
+    /** Replaces the page's view, as a reconnect does. */
+    async snapshot(view: ChatView, earlier: ChatSnapshot["earlier"] = []) {
+      current = view;
+      await emit("snapshot", { view, earlier });
+    },
+    /** Moves the page's view to `next` as a commit does: the ops from the view the page has. */
+    async change(next: ChatView) {
+      const from = current ?? (await first()).view;
+      current = next;
+      await emit("change", diffRevisions(from as unknown as JsonValue, next as unknown as JsonValue));
+    },
+  };
 }
 
 describe("durable tool activity", () => {
@@ -1749,7 +1785,7 @@ describe("durable tool activity", () => {
       );
     for (const code of ["text('Older observation');", "text('Latest observation');"])
       await conversation.submit({ type: "write", entry: { kind: "pi.assistant", model: [message(code)] } }, context);
-    const emit = await bridgeChatEvents(page);
+    const stream = await bridgeChatEvents(page);
     await page.goto(`${base}/#/chat/${saved.id}`);
     const activities = page.locator(".activity");
     await expect.poll(() => activities.count()).toBe(2);
@@ -1770,56 +1806,44 @@ describe("durable tool activity", () => {
     await restart();
     await expect.poll(snapshots, { timeout: 15_000 }).toBeGreaterThan(before);
     for (const activity of [older, latest]) await activity.getByText("Outcome unconfirmed", { exact: true }).waitFor();
-    const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as {
-      entries: { id: number }[];
-    };
-    const tools = [{ callId: "reused-call", name: "codemode", status: "pending" }];
-    await emit("snapshot", { ...snapshot, run: { inputs: [1] }, tools, inbox: [] });
+    const { view, earlier } = await stream.first();
+    const pending = { callId: "reused-call", name: "codemode", status: "pending" };
+    await stream.snapshot(withLive(view, { run: RUN, tools: [pending] }), earlier);
     await latest.getByText("Queued", { exact: true }).waitFor();
     await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
-    await emit("event", {
-      type: "tool_execution_start",
-      toolCallId: "reused-call",
-      toolName: "codemode",
-      taskId: 42,
-    });
+    const running = { ...pending, status: "running", taskId: 42 };
+    await stream.change(withLive(view, { run: RUN, tools: [running] }));
     await latest.getByText("Running", { exact: true }).waitFor();
     await latest.getByText("Task 42", { exact: true }).waitFor();
     await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
-    await emit("error");
+    await stream.emit("error");
     await latest.getByText("Last observed running", { exact: true }).waitFor();
     expect(await latest.locator(".spin").count()).toBe(0);
-    await emit("open");
+    await stream.emit("open");
     await latest.getByText("Running", { exact: true }).waitFor();
-    await emit("event", {
-      type: "tool_execution_start",
-      toolCallId: "reused-call/child",
-      parentToolCallId: "reused-call",
-      toolName: "files_write",
-      taskId: 43,
-      parentTaskId: 42,
-    });
-    await emit("event", { type: "tool_execution_end", toolCallId: "reused-call", toolName: "codemode", taskId: 42 });
+    const child = { callId: "reused-call/child", name: "files_write", status: "running", arguments: {} };
+    await stream.change(
+      withLive(view, {
+        run: RUN,
+        tools: [running],
+        nestedTools: [{ ...child, parentCallId: "reused-call", parentTaskId: 42, taskId: 43 }],
+      }),
+    );
+    // Done without a result entry: the tool task faulted, so nothing records the call as succeeded.
+    await stream.change(withLive(view, { run: RUN, tools: [{ ...running, status: "done" }] }));
     await latest.getByText("Outcome unconfirmed", { exact: true }).waitFor();
     expect(await latest.getByText("Done", { exact: true }).count()).toBe(0);
-    await emit("snapshot", {
-      ...snapshot,
-      run: { inputs: [1] },
-      inbox: [],
-      tools: [{ ...tools[0], status: "running", taskId: 42 }],
-    });
+    await stream.snapshot(withLive(view, { run: RUN, tools: [running] }), earlier);
     await latest.getByText("Running", { exact: true }).waitFor();
-    await emit("event", { type: "run_end" });
+    await stream.change(withLive(view, {}));
     await latest.getByText("Outcome unconfirmed", { exact: true }).waitFor();
     expect(await latest.locator(".spin").count()).toBe(0);
-    await emit("event", {
-      type: "message_end",
-      entry: {
-        id: Math.max(...snapshot.entries.map((entry) => entry.id)) + 1,
-        kind: "pi.tool-result",
-        model: [{ role: "toolResult", toolCallId: "reused-call", content: [{ type: "text", text: "Known result" }] }],
-      },
-    });
+    const result = {
+      id: Math.max(...[...earlier, ...view.entries].map((entry) => entry.id)) + 1,
+      kind: "pi.tool-result",
+      model: [{ role: "toolResult", toolCallId: "reused-call", content: [{ type: "text", text: "Known result" }] }],
+    };
+    await stream.change({ ...withLive(view, {}), entries: [...view.entries, result] });
     await latest.getByText("Done", { exact: true }).waitFor();
     await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
     expect(await draft.inputValue()).toBe("Keep this while task state changes");
@@ -2020,7 +2044,7 @@ describe("chat connection and Stop failures", () => {
 
   it("shows a failed Stop and lets the owner try again without an unhandled rejection", async () => {
     const { page, base, saved, errors, mutations } = await setup(1440);
-    const emit = await bridgeChatEvents(page);
+    const stream = await bridgeChatEvents(page);
     let fail = true;
     await page.route(`**/api/chats/${saved.id}/stop`, (route) =>
       fail
@@ -2029,7 +2053,7 @@ describe("chat connection and Stop failures", () => {
     );
     await page.goto(`${base}/#/chat/${saved.id}`);
     await expect.poll(() => page.locator("html").getAttribute("data-chat-approvals")).toBe("seen");
-    await emit("event", { type: "run_start" });
+    await stream.change(withLive((await stream.first()).view, { run: RUN }));
     const stop = page.getByRole("button", { name: "Stop", exact: true });
     await stop.click();
     const failed = page.getByRole("alert").filter({ hasText: "Stop didn't reach Pal: Stop is unavailable." });
@@ -2059,15 +2083,14 @@ describe("long transcript updates", () => {
         context,
       );
     }
-    const emit = await bridgeChatEvents(page);
+    const stream = await bridgeChatEvents(page);
     await page.goto(`${base}/#/chat/${saved.id}`);
     await page.getByText("History 79", { exact: true }).waitFor();
     // Synthetic approvals must not race the server's initial view.
     await expect.poll(() => page.locator("html").getAttribute("data-chat-approvals")).toBe("seen");
-    const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as {
-      entries: { id: number }[];
-    };
-    expect(snapshot.entries).toHaveLength(80);
+    const { view, earlier } = await stream.first();
+    const entries = [...earlier, ...view.entries];
+    expect(entries).toHaveLength(80);
     const pending = (id: string, assistant: number | null, command: string) => ({
       id,
       assistant,
@@ -2081,9 +2104,9 @@ describe("long transcript updates", () => {
       expiresAt: Date.now() + 60_000,
       decidedAt: null,
     });
-    await emit("approvals", {
+    await stream.emit("approvals", {
       mode: "ask",
-      approvals: [pending("turn", snapshot.entries[40]?.id ?? null, "echo turn"), pending("loose", null, "echo loose")],
+      approvals: [pending("turn", entries[40]?.id ?? null, "echo turn"), pending("loose", null, "echo loose")],
     });
     const input = page.getByLabel("Message", { exact: true });
     await input.fill("Keep this draft");
@@ -2118,9 +2141,10 @@ describe("long transcript updates", () => {
             (item) => item.querySelector(".cmd")?.textContent ?? item.querySelector(".md")?.textContent?.trim(),
           ),
         );
-    await emit("event", { type: "message_start", message: fauxAssistantMessage("Live") });
-    for (let index = 0; index < 20; index++)
-      await emit("event", { type: "message_update", changes: [{ type: "text_delta", contentIndex: 0, delta: "." }] });
+    const message = fauxAssistantMessage("Live");
+    const live = (text: string) =>
+      withLive(view, { generation: { attempt: 1, message: { ...message, content: [{ type: "text", text }] } } });
+    for (let index = 0; index <= 20; index++) await stream.change(live(`Live${".".repeat(index)}`));
     const history = Array.from({ length: 80 }, (_, index) => `History ${index}`);
     await expect
       .poll(order)
@@ -2130,18 +2154,21 @@ describe("long transcript updates", () => {
     expect(await input.evaluate((node) => node === document.activeElement)).toBe(true);
 
     // A reconnect replaces live state from the server snapshot: the stale partial goes, new history arrives.
-    await emit("error");
+    await stream.emit("error");
     await page.getByRole("status").filter({ hasText: "Reconnecting to Pal" }).waitFor();
-    const appended = { id: Math.max(...snapshot.entries.map((entry) => entry.id)) + 1, kind: "pi.assistant" };
-    await emit("snapshot", {
-      ...snapshot,
-      entries: [...snapshot.entries, { ...appended, model: [fauxAssistantMessage("History 80")] }],
-    });
+    const appended = { id: Math.max(...entries.map((entry) => entry.id)) + 1, kind: "pi.assistant" };
+    await stream.snapshot(
+      { ...view, entries: [...view.entries, { ...appended, model: [fauxAssistantMessage("History 80")] }] },
+      earlier,
+    );
     await expect
       .poll(order)
       .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "History 80", "echo loose"]);
     expect(await page.getByRole("status").filter({ hasText: "Reconnecting to Pal" }).count()).toBe(0);
-    await emit("snapshot", { ...snapshot, generation: { message: fauxAssistantMessage("Resumed") } });
+    await stream.snapshot(
+      withLive(view, { generation: { attempt: 1, message: fauxAssistantMessage("Resumed") } }),
+      earlier,
+    );
     await expect
       .poll(order)
       .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "echo loose", "Resumed"]);
@@ -2217,7 +2244,7 @@ describe("research helper status", () => {
         },
         context,
       );
-      const emit = await bridgeChatEvents(page);
+      const stream = await bridgeChatEvents(page);
       const pending = Promise.withResolvers<undefined>(),
         release = Promise.withResolvers<undefined>();
       cleanups.push(async () => release.resolve(undefined));
@@ -2257,8 +2284,8 @@ describe("research helper status", () => {
       await alert.getByRole("button", { name: "Retry helper status" }).click();
       await pending.promise;
       try {
-        const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}");
-        await emit("snapshot", { ...snapshot, run: { inputs: [1] }, inbox: [] });
+        const { view, earlier } = await stream.first();
+        await stream.snapshot(withLive(view, { run: RUN }), earlier);
         await note.getByText("stopped: its time limit passed", { exact: true }).waitFor();
         expect(await note.innerText()).toContain("Outcome unknown for mcp__web__search; check before repeating.");
         const oldResponse = page.waitForResponse((response) => response.url().endsWith(`/chats/${saved.id}/helpers`));
@@ -2270,7 +2297,7 @@ describe("research helper status", () => {
         expect(await note.innerText()).toContain("stopped: its time limit passed");
         expect(await note.innerText()).toContain("Outcome unknown for mcp__web__search");
         expect(await note.innerText()).not.toContain("working");
-        await emit("event", { type: "run_end" });
+        await stream.change(withLive(view, {}));
         await screenshot(page, `helper-recovery-${width}`);
         expect(mutations).toEqual([]);
         expect(provider.requests).toEqual([]);

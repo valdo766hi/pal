@@ -331,7 +331,7 @@ describe("chats", () => {
     await expect(first.chats.submit(chat.id, "input-request-1", body, context)).rejects.toBeInstanceOf(
       AdmissionStopped,
     );
-    expect(await first.harness.closed).toMatchObject({ reason: "failed" });
+    expect(await first.harness.closed).toMatchObject({ kind: "failed" });
 
     const second = await open(dataRoot);
     expect(await second.userMessages(chat.conversationId)).toBe(1);

@@ -12,18 +12,18 @@ describe("Pi report diagnostics", () => {
     const reports = new Reports();
     const task = { id: 7, kind: "memory_search", conversationId: "c" } as unknown as Extract<
       ReportInfo,
-      { type: "task_error" }
+      { kind: "task_error" }
     >["task"];
-    reports.record({ type: "task_faulted", task, extension: "pal.memory", reason: "threw" }, 0);
-    reports.record({ type: "host_error", callback: "models" }, 1);
-    for (let i = 0; i < 25; i++) reports.record({ type: "listener_error" }, 2);
+    reports.record({ kind: "task_faulted", task, extension: "pal.memory", reason: "threw" }, 0);
+    reports.record({ kind: "host_error", callback: "models" }, 1);
+    for (let i = 0; i < 25; i++) reports.record({ kind: "listener_error" }, 2);
     const view = reports.view();
     expect(view.counts).toEqual({ task_faulted: 1, host_error: 1, listener_error: 25 });
     expect(view.recent).toHaveLength(20);
     expect(view.recent.every((report) => report.type === "listener_error")).toBe(true);
     const early = new Reports();
-    early.record({ type: "task_faulted", task, extension: "pal.memory", reason: "threw" }, 0);
-    early.record({ type: "host_error", callback: "models" }, 1);
+    early.record({ kind: "task_faulted", task, extension: "pal.memory", reason: "threw" }, 0);
+    early.record({ kind: "host_error", callback: "models" }, 1);
     expect(early.view().recent).toEqual([
       {
         at: "1970-01-01T00:00:00.000Z",

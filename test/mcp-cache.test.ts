@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import type { StorageWrite } from "@earendil-works/pi-durable";
 import { McpClient, type CallToolResult } from "@earendil-works/pi-mcp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { McpQueryCache, responseCacheTtl } from "../src/pi/mcp-cache.ts";
@@ -385,13 +386,14 @@ describe("native Code Mode cache policy and provenance", () => {
     await a.run();
     const commit = f.pal.store.storage.commit.bind(f.pal.store.storage);
     let armed = true;
-    vi.spyOn(f.pal.store.storage, "commit").mockImplementation(async (writes, ctx) => {
-      const seq = await commit(writes, ctx);
-      if (armed && writes.some((write) => write.type === "entry" && write.value.kind === "pal.mcp")) {
+    vi.spyOn(f.pal.store.storage, "commit").mockImplementation(async (batches, receive, ctx) => {
+      const result = await commit(batches, receive, ctx);
+      const receipt = (write: StorageWrite) => write.type === "entry" && write.value.kind === "pal.mcp";
+      if (armed && batches.some((writes) => writes.some(receipt))) {
         armed = false;
         await f.pal.mcp.setEnabled("exa", false);
       }
-      return seq;
+      return result;
     });
     const result = await a.run(
       'try { return await tools.mcp__exa__web_search_exa({query:"durable"}); } catch (e) { return "error: " + String(e); }',
