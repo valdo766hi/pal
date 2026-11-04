@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { diffRevisions, encoder, type JsonValue, type Op } from "@earendil-works/chord/delta";
+import { applyImmutable, decoder, diffRevisions, encoder, type JsonValue, type Op } from "@earendil-works/chord/delta";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApi } from "../src/core/api.ts";
@@ -195,8 +195,9 @@ describe("chat event streams", () => {
     if (conversation === undefined) throw new Error("missing conversation");
     const append = (data: JsonObject) =>
       conversation.commit(async (tx) => tx.appendEntry(chat.conversationId, { kind: "pal.fixture", data }), context);
-    // Large enough that the first snapshot waits for the reader, so later commits pile up behind it.
-    const filler = "x".repeat(100_000);
+    // Far larger than any socket buffering, so the first snapshot waits for the reader and later commits pile up
+    // behind it.
+    const filler = "x".repeat(1_000_000);
     for (let i = 0; i < 40; i++) await append({ filler });
     const token = await pal.owner.signIn(PASSPHRASE);
     const controller = new AbortController();
@@ -210,28 +211,39 @@ describe("chat event streams", () => {
 
     const reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
     if (reader === undefined) throw new Error("no event stream");
+    // The transcript as the browser keeps it: every entry of each snapshot and of the view its changes build.
     type Received = { id: number; data?: { n?: number } };
-    let entries: Received[] = [];
+    type View = { entries: Received[] };
+    const entries = new Map<number, Received>();
+    let view: View | undefined;
+    let codec = decoder();
     let snapshots = 0;
     let pending = "";
-    while (!entries.some((entry) => entry.data?.n === 119)) {
+    while (![...entries.values()].some((entry) => entry.data?.n === 119)) {
       const { value, done } = await reader.read();
       if (done) throw new Error("event stream ended early");
       pending += value;
       for (let end = pending.indexOf("\n\n"); end >= 0; end = pending.indexOf("\n\n")) {
         const [, event, data] = /^event: (.*)\ndata: (.*)$/.exec(pending.slice(0, end)) ?? [];
         pending = pending.slice(end + 2);
-        if (event !== "snapshot") continue;
-        const snapshot = JSON.parse(data ?? "") as { view: { entries: Received[] }; earlier: Received[] };
-        entries = [...snapshot.earlier, ...snapshot.view.entries];
-        snapshots++;
+        if (event === "snapshot") {
+          const snapshot = JSON.parse(data ?? "") as { view: View; earlier: Received[] };
+          for (const entry of snapshot.earlier) entries.set(entry.id, entry);
+          view = snapshot.view;
+          codec = decoder();
+          snapshots++;
+        } else if (event === "change" && view !== undefined) {
+          view = applyImmutable(view, codec.decode(JSON.parse(data ?? "") as unknown[]));
+        } else continue;
+        for (const entry of view?.entries ?? []) entries.set(entry.id, entry);
       }
     }
     expect(snapshots).toBe(2);
-    expect(entries.flatMap((entry) => (entry.data?.n === undefined ? [] : [entry.data.n]))).toEqual(
+    const received = [...entries.values()].sort((a, b) => a.id - b.id);
+    expect(received.flatMap((entry) => (entry.data?.n === undefined ? [] : [entry.data.n]))).toEqual(
       Array.from({ length: 120 }, (_, n) => n),
     );
-    expect(entries.filter((entry) => entry.data?.n === undefined)).toHaveLength(40);
+    expect(received.filter((entry) => entry.data?.n === undefined)).toHaveLength(40);
     await reader.cancel();
   });
 });
