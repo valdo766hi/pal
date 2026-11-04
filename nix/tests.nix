@@ -29,6 +29,7 @@ stdenv.mkDerivation {
       (root + "/package.json")
       (root + "/pnpm-lock.yaml")
       (root + "/pnpm-workspace.yaml")
+      (root + "/.pnpmfile.cjs")
       (root + "/tsconfig.json")
       (root + "/vite.config.ts")
       (root + "/vitest.config.ts")

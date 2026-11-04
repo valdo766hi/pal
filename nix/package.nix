@@ -52,6 +52,7 @@ let
     (root + "/package.json")
     (root + "/pnpm-lock.yaml")
     (root + "/pnpm-workspace.yaml")
+    (root + "/.pnpmfile.cjs")
   ];
   appFiles = manifests ++ [
     (root + "/tsconfig.json")
