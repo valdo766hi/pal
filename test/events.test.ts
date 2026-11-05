@@ -4,6 +4,8 @@ import { connect } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { applyImmutable, decoder, diffRevisions, encoder, type JsonValue, type Op } from "@earendil-works/chord/delta";
 import type { JsonObject } from "@earendil-works/pi-durable";
@@ -209,8 +211,10 @@ describe("chat event streams", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     for (let n = 0; n < 120; n++) await append({ n });
 
-    const reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
-    if (reader === undefined) throw new Error("no event stream");
+    if (response.body === null) throw new Error("no event stream");
+    // By line: joining a 40 MB snapshot's chunks again on every read is quadratic and outlasts the timeout on a slow
+    // host.
+    const input = Readable.from(response.body);
     // The transcript as the browser keeps it: every entry of each snapshot and of the view its changes build.
     type Received = { id: number; data?: { n?: number } };
     type View = { entries: Received[] };
@@ -218,33 +222,30 @@ describe("chat event streams", () => {
     let view: View | undefined;
     let codec = decoder();
     let snapshots = 0;
-    let pending = "";
-    while (![...entries.values()].some((entry) => entry.data?.n === 119)) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("event stream ended early");
-      pending += value;
-      for (let end = pending.indexOf("\n\n"); end >= 0; end = pending.indexOf("\n\n")) {
-        const [, event, data] = /^event: (.*)\ndata: (.*)$/.exec(pending.slice(0, end)) ?? [];
-        pending = pending.slice(end + 2);
-        if (event === "snapshot") {
-          const snapshot = JSON.parse(data ?? "") as { view: View; earlier: Received[] };
-          for (const entry of snapshot.earlier) entries.set(entry.id, entry);
-          view = snapshot.view;
-          codec = decoder();
-          snapshots++;
-        } else if (event === "change" && view !== undefined) {
-          view = applyImmutable(view, codec.decode(JSON.parse(data ?? "") as unknown[]));
-        } else continue;
-        for (const entry of view?.entries ?? []) entries.set(entry.id, entry);
-      }
+    let event = "";
+    for await (const line of createInterface({ input, crlfDelay: Infinity })) {
+      if (line.startsWith("event: ")) event = line.slice("event: ".length);
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice("data: ".length);
+      if (event === "snapshot") {
+        const snapshot = JSON.parse(data) as { view: View; earlier: Received[] };
+        for (const entry of snapshot.earlier) entries.set(entry.id, entry);
+        view = snapshot.view;
+        codec = decoder();
+        snapshots++;
+      } else if (event === "change" && view !== undefined) {
+        view = applyImmutable(view, codec.decode(JSON.parse(data) as unknown[]));
+      } else continue;
+      for (const entry of view?.entries ?? []) entries.set(entry.id, entry);
+      if ([...entries.values()].some((entry) => entry.data?.n === 119)) break;
     }
+    input.destroy();
     expect(snapshots).toBe(2);
     const received = [...entries.values()].sort((a, b) => a.id - b.id);
     expect(received.flatMap((entry) => (entry.data?.n === undefined ? [] : [entry.data.n]))).toEqual(
       Array.from({ length: 120 }, (_, n) => n),
     );
     expect(received.filter((entry) => entry.data?.n === undefined)).toHaveLength(40);
-    await reader.cancel();
   });
 });
 
