@@ -4,7 +4,11 @@ import { connect } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { Readable } from "node:stream";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { applyImmutable, decoder, diffRevisions, encoder, type JsonValue, type Op } from "@earendil-works/chord/delta";
+import type { JsonObject } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApi } from "../src/core/api.ts";
 import { openPal } from "../src/core/app.ts";
@@ -186,6 +190,63 @@ describe("chat event streams", () => {
     await expect.poll(() => watches(), { timeout: 5_000 }).toBe(0);
     await expect.poll(() => inFlight(), { timeout: 5_000 }).toBe(0);
   });
+
+  it("resends a snapshot with every entry once a backlog outgrows the view's window", async () => {
+    const { pal, base, chat } = await setup();
+    const conversation = await pal.harness.conversation(chat.conversationId, context);
+    if (conversation === undefined) throw new Error("missing conversation");
+    const append = (data: JsonObject) =>
+      conversation.commit(async (tx) => tx.appendEntry(chat.conversationId, { kind: "pal.fixture", data }), context);
+    // Far larger than any socket buffering, so the first snapshot waits for the reader and later commits pile up
+    // behind it.
+    const filler = "x".repeat(1_000_000);
+    for (let i = 0; i < 40; i++) await append({ filler });
+    const token = await pal.owner.signIn(PASSPHRASE);
+    const controller = new AbortController();
+    cleanups.push(async () => controller.abort());
+    const response = await fetch(`${base}/api/chats/${chat.id}/events`, {
+      headers: { cookie: `pal_session=${token}` },
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    for (let n = 0; n < 120; n++) await append({ n });
+
+    if (response.body === null) throw new Error("no event stream");
+    // By line: joining a 40 MB snapshot's chunks again on every read is quadratic and outlasts the timeout on a slow
+    // host.
+    const input = Readable.from(response.body);
+    // The transcript as the browser keeps it: every entry of each snapshot and of the view its changes build.
+    type Received = { id: number; data?: { n?: number } };
+    type View = { entries: Received[] };
+    const entries = new Map<number, Received>();
+    let view: View | undefined;
+    let codec = decoder();
+    let snapshots = 0;
+    let event = "";
+    for await (const line of createInterface({ input, crlfDelay: Infinity })) {
+      if (line.startsWith("event: ")) event = line.slice("event: ".length);
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice("data: ".length);
+      if (event === "snapshot") {
+        const snapshot = JSON.parse(data) as { view: View; earlier: Received[] };
+        for (const entry of snapshot.earlier) entries.set(entry.id, entry);
+        view = snapshot.view;
+        codec = decoder();
+        snapshots++;
+      } else if (event === "change" && view !== undefined) {
+        view = applyImmutable(view, codec.decode(JSON.parse(data) as unknown[]));
+      } else continue;
+      for (const entry of view?.entries ?? []) entries.set(entry.id, entry);
+      if ([...entries.values()].some((entry) => entry.data?.n === 119)) break;
+    }
+    input.destroy();
+    expect(snapshots).toBe(2);
+    const received = [...entries.values()].sort((a, b) => a.id - b.id);
+    expect(received.flatMap((entry) => (entry.data?.n === undefined ? [] : [entry.data.n]))).toEqual(
+      Array.from({ length: 120 }, (_, n) => n),
+    );
+    expect(received.filter((entry) => entry.data?.n === undefined)).toHaveLength(40);
+  });
 });
 
 /** The browser's EventSource, driven by the test with the server's event names. */
@@ -207,133 +268,178 @@ class FakeEventSource {
   close() {}
 }
 
-describe("web projection of native events", () => {
-  const snapshot = (overrides: Record<string, unknown> = {}) => ({
-    type: "snapshot",
-    entries: [],
-    tools: [],
-    nestedTools: [],
-    compactions: [],
-    inbox: [],
-    agent: {},
-    usage: { models: {}, tools: {} },
-    ...overrides,
+describe("web projection of the conversation view", () => {
+  type View = { conversation: { id: number }; entries: { id: number; kind: string }[]; before?: number; docs: Docs };
+  type Docs = Record<string, Record<string, unknown>>;
+  const view = (docs: Docs = {}, entries: View["entries"] = [], before?: number): View => ({
+    conversation: { id: 1 },
+    entries,
+    ...(before === undefined ? {} : { before }),
+    docs: { "pi.inbox": { items: [] }, ...docs },
   });
-  const open = () => {
+  const entry = (id: number, kind = "pi.user") => ({ id, kind });
+  /** A stream fed like the server feeds it: a snapshot, then each change as encoded ops from that snapshot on. */
+  const open = (first: View = view(), earlier: View["entries"] = []) => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const stream = new ChatStream("chat-one");
     const source = FakeEventSource.last as FakeEventSource;
-    source.emit("snapshot", snapshot());
-    return { stream, event: (...events: unknown[]) => source.emit("event", ...events), source };
+    let current = first;
+    let encoding = encoder();
+    source.emit("snapshot", { view: first, earlier });
+    return {
+      stream,
+      source,
+      ops: (ops: Op[]) => source.emit("change", encoding.encode(ops)),
+      change(next: View) {
+        source.emit(
+          "change",
+          encoding.encode(diffRevisions(current as unknown as JsonValue, next as unknown as JsonValue)),
+        );
+        current = next;
+      },
+      snapshot(next: View, before: View["entries"] = []) {
+        encoding = encoder();
+        current = next;
+        source.emit("snapshot", { view: next, earlier: before });
+      },
+    };
   };
-  const call = (id: string, task: number, parent?: { id: string; task: number }) => ({
-    toolCallId: id,
-    toolName: parent === undefined ? "codemode" : "files_read",
-    taskId: task,
-    ...(parent === undefined ? {} : { parentToolCallId: parent.id, parentTaskId: parent.task }),
-  });
+  const live = (state: Record<string, unknown>) => ({ "pi.live": state });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("applies tool-call argument deltas at their path, between interleaved text", () => {
-    const { stream, event } = open();
-    event(
-      { type: "message_start", message: { role: "assistant", content: [] } },
-      {
-        type: "message_update",
-        changes: [
-          { type: "text_start", contentIndex: 0, block: { type: "text", text: "Let me " } },
-          {
-            type: "toolcall_start",
-            contentIndex: 1,
-            block: { type: "toolCall", id: "call-1", name: "codemode", arguments: { code: "console." } },
-          },
-          { type: "toolcall_delta", contentIndex: 1, path: ["code"], delta: 'log("hello")' },
-          { type: "text_delta", contentIndex: 0, delta: "check." },
-        ],
-      },
+  it("appends streamed text and tool-call arguments at their paths without rebuilding history", () => {
+    const message = (code: string, text: string) => ({
+      role: "assistant",
+      content: [
+        { type: "text", text },
+        { type: "toolCall", id: "call-1", name: "codemode", arguments: { code } },
+      ],
+    });
+    const { stream, ops } = open(
+      view(
+        live({
+          run: { taskId: 5, inputs: [1], turns: 0 },
+          generation: { attempt: 1, message: message("console.", "Let me ") },
+        }),
+        [entry(1)],
+      ),
     );
-    expect(stream.partial?.content).toEqual([
-      { type: "text", text: "Let me check." },
-      { type: "toolCall", id: "call-1", name: "codemode", arguments: { code: 'console.log("hello")' } },
+    const history = stream.entries;
+    const content = ["docs", "pi.live", "generation", "message", "content"] as const;
+    ops([
+      ["a", [...content, 1, "arguments", "code"], 'log("hello")'],
+      ["a", [...content, 0, "text"], "check."],
     ]);
+    expect(stream.partial?.content).toEqual(message('console.log("hello")', "Let me check.").content);
+    expect(stream.running).toBe(true);
+    expect(stream.entries).toBe(history);
   });
 
-  it("projects nested calls by native IDs and never shows a faulted call as done", () => {
-    const { stream, event } = open();
-    const parent = { id: "call-1", task: 7 };
-    event(
-      { type: "run_start", inputs: [1] },
-      { type: "tool_execution_start", args: { code: "x" }, ...call("call-1", 7) },
-      { type: "tool_execution_start", args: { path: "a" }, ...call("call-1/1", 8, parent) },
-      { type: "tool_execution_start", args: { path: "b" }, ...call("call-1/2", 9, parent) },
-      { type: "tool_execution_update", output: { append: "partial" }, ...call("call-1/1", 8, parent) },
-      {
-        type: "tool_execution_end",
-        result: { taskId: 8, isError: false, diagnostics: [] },
-        ...call("call-1/1", 8, parent),
-      },
-      { type: "tool_execution_end", ...call("call-1/2", 9, parent) },
+  it("projects tool slots by native IDs and never shows a faulted call or run as done", () => {
+    const run = { taskId: 5, inputs: [1], turns: 1 };
+    const parent = { parentCallId: "call-1", parentTaskId: 7 };
+    const { stream, change } = open();
+    change(
+      view(
+        live({
+          run,
+          tools: [{ callId: "call-1", name: "codemode", status: "running", taskId: 7 }],
+          nestedTools: [
+            {
+              callId: "call-1/1",
+              name: "files_read",
+              status: "running",
+              taskId: 8,
+              arguments: {},
+              output: "partial",
+              ...parent,
+            },
+            {
+              callId: "call-1/2",
+              name: "files_read",
+              status: "done",
+              taskId: 9,
+              arguments: {},
+              summary: { isError: true },
+              ...parent,
+            },
+          ],
+        }),
+      ),
     );
     expect(stream.tools).toEqual([{ callId: "call-1", name: "codemode", status: "running", taskId: 7 }]);
     expect(stream.nested.map((slot) => [slot.callId, slot.parentTaskId, slot.status, slot.summary?.isError])).toEqual([
-      ["call-1/1", 7, "done", false],
+      ["call-1/1", 7, "running", undefined],
       ["call-1/2", 7, "done", true],
     ]);
     expect(stream.nested[0]?.output).toBe("partial");
-    // The model-issued call faulted: no result entry, so nothing records it as done.
-    event(
-      { type: "tool_execution_end", ...call("call-1", 7) },
-      { type: "task_failed", taskId: 7, kind: "tool", message: "the tool task faulted" },
-    );
-    expect([stream.tools, stream.nested, stream.entries]).toEqual([[], [], []]);
-    expect(stream.failure).toEqual({ kind: "tool", message: "the tool task faulted" });
+    // The model-issued call faulted: done without a result entry, so nothing records it as succeeded.
+    change(view(live({ run, tools: [{ callId: "call-1", name: "codemode", status: "done", taskId: 7 }] })));
+    expect(stream.tools[0]).toMatchObject({ status: "done" });
+    expect(stream.tools[0]?.entry).toBeUndefined();
+    expect(stream.nested).toEqual([]);
+    change(view(live({ runFailure: { taskId: 5, inputs: [1], reason: "faulted", detail: "the run's task faulted" } })));
+    expect([stream.running, stream.tools, stream.failure]).toEqual([
+      false,
+      [],
+      { reason: "faulted", message: "the run's task faulted" },
+    ]);
+    // A run the owner stopped shows as stopped in its answer, not as a failure.
+    change(view(live({ runFailure: { taskId: 6, inputs: [2], reason: "aborted" } })));
+    expect(stream.failure).toBeUndefined();
   });
 
-  it("keeps repeated provider call IDs of different turns apart", () => {
-    const { stream, event } = open();
-    const entry = (id: number) => ({
-      id,
-      kind: "pi.toolResult",
-      model: [{ role: "toolResult", toolCallId: "call-1", content: [] }],
-    });
-    event(
-      { type: "run_start", inputs: [1] },
-      { type: "tool_execution_start", args: {}, ...call("call-1", 7) },
-      { type: "tool_execution_end", entry: entry(11), ...call("call-1", 7) },
-      { type: "turn_end" },
-      { type: "turn_start" },
-      { type: "tool_execution_start", args: {}, ...call("call-1", 12) },
-    );
-    expect(stream.entries.map((item) => item.id)).toEqual([11]);
-    expect(stream.tools).toEqual([{ callId: "call-1", name: "codemode", status: "running", taskId: 12 }]);
+  it("keeps the entries a window drops and the history before it, adding only new ones", () => {
+    const { stream, change } = open(view({}, [entry(3), entry(4, "pi.assistant")], 2), [entry(1), entry(2)]);
+    expect(stream.entries.map((item) => item.id)).toEqual([1, 2, 3, 4]);
+    // Past its maximum the window drops its oldest entries in one splice, after appending the new one.
+    change(view({}, [entry(5, "pi.assistant")], 4));
+    expect(stream.entries.map((item) => item.id)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it("replaces stale live state from a reconnect snapshot and tracks retries, polls and compaction", () => {
-    const { stream, event, source } = open();
-    event(
-      { type: "run_start", inputs: [1] },
-      { type: "message_start", message: { role: "assistant", content: [{ type: "text", text: "old" }] } },
-      { type: "tool_execution_start", args: {}, ...call("call-1", 7) },
-      { type: "auto_retry_start", attempt: 2, at: 5, errorMessage: "overloaded" },
-      { type: "auto_retry_end", attempt: 2 },
-      { type: "deferred_poll", pollAt: 9 },
-      { type: "compaction_start", taskId: 20, reason: "threshold", blocking: true },
-      { type: "task_failed", taskId: 21, kind: "generation", message: "stale failure" },
+    const { stream, change, snapshot } = open();
+    const generation = { attempt: 2, message: { role: "assistant", content: [{ type: "text", text: "old" }] } };
+    const compaction = { taskId: 20, trigger: "threshold", blocking: true, attempt: 1 };
+    change(
+      view(
+        live({
+          run: { taskId: 5, inputs: [1], turns: 0 },
+          generation: { ...generation, retry: { at: 5, error: "overloaded" } },
+          tools: [{ callId: "call-1", name: "codemode", status: "running", taskId: 7 }],
+          compactions: [compaction],
+        }),
+      ),
     );
-    expect([stream.running, stream.retry, stream.deferredPoll, stream.compactions.length]).toEqual([
+    expect([stream.running, stream.retry, stream.compactions.length]).toEqual([
       true,
-      undefined,
-      9,
+      { at: 5, error: "overloaded" },
       1,
     ]);
-    event({ type: "compaction_end", taskId: 20, reason: "threshold", error: "summary failed" });
-    expect([stream.compactions, stream.compactionFailure?.error]).toEqual([[], "summary failed"]);
-    // Even a snapshot that omits fields replaces everything.
-    source.emit("snapshot", { entries: [{ id: 3, kind: "pi.user" }] });
+    change(
+      view(
+        live({
+          run: { taskId: 5, inputs: [1], turns: 0 },
+          generation: { ...generation, deferred: { pollAt: 9 } },
+          compactionFailure: { taskId: 20, trigger: "threshold", error: "summary failed" },
+          runFailure: { taskId: 4, inputs: [], reason: "interrupted", detail: "cut off once" },
+        }),
+      ),
+    );
+    expect([stream.retry, stream.deferredPoll, stream.compactions, stream.compactionFailure?.error]).toEqual([
+      undefined,
+      9,
+      [],
+      "summary failed",
+    ]);
+    expect(stream.failure).toEqual({ reason: "interrupted", message: "cut off once" });
+    // A snapshot that omits documents replaces everything.
+    snapshot({ conversation: { id: 1 }, entries: [entry(3)], docs: {} });
     expect({
       running: stream.running,
       partial: stream.partial,
       tools: stream.tools,
+      inbox: stream.inbox,
       deferred: stream.deferredPoll,
       compactionFailure: stream.compactionFailure,
       failure: stream.failure,
@@ -342,10 +448,21 @@ describe("web projection of native events", () => {
       running: false,
       partial: undefined,
       tools: [],
+      inbox: [],
       deferred: undefined,
       compactionFailure: undefined,
       failure: undefined,
       entries: [3],
     });
+  });
+
+  it("ignores a malformed or unsafe change and keeps the view it had", () => {
+    const { stream, source, change } = open(view(live({ run: { taskId: 5, inputs: [1], turns: 0 } })));
+    source.emit("change", [["s", ["__proto__", "polluted"], true]], ["nonsense"]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(stream.running).toBe(true);
+    // Later changes still apply to the view it kept.
+    change(view());
+    expect(stream.running).toBe(false);
   });
 });

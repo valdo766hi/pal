@@ -222,7 +222,9 @@ p50/p95, and web-bundle, browser and host identity. Before measuring, it scrolls
 the middle of the view. A sample fails unless all history and the exact live text render, that row stays within a pixel
 of its place through the live text, the answer's commit and a snapshot replacement, the draft and focus are unchanged,
 no provider request is made and the page reports no errors. Only the live updates are timed. Only the web bundle is
-selected: the server, fixture and browser come from the runner's tree, so compare bundles that speak the same API. These
+selected: the server, fixture and browser come from the runner's tree. The runner speaks the chat stream API the bundle
+subscribes to: Pi 1.5's view changes, or the native events of earlier bundles such as the baseline, whose snapshots it
+converts to their old form, so both receive the same history and updates. These
 are not network, model or page-load latency results. CI runs the same pre-extraction baseline and candidate bundles on
 macOS and on Ubuntu 22.04; hosted Ubuntu 24.04 disallows the user namespaces Chromium's sandbox needs, and the runner
 never launches Chromium without its sandbox.
@@ -433,6 +435,12 @@ forward fix rather than attempting an old-code start or automatic database resto
 Store format 23 comes before Pi Durable 1.4's one-way migration of its own tables, which older builds cannot open.
 An older store that still has unfinished work is refused unchanged, so the release that started that work can finish
 it first. Drain and stop Pal and verify a stopped-state backup before upgrading.
+
+Store format 25 does the same for Pi Durable 1.5. Its tables are unchanged, but it writes conversation documents and
+tasks at versions Pi 1.4 cannot read, so older builds refuse a store at format 25 and a store with unfinished work
+upgrades only once its release finished that work. Pal stores streamed answers and running tool output right after
+each throttled commit (`settings.progress.persistWithinMs: 0`), as before Pi 1.5, so a crash still loses only the last
+throttle interval.
 
 ### Evaluations
 

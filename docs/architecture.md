@@ -55,8 +55,10 @@ A chat is a Pal record mapped to a Pi conversation (`src/core/chats.ts`).
 4. Before a tool runs, direct or nested, `beforeTool` hooks decide whether it may: the grant policy (`src/pi/codemode.ts`),
    a shell command's timeout limit (`src/core/execution.ts`), then command approval for shell commands
    (`src/core/approvals.ts`). Pi then records the tool's intent and executes it.
-5. Events reach the page over server-sent events (`GET /api/chats/:id/events`): a snapshot, then one batch per
-   commit. Reconnecting gets a fresh snapshot, so another device can pick up a running chat.
+5. The chat reaches the page over server-sent events (`GET /api/chats/:id/events`): a snapshot of Pi's conversation
+   view (its newest entries and run state) with the history before it, then each change to that view as Chord ops.
+   The page keeps every entry it was sent. A reader that falls further behind than the view holds gets a new
+   snapshot, and reconnecting gets one too, so another device can pick up a running chat.
 
 After a crash or restart, Pi resumes from its journal. A Code Mode script replays without repeating calls that
 already finished. A tool marked replay-safe may run again. One marked unsafe, such as a shell command or a file

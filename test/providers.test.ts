@@ -223,7 +223,7 @@ describe("API-key model providers", () => {
       expect((await send(chatId)).status).toBe(200);
       const request = provider.requests.at(-1);
       expect(request?.path).toBe(
-        id === "opencode" ? "/inference/v1/chat/completions" : "/inference/go/v1/chat/completions",
+        id === "opencode" ? "/inference/openai/v1/chat/completions" : "/inference/go/openai/v1/chat/completions",
       );
       expect(request?.headers.authorization).toBe("Bearer sk-opencode-fixture");
       expect(request?.headers["x-opencode-session"]).toEqual(expect.any(String));

@@ -270,6 +270,36 @@ describe("store", () => {
     await store.close();
   });
 
+  it("upgrades a Pi 1.4 store only once its release finished its work, and older builds refuse it unchanged", async () => {
+    const dataRoot = await tempDir();
+    await (await openStore(dataRoot)).close();
+    const path = join(dataRoot, "pal.sqlite");
+    const database = await openDatabase(path);
+    // What a release on Pi 1.4 left: Pal schema 24, here with a task it has not finished.
+    await database.run("DELETE FROM pal_migrations WHERE version > 24");
+    await database.run(
+      "INSERT INTO pi_tasks (id, conversation_id, kind, status, abort_requested, background, record) VALUES (1, 1, 'fixture', 'pending', 0, 0, '{}')",
+    );
+    const unfinished = await snapshot(database);
+    await database.close();
+
+    await expect(openStore(dataRoot)).rejects.toThrow(/unfinished work needs its retained Pal release/);
+    const reopened = await openDatabase(path);
+    expect(await snapshot(reopened)).toEqual(unfinished);
+    await reopened.run("UPDATE pi_tasks SET status = 'terminal'");
+    await reopened.close();
+
+    await (await openStore(dataRoot)).close();
+    const upgraded = await openDatabase(path);
+    cleanups.push(() => upgraded.close());
+    const migrated = await snapshot(upgraded);
+    expect(await upgraded.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({ n: 25 });
+    await expect(migrate(upgraded, MIGRATIONS.slice(0, 24))).rejects.toThrow(
+      /migration 25 'pi_durable_1_5_documents'.*does not know/,
+    );
+    expect(await snapshot(upgraded)).toEqual(migrated);
+  });
+
   it("keeps every admission through the schema 24 rebuild and binds a blocked reason to admitting inputs", async () => {
     const database = await openDatabase(join(await tempDir(), "pal.sqlite"));
     cleanups.push(() => database.close());

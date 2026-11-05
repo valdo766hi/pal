@@ -515,12 +515,20 @@ export async function openPal(
     for (const { tool } of registry.snapshot().tools())
       if ((tool.callers ?? ["model"]).includes("model") && !MODEL_TOOLS.has(tool.name))
         throw new Error(`${tool.name} is not on the kernel's list of tools the model may call directly`);
-    // Pi's default, chosen explicitly: a task that crashes Pal on five opens in a row is parked instead of crash-looping
-    // every start; Stop still runs its abort handler.
+    // Pi's default, chosen explicitly: a task that crashes Pal on five opens in a row ends visibly (a tool call with an
+    // error result, a run with `runFailure`) instead of crash-looping every start.
+    // Streamed answers and tool output are stored right after each throttled commit, as before Pi 1.5, so a crash
+    // still loses only the last throttle interval rather than up to Pi's default second.
     const reports = new Reports();
     const running = await Harness.open(
       store.storage,
-      { models, registry, now, settings: { restartLimit: 5 }, onReport: (_error, info) => reports.record(info, now()) },
+      {
+        models,
+        registry,
+        now,
+        settings: { restartLimit: 5, progress: { persistWithinMs: 0 } },
+        onReport: (report) => reports.record(report, now()),
+      },
       context,
     );
     harness = running;
@@ -528,7 +536,7 @@ export async function openPal(
       if (status !== "failed") status = "closing";
     });
     void running.closed.then((end) => {
-      status = status === "failed" || end.reason === "failed" ? "failed" : "closed";
+      status = status === "failed" || end.kind === "failed" ? "failed" : "closed";
     });
 
     const settings: Settings = {

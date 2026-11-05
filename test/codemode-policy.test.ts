@@ -7,7 +7,6 @@ import {
   fauxText,
   fauxToolCall,
   type ToolResultMessage,
-  Type,
 } from "@earendil-works/pi-ai";
 import {
   createRegistry,
@@ -17,6 +16,7 @@ import {
   MemoryStorage,
   type ToolRegistration,
 } from "@earendil-works/pi-durable";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { type CodemodeCaps, createPalCodemode, DEFAULT_CODEMODE_CAPS, type ToolPolicy } from "../src/pi/codemode.ts";
 

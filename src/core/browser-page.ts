@@ -13,7 +13,17 @@ export const BrowserAction = Type.Union([
     { additionalProperties: false },
   ),
   Type.Object(
-    { type: Type.Literal("key"), key: Type.Enum(["Enter", "Tab", "Escape", "PageDown", "PageUp"]) },
+    {
+      type: Type.Literal("key"),
+      // Literals rather than `Type.Enum`, which Pi's tool argument types do not cover.
+      key: Type.Union([
+        Type.Literal("Enter"),
+        Type.Literal("Tab"),
+        Type.Literal("Escape"),
+        Type.Literal("PageDown"),
+        Type.Literal("PageUp"),
+      ]),
+    },
     { additionalProperties: false },
   ),
   Type.Object(

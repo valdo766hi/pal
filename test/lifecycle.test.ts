@@ -104,7 +104,7 @@ describe("durable runtime lifecycle", () => {
     await releaseHealth(base, pal.extensions.release);
     await pal.store.database.exec("PRAGMA query_only = ON");
     await expect(pal.harness.createConversation({ ownership: { kind: "ownerless" } }, context)).rejects.toThrow();
-    expect(await pal.harness.closed).toMatchObject({ reason: "failed" });
+    expect(await pal.harness.closed).toMatchObject({ kind: "failed" });
     expect((await fetch(`${base}/api/health`)).status).toBe(503);
     await expect(releaseHealth(base, pal.extensions.release)).rejects.toThrow(/health/);
     const unavailable = await fetch(`${base}/api/session`);

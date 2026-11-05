@@ -10,6 +10,7 @@ if (process.argv[3] === "inserted") {
         exec: tx.exec.bind(tx),
         get: tx.get.bind(tx),
         all: tx.all.bind(tx),
+        runCounted: tx.runCounted.bind(tx),
         run: async (sql, ...args) => {
           await tx.run(sql, ...args);
           if (sql.startsWith("INSERT INTO pal_mcp_cache")) {

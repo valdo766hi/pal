@@ -27,11 +27,11 @@
     "postinstall": "node -e \"for (const arch of ['arm64', 'x64']) try { require('fs').chmodSync('node_modules/node-pty/prebuilds/darwin-' + arch + '/spawn-helper', 0o755) } catch {}\""
   },
   "dependencies": {
-    "@earendil-works/chord": "1.4.0",
-    "@earendil-works/pi-ai": "1.4.0",
-    "@earendil-works/pi-codemode": "1.4.0",
-    "@earendil-works/pi-durable": "1.4.0",
-    "@earendil-works/pi-mcp": "1.4.0",
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-codemode": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0",
+    "@earendil-works/pi-mcp": "1.5.0",
     "@ff-labs/fff-node": "0.11.0",
     "@xterm/addon-serialize": "0.14.0",
     "@xterm/headless": "6.0.0",
