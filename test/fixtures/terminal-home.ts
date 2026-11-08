@@ -1,7 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-/** Trusted host dotfiles for PTY tests; never source the developer's actual startup files. */
+/**
+ * Trusted host dotfiles for PTY tests; never source the developer's actual startup files. Prompts show only the
+ * folder name so a long temp path cannot wrap them past the 80-column test terminal.
+ */
 export async function terminalHome(home: string): Promise<Record<string, string>> {
   const config = join(home, ".config");
   await mkdir(join(config, "fish"), { recursive: true });
@@ -12,7 +15,7 @@ export async function terminalHome(home: string): Promise<Record<string, string>
 HISTFILESIZE=700
 HISTFILE="$HOME/.bash_history"
 INPUTRC="$HOME/.inputrc"
-PS1='\[\e[35m\]fixture\[\e[0m\] \w $ '
+PS1='\[\e[35m\]fixture\[\e[0m\] \W $ '
 export HISTFILE INPUTRC PAL_TEST_PROFILE=loaded
 `,
   );
@@ -21,12 +24,12 @@ export HISTFILE INPUTRC PAL_TEST_PROFILE=loaded
   await writeFile(join(home, ".zshenv"), "unsetopt GLOBAL_RCS\n");
   await writeFile(
     join(home, ".zshrc"),
-    "HISTSIZE=700\nSAVEHIST=700\nHISTFILE=$HOME/.zsh_history\nexport PAL_TEST_PROFILE=loaded\nbindkey -e\nbindkey '^[[5~' up-history\nbindkey '^[[6~' down-history\nPROMPT='fixture %~ $ '\n",
+    "HISTSIZE=700\nSAVEHIST=700\nHISTFILE=$HOME/.zsh_history\nexport PAL_TEST_PROFILE=loaded\nbindkey -e\nbindkey '^[[5~' up-history\nbindkey '^[[6~' down-history\nPROMPT='fixture %1~ $ '\n",
   );
   await writeFile(
     join(config, "fish/config.fish"),
     String.raw`set -gx PAL_TEST_PROFILE loaded
-function fish_prompt; printf 'fixture %s $ ' (prompt_pwd); end
+function fish_prompt; printf 'fixture %s $ ' (path basename $PWD); end
 bind \e\[5~ history-search-backward
 bind \e\[6~ history-search-forward
 `,
