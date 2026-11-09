@@ -1,0 +1,17 @@
+version: 2
+updates:
+  # A pnpm-lock.yaml change also needs the pnpm dependencies hash in nix/package.nix, or the Nix checks fail.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
