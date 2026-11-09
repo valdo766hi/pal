@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -6,24 +6,28 @@ import { build } from "esbuild";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension } from "@earendil-works/pi-durable";
+import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { validate } from "../src/core/requests.ts";
-import { exampleCapability } from "../src/capabilities/example.ts";
-import { memoryCapability } from "../src/capabilities/memory.ts";
+import exampleCapability from "./fixtures/plugins/example/server.ts";
 import {
   capabilityIdentity,
   capabilityManifest,
   CompiledCapabilities,
-  type CapabilityHost,
+  type KernelServices,
   type CompiledCapability,
+  type PluginSettings,
 } from "../src/capabilities/contract.ts";
 import { openPal, type Pal } from "../src/core/app.ts";
 import type { Chat } from "../src/core/chats.ts";
 import { BuiltinExtensions } from "../src/core/extensions.ts";
 import { FileAccessError } from "../src/core/files.ts";
 import { PrivateFiles } from "../src/core/file-policy.ts";
+import * as inventory from "../plugins/index.ts";
+import { ICONS } from "../web/src/lib/icons.ts";
+import memoryCapability, { projectMemory } from "../plugins/memory/server.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -83,7 +87,7 @@ async function fixture(definitions: readonly CompiledCapability[] = [memoryCapab
   };
 }
 const publicFiles = await PrivateFiles.open([]);
-function host(pal: Pal): CapabilityHost {
+function host(pal: Pal): KernelServices {
   return {
     database: pal.store.database,
     storage: pal.store.storage,
@@ -95,6 +99,7 @@ function host(pal: Pal): CapabilityHost {
       return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
     },
     authorize: (api, ctx) => pal.folders.forTool(api, ctx),
+    now: Date.now,
   };
 }
 function traced(base: CompiledCapability, events: string[], output?: string): CompiledCapability {
@@ -105,7 +110,7 @@ function traced(base: CompiledCapability, events: string[], output?: string): Co
       const runtime = await base.open(ports);
       return {
         ...runtime,
-        tools: runtime.tools.map((tool) => ({
+        tools: (runtime.tools ?? []).map((tool) => ({
           ...tool,
           execute: async (args, api, ctx) => {
             events.push(`execute:${base.manifest.id}`);
@@ -122,6 +127,50 @@ function traced(base: CompiledCapability, events: string[], output?: string): Co
 }
 
 describe("compiled capability contract", () => {
+  it("keeps every plugin folder valid, with its components, and only server plugins in the server inventory", async () => {
+    const root = join(import.meta.dirname, "../plugins");
+    const servers = Object.values(inventory).map((plugin) => plugin.manifest.id);
+    const folders = (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+    expect(folders.map((entry) => entry.name)).toEqual(expect.arrayContaining(["memory", "helpers", "pets"]));
+    for (const folder of folders) {
+      const module: { default: unknown } = await import(pathToFileURL(join(root, folder.name, "manifest.ts")).href);
+      const manifest = capabilityManifest(module.default);
+      expect(manifest.id).toBe(folder.name);
+      expect(servers.includes(manifest.id)).toBe(manifest.scope !== "browser");
+      const { slots = [], settings = [], panels = [], renderers = [] } = manifest.ui ?? {};
+      for (const item of [...slots, ...settings, ...panels, ...renderers])
+        await access(join(root, folder.name, "ui", `${item.component}.svelte`));
+      for (const item of [...settings, ...panels]) expect(Object.keys(ICONS)).toContain(item.icon);
+    }
+    const { id, version, native, name, description, core, order } = exampleCapability.manifest;
+    const bare = { id, version, native, name, description, core, order, scope: "browser" };
+    for (const extra of [{ tools: exampleCapability.manifest.tools }, { ui: exampleCapability.manifest.ui }])
+      expect(() => capabilityManifest({ ...bare, ...extra })).toThrow("browser-only");
+    const f = await fixture([]);
+    await expect(
+      CompiledCapabilities.open([{ manifest: capabilityManifest(bare), open: () => ({}) }], host(f.pal)),
+    ).rejects.toThrow("no server part");
+  });
+
+  it("keeps the kernel's own record kinds out of plugin IDs", async () => {
+    const source = join(import.meta.dirname, "../src");
+    const plugins = await readdir(join(import.meta.dirname, "../plugins"));
+    const kinds = new Set<string>();
+    for (const file of await readdir(source, { recursive: true }))
+      if (file.endsWith(".ts"))
+        for (const [, id] of (await readFile(join(source, file), "utf8")).matchAll(
+          /kind: "pal\.([a-z][a-z0-9-]*)[".]/g,
+        ))
+          if (id !== undefined && !plugins.includes(id)) kinds.add(id);
+    expect([...kinds]).toEqual(expect.arrayContaining(["user", "chat", "working-state"]));
+    const { version, name, description, core, order } = exampleCapability.manifest;
+    for (const id of kinds)
+      expect(
+        () => capabilityManifest({ id, version, native: `pal.${id}`, name, description, core, order }),
+        id,
+      ).toThrow("core contribution");
+  });
+
   it("registers the bounded opt-in template with host-owned grants, settings and implementation identities", async () => {
     const events: string[] = [];
     const f = await fixture([traced(exampleCapability, events)]);
@@ -130,16 +179,15 @@ describe("compiled capability contract", () => {
     expect(item).toMatchObject({
       available: true,
       capability: {
-        core: { min: 1, max: 1 },
-        settings: "new-chat-selection",
-        panels: ["Context"],
-        tools: [{ name: "example_echo", replay: "safe", permissions: ["project.read"] }],
+        core: { min: 2, max: 2 },
+        order: 70,
+        tools: [{ name: "example_echo", replay: "safe", callers: ["tools"], permissions: ["project.read"] }],
       },
     });
     expect(item?.implementation).toBe(capabilityIdentity(exampleCapability.manifest, initial.release).digest);
     expect(initial.selected.map((choice) => choice.id)).not.toContain("example");
     expect(initial.catalog.map((item) => item.id)).not.toContain("memory");
-    expect(() => f.pal.memory).toThrow("Memory is not included");
+    expect(() => projectMemory(f.pal.capabilities)).toThrow("Memory is not included");
     await f.pal.extensions.select({ selected: [{ id: "example", version: 1 }], digest: initial.digest });
     const chat = await f.pal.chats.createChat("template-chat", { projectId: f.project.id }, context);
     const { conversation, output } = await f.run(
@@ -147,6 +195,10 @@ describe("compiled capability contract", () => {
       'return await tools.example_echo({text:"bounded template 界"});',
     );
     expect(output).toContain("bounded template 界");
+    const recorded = (await conversation.entries({}, 100, undefined, context)).items.filter(
+      (entry) => entry.kind === "pal.example",
+    );
+    expect(recorded.map((entry) => entry.data)).toEqual([{ text: "bounded template 界" }]);
     const agent = await conversation.agent(context);
     expect(agent.tools.map((tool) => tool.name)).not.toContain("example_echo");
     expect(agent.callable.map((tool) => tool.name)).toContain("example_echo");
@@ -161,11 +213,22 @@ describe("compiled capability contract", () => {
         selected: [{ id: "example", version: 1 }],
         implementations: [{ id: "example", version: 1, digest: item?.implementation }],
       });
+    // The owner's setting, saved through the plugin's own route, reaches its tool after a restart.
+    const settings = (method: string, body?: unknown) =>
+      f.pal.capabilities.request(
+        "example",
+        { method, path: ["settings"], query: new URLSearchParams(), body },
+        context,
+      );
+    expect(await settings("GET")).toEqual({ prefix: "" });
+    await expect(settings("PUT", { prefix: "x".repeat(33) })).rejects.toThrow();
+    await settings("PUT", { prefix: "» " });
     await f.reopen();
+    expect(await settings("GET")).toEqual({ prefix: "» " });
     expect((await f.pal.extensions.view()).selected).toEqual([{ id: "example", version: 1 }]);
     expect(await f.pal.extensions.pins(chat.conversationId, f.pal.harness, context)).toEqual(pins);
     expect((await f.run(chat, 'return await tools.example_echo({text:"after restart"});')).output).toContain(
-      "after restart",
+      "» after restart",
     );
     await Promise.all([f.pal.close(), f.pal.close()]);
     expect(events).toEqual([
@@ -257,10 +320,10 @@ describe("compiled capability contract", () => {
           {
             name: "compiled-selection",
             setup(builder) {
-              builder.onLoad({ filter: /\/capabilities\/compiled\.ts$/ }, (args) => ({
+              builder.onLoad({ filter: /\/plugins\/index\.ts$/ }, (args) => ({
                 contents: template
-                  ? 'import { exampleCapability } from "./example.ts"; export const COMPILED_CAPABILITIES = [exampleCapability];'
-                  : "export const COMPILED_CAPABILITIES = [];",
+                  ? 'export { default as example } from "../test/fixtures/plugins/example/server.ts";'
+                  : "export {};",
                 loader: "ts",
                 resolveDir: dirname(args.path),
               }));
@@ -271,7 +334,7 @@ describe("compiled capability contract", () => {
       for (const file of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"])
         await writeFile(join(packageRoot, file), await readFile(join(source, file)));
       await symlink(await realpath(join(source, "node_modules")), join(packageRoot, "node_modules"), "dir");
-      expect(Object.keys(result.metafile.inputs).some((path) => path.endsWith("capabilities/memory.ts"))).toBe(false);
+      expect(Object.keys(result.metafile.inputs).some((path) => path.includes("plugins/memory/"))).toBe(false);
       expect(await readFile(outfile, "utf8")).not.toContain("memory_search");
       const artifact: typeof import("../src/core/app.ts") = await import(pathToFileURL(outfile).href);
       const pal = await artifact.openPal(
@@ -285,7 +348,7 @@ describe("compiled capability contract", () => {
       cleanups.push(() => pal.close());
       const view = await pal.extensions.view();
       expect(view.catalog.map((item) => item.id)).not.toContain("memory");
-      expect(() => pal.memory).toThrow("Memory is not included");
+      expect(() => projectMemory(pal.capabilities)).toThrow("Memory is not included");
       if (template)
         await pal.extensions.select({
           selected: [...view.selected, { id: "example", version: 1 }],
@@ -304,11 +367,11 @@ describe("compiled capability contract", () => {
   it("removes memory at composition time without removing core guidance or the owner's other capabilities", async () => {
     const f = await fixture([]);
     const view = await f.pal.extensions.view();
-    expect(view.catalog.map((item) => item.id)).toEqual(["files", "shell", "browser", "helpers", "compact"]);
+    expect(view.catalog.map((item) => item.id)).toEqual(["files", "shell", "browser", "compact"]);
     expect(view.selected.map((item) => item.id)).not.toContain("memory");
     expect(view.selected.map((item) => item.id)).not.toContain("helpers");
     expect(f.pal.capabilities.namespaces).toEqual([]);
-    expect(() => f.pal.memory).toThrow("Memory is not included");
+    expect(() => projectMemory(f.pal.capabilities)).toThrow("Memory is not included");
     const chat = await f.pal.chats.createChat("without-memory", { projectId: f.project.id }, context);
     const { conversation, output } = await f.run(
       chat,
@@ -329,7 +392,7 @@ describe("compiled capability contract", () => {
 
   it("keeps the extracted memory's owner API, source checks and search working across restart", async () => {
     const f = await fixture([memoryCapability]);
-    await f.pal.memory.save(
+    await projectMemory(f.pal.capabilities).save(
       f.project.id,
       "owner-memory",
       { title: "Decision", body: "EXTRACTED-MEMORY", source: { kind: "owner" } },
@@ -340,7 +403,9 @@ describe("compiled capability contract", () => {
       "EXTRACTED-MEMORY",
     );
     await f.reopen();
-    expect((await f.pal.memory.list(f.project.id, context)).map((item) => item.body)).toEqual(["EXTRACTED-MEMORY"]);
+    expect((await projectMemory(f.pal.capabilities).list(f.project.id, context)).map((item) => item.body)).toEqual([
+      "EXTRACTED-MEMORY",
+    ]);
     expect((await f.run(chat, 'return await tools.memory_search({query:"EXTRACTED"});')).output).toContain(
       "EXTRACTED-MEMORY",
     );
@@ -441,7 +506,7 @@ describe("compiled capability contract", () => {
     const open = vi.fn(exampleCapability.open);
     const manifest = exampleCapability.manifest;
     for (const invalid of [
-      { ...manifest, core: { min: 2, max: 2 } },
+      { ...manifest, core: { min: 3, max: 3 } },
       { ...manifest, native: "pal.policy" },
       { ...manifest, namespace: { ...manifest.namespace, prefix: "shell_" } },
       { ...manifest, tools: manifest.tools.map((tool) => ({ ...tool, name: "shell_run" })) },
@@ -460,11 +525,29 @@ describe("compiled capability contract", () => {
     expect(open).not.toHaveBeenCalled();
     for (const invalid of [
       { ...manifest, tools: manifest.tools.map((tool) => ({ ...tool, permissions: ["project.write"] })) },
-      { ...manifest, tools: manifest.tools.map((tool) => ({ ...tool, permissions: [] })) },
+      { ...manifest, tools: manifest.tools.map((tool) => ({ ...tool, callers: [] })) },
+      // A plugin cannot give itself direct model access or own a kernel table.
+      { ...manifest, tools: manifest.tools.map((tool) => ({ ...tool, callers: ["model", "tools"] })) },
+      { ...manifest, storage: { owns: ["pal_chats"], reads: [] } },
       { ...manifest, core: { min: 0, max: 1 } },
       { ...manifest, credentialStore: "ambient" },
     ])
       expect(() => capabilityManifest(invalid)).toThrow();
+    // History names a plugin by its native name; its panels and renderers stay out of the kernel's and others'.
+    const panel = { id: "Context", icon: "layers", component: "ExamplePanel", order: 10 };
+    const renderer = (entry: string) => ({
+      ...manifest,
+      ui: { renderers: [{ entry, component: "ExampleResult", order: 10 }] },
+    });
+    for (const [invalid, message] of [
+      [{ ...manifest, native: "pal.echo" }, "native name pal.example"],
+      [{ ...manifest, ui: { panels: [panel] } }, "kernel panel"],
+      [{ ...manifest, ui: { settings: [{ ...panel, id: "general", label: "General" }] } }, "kernel settings tab"],
+      [renderer("pal.memory"), "its own entries"],
+      [renderer("pal.examples"), "its own entries"],
+    ] as const)
+      expect(() => capabilityManifest(invalid)).toThrow(message);
+    expect(capabilityManifest(renderer("pal.example.result")).ui?.renderers?.[0]?.entry).toBe("pal.example.result");
     expect(capabilityIdentity(manifest, "release-one").digest).not.toBe(
       capabilityIdentity(manifest, "release-two").digest,
     );
@@ -479,8 +562,8 @@ describe("compiled capability contract", () => {
       const dispose = vi.fn();
       const definition: CompiledCapability = {
         ...exampleCapability,
-        open: () => {
-          const runtime = exampleCapability.open();
+        open: (services) => {
+          const runtime = exampleCapability.open(services);
           return {
             tools: runtime.tools.map((tool) => ({
               ...tool,
@@ -490,32 +573,86 @@ describe("compiled capability contract", () => {
           };
         },
       };
-      await expect(CompiledCapabilities.open([definition], host(f.pal))).rejects.toThrow("Code Mode-only");
+      await expect(CompiledCapabilities.open([definition], host(f.pal))).rejects.toThrow("declared replay and callers");
       expect(dispose).toHaveBeenCalledTimes(1);
     }
-    const disposeMissingService = vi.fn();
-    await expect(
-      CompiledCapabilities.open(
-        [
-          {
-            ...memoryCapability,
-            open: async (ports) => ({
-              tools: (await memoryCapability.open(ports)).tools,
-              dispose: disposeMissingService,
-            }),
-          },
-        ],
-        host(f.pal),
-      ),
-    ).rejects.toThrow("memory service");
-    expect(disposeMissingService).toHaveBeenCalledTimes(1);
-    const opened = await CompiledCapabilities.open([exampleCapability], host(f.pal));
+    let tools: ReturnType<typeof exampleCapability.open>["tools"] = [];
+    const opened = await CompiledCapabilities.open(
+      [{ ...exampleCapability, open: (services) => ({ tools: (tools = exampleCapability.open(services).tools) }) }],
+      host(f.pal),
+    );
     cleanups.push(() => opened.close());
     const registry = createRegistry();
-    const kernel = defineExtension({ name: "pal.policy", tools: exampleCapability.open().tools });
+    const kernel = defineExtension({ name: "pal.policy", tools });
     registry.install(kernel);
     expect(() => opened.install(registry)).toThrow("collides");
     expect(registry.snapshot().installed()).toEqual([kernel]);
+  });
+
+  it("keeps a plugin's settings bounded and under its own prefix", async () => {
+    const f = await fixture([]);
+    let settings: PluginSettings | undefined;
+    const opened = await CompiledCapabilities.open(
+      [
+        {
+          ...exampleCapability,
+          open: (services) => {
+            settings = services.settings;
+            return exampleCapability.open(services);
+          },
+        },
+      ],
+      host(f.pal),
+    );
+    cleanups.push(() => opened.close());
+    if (settings === undefined) throw new Error("missing plugin settings");
+    expect(await settings.get("echo")).toBeUndefined();
+    await settings.set("echo", { prefix: "» " });
+    expect(await settings.get("echo")).toEqual({ prefix: "» " });
+    expect(await f.pal.store.database.all("SELECT key FROM pal_settings WHERE key LIKE 'plugin:%'")).toEqual([
+      { key: "plugin:example:echo" },
+    ]);
+    for (const name of ["", "Echo", ":extensions:selection", "x".repeat(65)])
+      await expect(settings.get(name)).rejects.toThrow("invalid setting name");
+    for (const value of ["x".repeat(16 * 1024), undefined])
+      await expect(settings.set("echo", value)).rejects.toThrow("at most 16 KiB");
+    expect(await settings.get("echo")).toEqual({ prefix: "» " });
+    // A corrupt row names the plugin and setting, never its stored value.
+    await f.pal.store.database.run(
+      "UPDATE pal_settings SET value = '{\"secret-value' WHERE key = 'plugin:example:echo'",
+    );
+    const corrupt = await settings.get("echo").catch((error: unknown) => error);
+    expect(corrupt).toBeInstanceOf(Error);
+    expect((corrupt as Error).message).toBe("Capability example setting echo is corrupt.");
+    expect(JSON.stringify(corrupt, Object.getOwnPropertyNames(corrupt))).not.toContain("secret-value");
+  });
+
+  it("keeps a plugin's SQL to its declared tables and its requests to its own ID", async () => {
+    const f = await fixture([]);
+    let sql: SqliteDatabase | undefined;
+    const scoped: CompiledCapability = {
+      manifest: { ...exampleCapability.manifest, storage: { owns: ["pal_example_notes"], reads: ["pal_projects"] } },
+      open: (services) => {
+        sql = services.sql;
+        return exampleCapability.open(services);
+      },
+    };
+    const opened = await CompiledCapabilities.open([scoped], host(f.pal));
+    cleanups.push(() => opened.close());
+    if (sql === undefined) throw new Error("missing scoped SQL");
+    expect(await sql.all("SELECT id FROM pal_projects")).toHaveLength(1);
+    await expect(sql.all("SELECT id FROM pal_chats")).rejects.toThrow("no access to pal_chats");
+    await expect(sql.run("DELETE FROM pal_projects")).rejects.toThrow("no access to pal_projects");
+    await expect(sql.transaction((tx) => tx.run("UPDATE pal_chats SET title = NULL"))).rejects.toThrow(
+      "no access to pal_chats",
+    );
+    await expect(sql.exec("SELECT 1")).rejects.toThrow("may only query and change rows");
+    await expect(sql.run("DROP TABLE pal_example_notes")).rejects.toThrow("may only query and change rows");
+    await expect(sql.close()).rejects.toThrow("cannot close");
+    expect(await f.pal.store.database.get("SELECT COUNT(*) AS n FROM pal_projects")).toEqual({ n: 1 });
+    const request = { method: "GET", path: [], query: new URLSearchParams(), body: undefined };
+    await expect(opened.request("example", request, context)).rejects.toMatchObject({ status: 404 });
+    await expect(opened.request("missing", request, context)).rejects.toMatchObject({ status: 404 });
   });
 
   it("rechecks live grants around execution and enforces output and parameter bounds", async () => {
@@ -523,7 +660,7 @@ describe("compiled capability contract", () => {
     const bounded = traced(exampleCapability, events, "X".repeat(8000));
     bounded.manifest = {
       ...bounded.manifest,
-      tools: bounded.manifest.tools.map((tool) => ({ ...tool, maxOutputBytes: 64 })),
+      tools: (bounded.manifest.tools ?? []).map((tool) => ({ ...tool, maxOutputBytes: 64 })),
     };
     const f = await fixture([bounded]);
     const before = await f.pal.extensions.view();
@@ -571,6 +708,7 @@ describe("compiled capability contract", () => {
         native: "pal.second",
         namespace: { name: "second", prefix: "second_" },
         tools: exampleCapability.manifest.tools.map((tool) => ({ ...tool, name: "second_echo" })),
+        ui: {},
       },
       open: () => {
         throw new Error("fixture second open failed");
@@ -579,8 +717,8 @@ describe("compiled capability contract", () => {
     await expect(CompiledCapabilities.open([first, second], host(f.pal))).rejects.toThrow("second open failed");
     expect(events).toEqual(["open:example", "dispose:example"]);
     const dispose = vi.fn();
-    second.open = () => ({
-      tools: exampleCapability.open().tools.map((tool) => ({ ...tool, name: "second_echo" })),
+    second.open = (services) => ({
+      tools: exampleCapability.open(services).tools.map((tool) => ({ ...tool, name: "second_echo" })),
       dispose: () => {
         dispose();
         events.push("dispose:second");
@@ -609,7 +747,7 @@ describe("compiled capability contract", () => {
       pal = await openPal(
         { dataRoot: join(root, "data"), installRoot: "/nonexistent-install", guidanceHome: join(root, "home") },
         context,
-        [{ ...exampleCapability, open: () => ({ ...exampleCapability.open(), dispose }) }],
+        [{ ...exampleCapability, open: (host) => ({ ...exampleCapability.open(host), dispose }) }],
       );
       const closeMcp = pal.mcp.close.bind(pal.mcp);
       const mcp = vi.spyOn(pal.mcp, "close").mockImplementation(async () => {

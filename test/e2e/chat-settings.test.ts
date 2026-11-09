@@ -3,13 +3,14 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { diffRevisions, type JsonValue } from "@earendil-works/chord/delta";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { type Browser, chromium, type Page, type WebSocketRoute } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
 import type { CompiledCapability } from "../../src/capabilities/contract.ts";
-import { exampleCapability } from "../../src/capabilities/example.ts";
+import exampleCapability from "../fixtures/plugins/example/server.ts";
 import { startServer } from "../../src/core/server.ts";
 import { runGit } from "../../src/core/git.ts";
 import { GOOD_KEY, startProviderFixture } from "../fixtures/provider-server.ts";
@@ -301,8 +302,14 @@ describe("saved chat settings", () => {
         constructor(url: string | URL, options?: EventSourceInit) {
           super(url, options);
           if (new URL(url, location.href).pathname !== `/api/chats/${id}/events`) return;
-          const host = window as typeof window & { runEvent?: (type: string) => void };
-          host.runEvent = (type) => this.dispatchEvent(new MessageEvent("event", { data: JSON.stringify({ type }) }));
+          const host = window as typeof window & { setRunning?: (running: boolean) => void };
+          // Pi's run state as the server sends a change to it: the whole `pi.live` document.
+          host.setRunning = (running) => {
+            const live = running ? { run: { taskId: 1, inputs: [1], turns: 0 } } : {};
+            this.dispatchEvent(
+              new MessageEvent("change", { data: JSON.stringify([["s", ["docs", "pi.live"], live]]) }),
+            );
+          };
         }
       };
     }, saved.id);
@@ -316,9 +323,9 @@ describe("saved chat settings", () => {
     await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
     const publish = (running: boolean) =>
       page.evaluate((running) => {
-        const host = window as typeof window & { runEvent?: (type: string) => void };
-        if (host.runEvent === undefined) throw new Error("missing fixture stream");
-        host.runEvent(running ? "run_start" : "run_end");
+        const host = window as typeof window & { setRunning?: (running: boolean) => void };
+        if (host.setRunning === undefined) throw new Error("missing fixture stream");
+        host.setRunning(running);
       }, running);
     if (busy) await publish(true);
     await page.getByLabel("Message", { exact: true }).fill("Keep this pointer submission");
@@ -708,7 +715,7 @@ describe("chat draft admission", () => {
     expect(errors).toEqual([]);
   });
 
-  it("keeps unsent drafts per chat but clears them on reload and sign-out", async () => {
+  it("keeps unsent drafts per chat across navigation and reload, and clears them on sign-out", async () => {
     const { page, base, saved, other, provider, errors } = await setup(1440);
     await page.goto(`${base}/#/chat/${saved.id}`);
     await page.getByLabel("Message", { exact: true }).fill("Unsent saved-chat draft");
@@ -720,9 +727,10 @@ describe("chat draft admission", () => {
     expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(1);
     await page.reload();
     await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
-    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
-    expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(0);
-    await page.getByLabel("Message", { exact: true }).fill("Discard this on sign-out");
+    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("Unsent saved-chat draft");
+    expect(await page.getByRole("button", { name: "Remove unsent.txt", exact: true }).count()).toBe(1);
+    await navigateChat(page, other.id);
+    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("Other chat draft");
     await page.evaluate(() => {
       location.hash = "#/settings/general";
     });
@@ -730,9 +738,106 @@ describe("chat draft admission", () => {
     await page.getByLabel("Passphrase", { exact: true }).fill("correct horse battery");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Sign out of Pal", exact: true }).waitFor();
-    await navigateChat(page, saved.id);
-    expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+    for (const chat of [saved, other]) {
+      await navigateChat(page, chat.id);
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+    }
+    expect(
+      await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft."))),
+    ).toEqual([]);
     expect(provider.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  it("recovers a saved send after reload: clears it once admitted, or retries it once if it never arrived", async () => {
+    const { pal, page, base, saved, provider, errors } = await setup(1440);
+    const inputs = `${base}/api/chats/${saved.id}/inputs`;
+    const admitted = () =>
+      pal.store.database.all<{ state: string }>("SELECT state FROM pal_admissions WHERE chat_id = ?", saved.id);
+    const message = page.getByLabel("Message", { exact: true });
+    const lookup = () =>
+      page.waitForResponse((reply) => reply.request().method() === "GET" && reply.url().startsWith(`${inputs}/`));
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
+
+    // Pal admits the input, but the reply never reaches the tab.
+    await page.route(inputs, async (route) => {
+      await route.fetch();
+      await route.abort();
+    });
+    await message.fill("Admitted, reply lost");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "This send isn't confirmed" }).waitFor();
+    await page.unroute(inputs);
+    const [found] = await Promise.all([lookup(), page.reload()]);
+    expect(found.status()).toBe(200);
+    await expect.poll(() => message.inputValue()).toBe("");
+    expect(await page.getByRole("button", { name: "Retry saved send", exact: true }).count()).toBe(0);
+    await expect.poll(() => provider.requests.length).toBe(1);
+
+    // The tab reloads while its send is still on the way, so Pal never receives it.
+    const held = Promise.withResolvers<undefined>();
+    const reloaded = Promise.withResolvers<undefined>();
+    await page.route(inputs, async (route) => {
+      held.resolve(undefined);
+      await reloaded.promise;
+      await route.abort().catch(() => {});
+    });
+    await message.fill("Never reached Pal");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await held.promise;
+    const [missing] = await Promise.all([lookup(), page.reload()]);
+    reloaded.resolve(undefined);
+    await page.unroute(inputs);
+    expect(missing.status()).toBe(404);
+    expect(await admitted()).toEqual([{ state: "admitted" }]);
+    await page.getByRole("alert").filter({ hasText: "It never reached Pal." }).waitFor();
+    await page.getByRole("button", { name: "Retry saved send", exact: true }).click();
+    await expect.poll(() => message.inputValue()).toBe("");
+    await expect.poll(admitted).toEqual([{ state: "admitted" }, { state: "admitted" }]);
+    await expect.poll(() => provider.requests.length).toBe(2);
+    expect(
+      await page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft."))),
+    ).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("pasting into the composer", () => {
+  // A 1×1 PNG, as a screenshot or a copied image would put on the clipboard.
+  const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
+
+  it("attaches a pasted image, but leaves a paste that also carries text to the text box", async () => {
+    const { page, base, saved, errors } = await setup(1440);
+    const uploads: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/uploads")) uploads.push(request.url());
+    });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const message = page.getByLabel("Message", { exact: true });
+    await expect.poll(() => message.isEnabled()).toBe(true);
+    const paste = (text: string | undefined) =>
+      message.evaluate(
+        (node, [png, text]) => {
+          const data = new DataTransfer();
+          if (text !== undefined) data.setData("text/plain", text);
+          const bytes = Uint8Array.from(atob(png), (char) => char.charCodeAt(0));
+          data.items.add(new File([bytes], "image.png", { type: "image/png" }));
+          const event = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+          node.dispatchEvent(event);
+          return event.defaultPrevented;
+        },
+        [PNG, text] as const,
+      );
+    expect(await paste(undefined)).toBe(true);
+    await page.getByRole("button", { name: "Remove image.png", exact: true }).waitFor();
+    expect(uploads).toHaveLength(1);
+
+    // Rich documents copy their text along with an image of it: that pastes as text, and nothing more attaches.
+    expect(await paste("a copied table")).toBe(false);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(uploads).toHaveLength(1);
+    expect(await page.getByRole("button", { name: "Remove image.png", exact: true }).count()).toBe(1);
     expect(errors).toEqual([]);
   });
 });
@@ -868,16 +973,18 @@ describe("review comment drafts", () => {
       await page.reload();
       if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
       await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
-      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe("");
+      // The copied feedback and its link survive the reload; Pal hasn't received it yet.
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe(composed);
       await page.getByRole("button", { name: "Changes", exact: true }).click();
-      await panel.getByText("Not sent", { exact: true }).waitFor();
+      await panel.getByText("In composer · not admitted", { exact: true }).waitFor();
       const legacy = await page.request.post(`${base}/api/projects/${project.id}/comments/sent`, {
         headers: { origin: base },
         data: { ids: [comment.id], workspace: workspace.id },
       });
       expect(legacy.status()).toBe(404);
       expect((await pal.changes.list(project.id, "normal", workspace.id)).comments[0]?.sent).toBe(false);
-      await panel.getByRole("button", { name: "Send feedback to chat (1)", exact: true }).click();
+      await panel.getByRole("button", { name: "Copy feedback again (1)", exact: true }).click();
+      expect(await page.getByLabel("Message", { exact: true }).inputValue()).toBe(composed);
       if (width < 700) await panel.waitFor({ state: "detached" });
       const lost = Promise.withResolvers<string>();
       await page.route(
@@ -1294,9 +1401,9 @@ describe("compiled capability composition", () => {
     await page.goto(`${base}/#/settings/extensions`);
     const row = page.locator(".extension").filter({ has: page.getByText("Example echo", { exact: true }) });
     await row.getByRole("switch", { name: "Enable Example echo for new chats", exact: true }).waitFor();
-    expect(await row.innerText()).toContain("Core API 1–1");
+    expect(await row.innerText()).toContain("Core API 2–2");
     expect(await row.innerText()).toContain("example_echo · safe · project.read");
-    expect(await row.innerText()).toContain("Contributes: Context");
+    expect(await row.innerText()).toContain("Contributes: Example, Chat results");
     const item = (await pal.extensions.view()).catalog.find((item) => item.id === "example");
     if (item === undefined) throw new Error("missing compiled template");
     expect(await row.innerText()).toContain(item.implementation);
@@ -1609,7 +1716,17 @@ describe("chat code rendering", () => {
   });
 });
 
-/** Marks the chat stream's first snapshot and approvals view, and returns a way to send it events as the server would. */
+type ChatEntry = { id: number } & Record<string, unknown>;
+type ChatView = { conversation: unknown; entries: ChatEntry[]; before?: number; docs: Record<string, unknown> };
+type ChatSnapshot = { view: ChatView; earlier: ChatEntry[] };
+const RUN = { taskId: 1, inputs: [1], turns: 0 };
+/** The view with `live` as its run state and an empty queue, as Pi's `pi.live` and `pi.inbox` documents hold them. */
+const withLive = (view: ChatView, live: Record<string, unknown>): ChatView => ({
+  ...view,
+  docs: { ...view.docs, "pi.live": live, "pi.inbox": { items: [] } },
+});
+
+/** Marks the chat stream's first snapshot and approvals view, and returns ways to send it events as the server would. */
 async function bridgeChatEvents(page: Page) {
   await page.addInitScript(() => {
     const Native = window.EventSource;
@@ -1630,11 +1747,30 @@ async function bridgeChatEvents(page: Page) {
       }
     };
   });
-  return (name: string, data?: unknown) =>
+  const emit = (name: string, data?: unknown) =>
     page.evaluate(
       (detail) => dispatchEvent(new CustomEvent("chat-test-event", { detail })),
       data === undefined ? { name } : { name, data: JSON.stringify(data) },
     );
+  /** The first snapshot the server sent this page. */
+  const first = async () =>
+    JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as ChatSnapshot;
+  let current: ChatView | undefined;
+  return {
+    emit,
+    first,
+    /** Replaces the page's view, as a reconnect does. */
+    async snapshot(view: ChatView, earlier: ChatSnapshot["earlier"] = []) {
+      current = view;
+      await emit("snapshot", { view, earlier });
+    },
+    /** Moves the page's view to `next` as a commit does: the ops from the view the page has. */
+    async change(next: ChatView) {
+      const from = current ?? (await first()).view;
+      current = next;
+      await emit("change", diffRevisions(from as unknown as JsonValue, next as unknown as JsonValue));
+    },
+  };
 }
 
 describe("durable tool activity", () => {
@@ -1649,7 +1785,7 @@ describe("durable tool activity", () => {
       );
     for (const code of ["text('Older observation');", "text('Latest observation');"])
       await conversation.submit({ type: "write", entry: { kind: "pi.assistant", model: [message(code)] } }, context);
-    const emit = await bridgeChatEvents(page);
+    const stream = await bridgeChatEvents(page);
     await page.goto(`${base}/#/chat/${saved.id}`);
     const activities = page.locator(".activity");
     await expect.poll(() => activities.count()).toBe(2);
@@ -1670,56 +1806,44 @@ describe("durable tool activity", () => {
     await restart();
     await expect.poll(snapshots, { timeout: 15_000 }).toBeGreaterThan(before);
     for (const activity of [older, latest]) await activity.getByText("Outcome unconfirmed", { exact: true }).waitFor();
-    const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as {
-      entries: { id: number }[];
-    };
-    const tools = [{ callId: "reused-call", name: "codemode", status: "pending" }];
-    await emit("snapshot", { ...snapshot, run: { inputs: [1] }, tools, inbox: [] });
+    const { view, earlier } = await stream.first();
+    const pending = { callId: "reused-call", name: "codemode", status: "pending" };
+    await stream.snapshot(withLive(view, { run: RUN, tools: [pending] }), earlier);
     await latest.getByText("Queued", { exact: true }).waitFor();
     await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
-    await emit("event", {
-      type: "tool_execution_start",
-      toolCallId: "reused-call",
-      toolName: "codemode",
-      taskId: 42,
-    });
+    const running = { ...pending, status: "running", taskId: 42 };
+    await stream.change(withLive(view, { run: RUN, tools: [running] }));
     await latest.getByText("Running", { exact: true }).waitFor();
     await latest.getByText("Task 42", { exact: true }).waitFor();
     await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
-    await emit("error");
+    await stream.emit("error");
     await latest.getByText("Last observed running", { exact: true }).waitFor();
     expect(await latest.locator(".spin").count()).toBe(0);
-    await emit("open");
+    await stream.emit("open");
     await latest.getByText("Running", { exact: true }).waitFor();
-    await emit("event", {
-      type: "tool_execution_start",
-      toolCallId: "reused-call/child",
-      parentToolCallId: "reused-call",
-      toolName: "files_write",
-      taskId: 43,
-      parentTaskId: 42,
-    });
-    await emit("event", { type: "tool_execution_end", toolCallId: "reused-call", toolName: "codemode", taskId: 42 });
+    const child = { callId: "reused-call/child", name: "files_write", status: "running", arguments: {} };
+    await stream.change(
+      withLive(view, {
+        run: RUN,
+        tools: [running],
+        nestedTools: [{ ...child, parentCallId: "reused-call", parentTaskId: 42, taskId: 43 }],
+      }),
+    );
+    // Done without a result entry: the tool task faulted, so nothing records the call as succeeded.
+    await stream.change(withLive(view, { run: RUN, tools: [{ ...running, status: "done" }] }));
     await latest.getByText("Outcome unconfirmed", { exact: true }).waitFor();
     expect(await latest.getByText("Done", { exact: true }).count()).toBe(0);
-    await emit("snapshot", {
-      ...snapshot,
-      run: { inputs: [1] },
-      inbox: [],
-      tools: [{ ...tools[0], status: "running", taskId: 42 }],
-    });
+    await stream.snapshot(withLive(view, { run: RUN, tools: [running] }), earlier);
     await latest.getByText("Running", { exact: true }).waitFor();
-    await emit("event", { type: "run_end" });
+    await stream.change(withLive(view, {}));
     await latest.getByText("Outcome unconfirmed", { exact: true }).waitFor();
     expect(await latest.locator(".spin").count()).toBe(0);
-    await emit("event", {
-      type: "message_end",
-      entry: {
-        id: Math.max(...snapshot.entries.map((entry) => entry.id)) + 1,
-        kind: "pi.tool-result",
-        model: [{ role: "toolResult", toolCallId: "reused-call", content: [{ type: "text", text: "Known result" }] }],
-      },
-    });
+    const result = {
+      id: Math.max(...[...earlier, ...view.entries].map((entry) => entry.id)) + 1,
+      kind: "pi.tool-result",
+      model: [{ role: "toolResult", toolCallId: "reused-call", content: [{ type: "text", text: "Known result" }] }],
+    };
+    await stream.change({ ...withLive(view, {}), entries: [...view.entries, result] });
     await latest.getByText("Done", { exact: true }).waitFor();
     await older.getByText("Outcome unconfirmed", { exact: true }).waitFor();
     expect(await draft.inputValue()).toBe("Keep this while task state changes");
@@ -1920,7 +2044,7 @@ describe("chat connection and Stop failures", () => {
 
   it("shows a failed Stop and lets the owner try again without an unhandled rejection", async () => {
     const { page, base, saved, errors, mutations } = await setup(1440);
-    const emit = await bridgeChatEvents(page);
+    const stream = await bridgeChatEvents(page);
     let fail = true;
     await page.route(`**/api/chats/${saved.id}/stop`, (route) =>
       fail
@@ -1929,7 +2053,7 @@ describe("chat connection and Stop failures", () => {
     );
     await page.goto(`${base}/#/chat/${saved.id}`);
     await expect.poll(() => page.locator("html").getAttribute("data-chat-approvals")).toBe("seen");
-    await emit("event", { type: "run_start" });
+    await stream.change(withLive((await stream.first()).view, { run: RUN }));
     const stop = page.getByRole("button", { name: "Stop", exact: true });
     await stop.click();
     const failed = page.getByRole("alert").filter({ hasText: "Stop didn't reach Pal: Stop is unavailable." });
@@ -1959,15 +2083,14 @@ describe("long transcript updates", () => {
         context,
       );
     }
-    const emit = await bridgeChatEvents(page);
+    const stream = await bridgeChatEvents(page);
     await page.goto(`${base}/#/chat/${saved.id}`);
     await page.getByText("History 79", { exact: true }).waitFor();
     // Synthetic approvals must not race the server's initial view.
     await expect.poll(() => page.locator("html").getAttribute("data-chat-approvals")).toBe("seen");
-    const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}") as {
-      entries: { id: number }[];
-    };
-    expect(snapshot.entries).toHaveLength(80);
+    const { view, earlier } = await stream.first();
+    const entries = [...earlier, ...view.entries];
+    expect(entries).toHaveLength(80);
     const pending = (id: string, assistant: number | null, command: string) => ({
       id,
       assistant,
@@ -1981,15 +2104,35 @@ describe("long transcript updates", () => {
       expiresAt: Date.now() + 60_000,
       decidedAt: null,
     });
-    await emit("approvals", {
+    await stream.emit("approvals", {
       mode: "ask",
-      approvals: [pending("turn", snapshot.entries[40]?.id ?? null, "echo turn"), pending("loose", null, "echo loose")],
+      approvals: [pending("turn", entries[40]?.id ?? null, "echo turn"), pending("loose", null, "echo loose")],
     });
     const input = page.getByLabel("Message", { exact: true });
     await input.fill("Keep this draft");
-    await page.locator(".scroller").evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
+    // The scroller is column-reverse: 0 is the newest end and older history lies at negative offsets.
+    const scroller = page.locator(".scroller");
+    await scroller.evaluate((node) => (node.scrollTop = -(node.scrollHeight - node.clientHeight) / 2));
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const scrollBefore = await page.locator(".scroller").evaluate((node) => node.scrollTop);
+    const anchor = await scroller.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const middle = box.top + box.height / 2;
+      const rows = [...node.querySelectorAll(".transcript > .item .md")].filter((row) =>
+        /^History \d+$/.test(row.textContent?.trim() ?? ""),
+      );
+      const distance = (row: Element) => Math.abs(row.getBoundingClientRect().top - middle);
+      const nearest = rows.reduce((best, row) => (distance(row) < distance(best) ? row : best));
+      return { scrollTop: node.scrollTop, text: nearest.textContent?.trim() ?? "" };
+    });
+    expect(anchor.scrollTop).toBeLessThan(0);
+    expect(anchor.text).not.toBe("History 79");
+    const offset = () =>
+      page
+        .getByText(anchor.text, { exact: true })
+        .evaluate(
+          (node) => node.getBoundingClientRect().top - (node.closest(".scroller")?.getBoundingClientRect().top ?? 0),
+        );
+    const visible = await offset();
     const order = () =>
       page
         .locator(".transcript > .item")
@@ -1998,30 +2141,34 @@ describe("long transcript updates", () => {
             (item) => item.querySelector(".cmd")?.textContent ?? item.querySelector(".md")?.textContent?.trim(),
           ),
         );
-    await emit("event", { type: "message_start", message: fauxAssistantMessage("Live") });
-    for (let index = 0; index < 20; index++)
-      await emit("event", { type: "message_update", changes: [{ type: "text_delta", contentIndex: 0, delta: "." }] });
+    const message = fauxAssistantMessage("Live");
+    const live = (text: string) =>
+      withLive(view, { generation: { attempt: 1, message: { ...message, content: [{ type: "text", text }] } } });
+    for (let index = 0; index <= 20; index++) await stream.change(live(`Live${".".repeat(index)}`));
     const history = Array.from({ length: 80 }, (_, index) => `History ${index}`);
     await expect
       .poll(order)
       .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "echo loose", `Live${".".repeat(20)}`]);
-    expect(await page.locator(".scroller").evaluate((node) => node.scrollTop)).toBe(scrollBefore);
+    expect(Math.abs((await offset()) - visible)).toBeLessThanOrEqual(1);
     expect(await input.inputValue()).toBe("Keep this draft");
     expect(await input.evaluate((node) => node === document.activeElement)).toBe(true);
 
     // A reconnect replaces live state from the server snapshot: the stale partial goes, new history arrives.
-    await emit("error");
+    await stream.emit("error");
     await page.getByRole("status").filter({ hasText: "Reconnecting to Pal" }).waitFor();
-    const appended = { id: Math.max(...snapshot.entries.map((entry) => entry.id)) + 1, kind: "pi.assistant" };
-    await emit("snapshot", {
-      ...snapshot,
-      entries: [...snapshot.entries, { ...appended, model: [fauxAssistantMessage("History 80")] }],
-    });
+    const appended = { id: Math.max(...entries.map((entry) => entry.id)) + 1, kind: "pi.assistant" };
+    await stream.snapshot(
+      { ...view, entries: [...view.entries, { ...appended, model: [fauxAssistantMessage("History 80")] }] },
+      earlier,
+    );
     await expect
       .poll(order)
       .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "History 80", "echo loose"]);
     expect(await page.getByRole("status").filter({ hasText: "Reconnecting to Pal" }).count()).toBe(0);
-    await emit("snapshot", { ...snapshot, generation: { message: fauxAssistantMessage("Resumed") } });
+    await stream.snapshot(
+      withLive(view, { generation: { attempt: 1, message: fauxAssistantMessage("Resumed") } }),
+      earlier,
+    );
     await expect
       .poll(order)
       .toEqual([...history.slice(0, 41), "echo turn", ...history.slice(41), "echo loose", "Resumed"]);
@@ -2097,7 +2244,7 @@ describe("research helper status", () => {
         },
         context,
       );
-      const emit = await bridgeChatEvents(page);
+      const stream = await bridgeChatEvents(page);
       const pending = Promise.withResolvers<undefined>(),
         release = Promise.withResolvers<undefined>();
       cleanups.push(async () => release.resolve(undefined));
@@ -2137,8 +2284,8 @@ describe("research helper status", () => {
       await alert.getByRole("button", { name: "Retry helper status" }).click();
       await pending.promise;
       try {
-        const snapshot = JSON.parse((await page.locator("html").getAttribute("data-chat-snapshot")) ?? "{}");
-        await emit("snapshot", { ...snapshot, run: { inputs: [1] }, inbox: [] });
+        const { view, earlier } = await stream.first();
+        await stream.snapshot(withLive(view, { run: RUN }), earlier);
         await note.getByText("stopped: its time limit passed", { exact: true }).waitFor();
         expect(await note.innerText()).toContain("Outcome unknown for mcp__web__search; check before repeating.");
         const oldResponse = page.waitForResponse((response) => response.url().endsWith(`/chats/${saved.id}/helpers`));
@@ -2150,7 +2297,7 @@ describe("research helper status", () => {
         expect(await note.innerText()).toContain("stopped: its time limit passed");
         expect(await note.innerText()).toContain("Outcome unknown for mcp__web__search");
         expect(await note.innerText()).not.toContain("working");
-        await emit("event", { type: "run_end" });
+        await stream.change(withLive(view, {}));
         await screenshot(page, `helper-recovery-${width}`);
         expect(mutations).toEqual([]);
         expect(provider.requests).toEqual([]);
@@ -2651,4 +2798,90 @@ describe("saved working goals", () => {
       }
     },
   );
+});
+
+describe("workspace state and project dialog", () => {
+  it("keeps each workspace's Changes badge, resolves chats this tab hasn't listed and refreshes on return", async () => {
+    const { pal, page, base, saved, errors } = await reviewFixture(1440);
+    const changes = page.getByRole("button", { name: "Changes", exact: true });
+    await expect.poll(() => changes.getAttribute("data-tip")).toBe("Changes · 2 files");
+    await changes.click();
+    await page.getByRole("complementary", { name: "Workspace panel" }).waitFor({ state: "detached" });
+
+    // Created elsewhere after this tab listed its projects.
+    const elsewhere = await pal.projects.create("elsewhere-project", { name: "Elsewhere" });
+    const fresh = await pal.chats.createChat("elsewhere-chat", { projectId: elsewhere.id, title: "Fresh" }, context);
+    expect(await pal.workspaces.info(fresh.id)).toMatchObject({ state: "ready" });
+    await navigateChat(page, fresh.id);
+    expect(await page.getByRole("heading", { name: "Chat not found" }).count()).toBe(0);
+    expect(await changes.getAttribute("data-tip")).toBe("Changes");
+    await navigateChat(page, saved.id);
+    expect(await changes.getAttribute("data-tip")).toBe("Changes · 2 files");
+
+    await page.evaluate(() => {
+      location.hash = "#/chat/not-a-chat";
+    });
+    await page.getByRole("heading", { name: "Chat not found" }).waitFor();
+
+    await pal.projects.create("returned-project", { name: "Arrived while away" });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByText("Arrived while away", { exact: true }).waitFor();
+
+    // An older listing that arrives late never replaces a newer one.
+    const fetched = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const delivered = Promise.withResolvers<undefined>();
+    let held = false;
+    await page.route(`${base}/api/projects`, async (route) => {
+      if (held) return route.continue();
+      held = true;
+      const response = await route.fetch();
+      fetched.resolve(undefined);
+      await release.promise;
+      await route.fulfill({ response });
+      delivered.resolve(undefined);
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await fetched.promise;
+    await pal.projects.create("newest-project", { name: "Newest listing" });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByText("Newest listing", { exact: true }).waitFor();
+    release.resolve(undefined);
+    await delivered.promise;
+    await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 200)));
+    expect(await page.getByText("Newest listing", { exact: true }).count()).toBe(1);
+    expect(errors).toEqual([]);
+  });
+
+  it("opens Create project as a native modal: initial focus, contained Tab, Escape and focus restore", async () => {
+    const { page, base, saved, errors } = await setup(1440);
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    const opener = page.getByRole("button", { name: "New project", exact: true });
+    await opener.click();
+    const dialog = page.getByRole("dialog", { name: "Create project" });
+    await dialog.waitFor();
+    expect(await dialog.evaluate((node) => node.matches(":modal"))).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.getAttribute("placeholder")))
+      .toBe("e.g. Platform");
+    // Tab never reaches the inert page behind it; past the last control, focus may only leave for the browser itself.
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press("Tab");
+      const outside = await page.evaluate(() => {
+        const active = document.activeElement;
+        return active !== null && active !== document.body && active.closest("dialog") === null;
+      });
+      expect(outside).toBe(false);
+    }
+    // Escape leaves the folder picker first, then closes the dialog.
+    await dialog.getByRole("radio", { name: /Use existing folder/ }).check();
+    await dialog.getByRole("button", { name: "Choose folder…", exact: true }).click();
+    await page.getByRole("dialog", { name: "Choose a folder" }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.getByRole("heading", { name: "Create project" }).waitFor();
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "detached" });
+    expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe("New project");
+    expect(errors).toEqual([]);
+  });
 });

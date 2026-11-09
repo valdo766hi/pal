@@ -14,6 +14,7 @@ type Lookup = {
 export const McpProvenance = defineDoc({
   kind: "pal.mcpProvenance",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "rewindable",
   fork: "asOf",

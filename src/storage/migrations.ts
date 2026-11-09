@@ -8,6 +8,28 @@ export type Migration = {
 };
 
 /** Pal's own `pal_` schema, versioned separately from Pi's. Append only: never edit or reorder an applied entry. */
+/**
+ * Refuse a store with work its release started, before a one-way Pi upgrade it could not reconcile afterwards. The
+ * release gate's unfinished-work query as of schemas 22 to 24, frozen here.
+ */
+async function refuseUnfinishedWork(transaction: SqliteExecutor): Promise<void> {
+  if ((await transaction.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pi_tasks'")) === undefined)
+    return;
+  const unfinished = await transaction.get<{ n: number }>(
+    "SELECT (SELECT count(*) FROM pi_tasks WHERE status <> 'terminal')" +
+      " + (SELECT count(*) FROM pi_submissions WHERE status IN ('queued', 'placed'))" +
+      " + (SELECT count(*) FROM pal_admissions WHERE state = 'admitting')" +
+      " + (SELECT count(*) FROM pal_chats WHERE state = 'provisioning')" +
+      " + (SELECT count(*) FROM pal_projects WHERE state = 'provisioning')" +
+      " + (SELECT count(*) FROM pal_workspaces WHERE state = 'provisioning')" +
+      " + (SELECT count(*) FROM pal_workspace_purges WHERE completed_at IS NULL)" +
+      " + (SELECT count(*) FROM pal_command_approvals WHERE state = 'pending')" +
+      " + (SELECT count(*) FROM pal_settings WHERE key GLOB 'schedule:*' AND CASE WHEN json_valid(value) THEN json_type(value, '$.pending') IS NOT 'null' ELSE 1 END) AS n",
+  );
+  if ((unfinished?.n ?? 0) > 0)
+    throw new Error("unfinished work needs its retained Pal release; finish it there before upgrading");
+}
+
 export const MIGRATIONS: readonly Migration[] = [
   {
     version: 1,
@@ -353,6 +375,47 @@ export const MIGRATIONS: readonly Migration[] = [
     up: async (transaction) => {
       await transaction.exec("SELECT 1");
     },
+  },
+  {
+    version: 23,
+    name: "pi_durable_schema_2",
+    // Pi 1.4 then migrates its tables one way, so older builds must refuse the store here. Work they started must
+    // finish under them first: afterwards they could not open the store to reconcile it.
+    up: refuseUnfinishedWork,
+  },
+  {
+    version: 24,
+    name: "blocked_admissions",
+    // An input whose attachments cannot be read stays admitting with its reason until the owner retries or withdraws
+    // it. SQLite cannot widen a CHECK in place, so the table is rebuilt with every row kept.
+    up: async (transaction) => {
+      await transaction.exec(`CREATE TABLE pal_admissions_next (
+        seq INTEGER PRIMARY KEY,
+        chat_id TEXT NOT NULL,
+        request_id TEXT NOT NULL,
+        digest TEXT NOT NULL,
+        intent TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('admitting', 'admitted', 'withdrawn')),
+        submission_id INTEGER,
+        created_at INTEGER NOT NULL,
+        folder_scope TEXT,
+        blocked TEXT CHECK (blocked IS NULL OR state = 'admitting'),
+        UNIQUE (chat_id, request_id),
+        CHECK ((state = 'admitted') = (submission_id IS NOT NULL))
+      ) STRICT`);
+      await transaction.exec(
+        "INSERT INTO pal_admissions_next (seq, chat_id, request_id, digest, intent, state, submission_id, created_at, folder_scope) SELECT seq, chat_id, request_id, digest, intent, state, submission_id, created_at, folder_scope FROM pal_admissions",
+      );
+      await transaction.exec("DROP TABLE pal_admissions");
+      await transaction.exec("ALTER TABLE pal_admissions_next RENAME TO pal_admissions");
+    },
+  },
+  {
+    version: 25,
+    name: "pi_durable_1_5_documents",
+    // Pi 1.5 keeps its tables but writes conversation documents and tasks at versions Pi 1.4 cannot read, so older
+    // builds must refuse the store here; as at schema 23, work they started must finish under them first.
+    up: refuseUnfinishedWork,
   },
 ];
 

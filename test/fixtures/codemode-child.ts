@@ -3,7 +3,8 @@
 // `resume` reopens the same store, lets the Harness finish, and prints the tool results.
 import assert from "node:assert/strict";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, Type } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { createRegistry, defineExtension, defineTool, Harness } from "@earendil-works/pi-durable";
 import { createPalCodemode, DEFAULT_CODEMODE_CAPS } from "../../src/pi/codemode.ts";
 import { openStore } from "../../src/storage/store.ts";

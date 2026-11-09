@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { Value } from "typebox/value";
-import { InputBody, MAX_INPUT_CHARS } from "../src/core/chats.ts";
+import { InputBody } from "../src/core/chats.ts";
+import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../src/protocol/limits.ts";
 import type { Admission, Upload } from "../web/src/lib/api.ts";
 import {
   ChatDraft,
   ChatDrafts,
-  MAX_DRAFT_CHARS,
+  type DraftStore,
   MAX_DRAFT_CHATS,
-  MAX_DRAFT_FILES,
   type PendingInput,
 } from "../web/src/lib/drafts.svelte.ts";
 
@@ -148,18 +148,19 @@ describe("per-chat draft ownership", () => {
   });
 
   it("matches host message limits and refuses oversized inserts without truncating the current draft", () => {
-    expect(MAX_DRAFT_CHARS).toBe(MAX_INPUT_CHARS);
-    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_DRAFT_FILES).fill("file") })).toBe(true);
-    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_DRAFT_FILES + 1).fill("file") })).toBe(false);
+    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_INPUT_ATTACHMENTS).fill("file") })).toBe(true);
+    expect(Value.Check(InputBody, { text: "x", attachments: Array(MAX_INPUT_ATTACHMENTS + 1).fill("file") })).toBe(
+      false,
+    );
     const draft = new ChatDraft("one");
-    draft.text = "x".repeat(MAX_DRAFT_CHARS);
+    draft.text = "x".repeat(MAX_INPUT_CHARS);
     expect(draft.append("extra")).toBe(false);
-    expect(draft.text).toHaveLength(MAX_DRAFT_CHARS);
-    draft.text = "y".repeat(MAX_DRAFT_CHARS + 1);
-    expect(draft.text).toBe("x".repeat(MAX_DRAFT_CHARS));
-    draft.attachments = Array.from({ length: MAX_DRAFT_FILES }, (_, i) => file(String(i)));
+    expect(draft.text).toHaveLength(MAX_INPUT_CHARS);
+    draft.text = "y".repeat(MAX_INPUT_CHARS + 1);
+    expect(draft.text).toBe("x".repeat(MAX_INPUT_CHARS));
+    draft.attachments = Array.from({ length: MAX_INPUT_ATTACHMENTS }, (_, i) => file(String(i)));
     draft.attachments = [...draft.attachments, file("overflow")];
-    expect(draft.attachments).toHaveLength(MAX_DRAFT_FILES);
+    expect(draft.attachments).toHaveLength(MAX_INPUT_ATTACHMENTS);
     expect(draft.error).toMatch(/nothing was added/);
   });
 
@@ -226,5 +227,146 @@ describe("per-chat draft ownership", () => {
     expect(() => old.snapshot(false)).toThrow();
     expect(drafts.open("one").text).toBe("");
     expect(drafts.open("one")).not.toBe(old);
+  });
+});
+
+class MemoryStore implements DraftStore {
+  readonly items = new Map<string, string>();
+  fail = false;
+  get length() {
+    return this.items.size;
+  }
+  key(index: number) {
+    return [...this.items.keys()][index] ?? null;
+  }
+  getItem(key: string) {
+    return this.items.get(key) ?? null;
+  }
+  setItem(key: string, value: string) {
+    if (this.fail) throw new Error("QuotaExceededError");
+    this.items.set(key, value);
+  }
+  removeItem(key: string) {
+    this.items.delete(key);
+  }
+}
+
+describe("drafts across reloads", () => {
+  it("restores text, files, busy mode, feedback and a saved send written before it was sent", () => {
+    const store = new MemoryStore();
+    const draft = new ChatDrafts(store).open("one");
+    draft.appendFeedback("Review feedback: tighten this", { ids: ["comment-one"], scope: "normal" });
+    draft.attachments = [file()];
+    draft.whenBusy = "steer";
+    const envelope = pending(draft);
+    expect(JSON.parse(store.getItem("pal.draft.one") ?? "{}").pending).toEqual(JSON.parse(JSON.stringify(envelope)));
+
+    const reloaded = new ChatDrafts(store).open("one");
+    expect(reloaded).toMatchObject({ text: "Review feedback: tighten this", whenBusy: "steer", recovered: true });
+    expect(reloaded.attachments).toEqual([file()]);
+    expect(reloaded.feedback).toEqual({ ids: ["comment-one"], scope: "normal" });
+    expect(reloaded.pending).toEqual(envelope);
+    expect(Object.isFrozen(reloaded.pending?.body)).toBe(true);
+    const restored = reloaded.pending;
+    if (restored === undefined) throw new Error("missing restored send");
+    reloaded.confirm(restored, ack(restored));
+    expect(reloaded.text).toBe("");
+    expect(reloaded.recovered).toBe(false);
+    expect(store.getItem("pal.draft.one")).toBeNull();
+  });
+
+  it("keeps a newer draft when the restored send turns out to be admitted", () => {
+    const store = new MemoryStore();
+    const draft = new ChatDrafts(store).open("one");
+    draft.text = "original";
+    pending(draft);
+    draft.text = "newer";
+    const reloaded = new ChatDrafts(store).open("one");
+    const restored = reloaded.pending;
+    if (restored === undefined) throw new Error("missing restored send");
+    reloaded.confirm(restored, ack(restored));
+    expect(reloaded.text).toBe("newer");
+    expect(reloaded.notice).toContain("newer draft is kept");
+    expect(new ChatDrafts(store).open("one")).toMatchObject({ text: "newer", pending: undefined, recovered: false });
+  });
+
+  it("forgets every saved draft on sign-out and ignores late writes", () => {
+    const store = new MemoryStore();
+    store.setItem("pal.theme", "dark");
+    const drafts = new ChatDrafts(store);
+    const one = drafts.open("one");
+    one.text = "first";
+    drafts.open("two").text = "second";
+    drafts.clear();
+    one.text = "written after sign-out";
+    expect([...store.items.keys()]).toEqual(["pal.theme"]);
+    expect(new ChatDrafts(store).open("one").text).toBe("");
+  });
+
+  it("keeps the draft in memory and says so while the tab can't save it", () => {
+    const store = new MemoryStore();
+    const draft = new ChatDrafts(store).open("one");
+    store.fail = true;
+    draft.text = "unsaved";
+    expect(draft).toMatchObject({ text: "unsaved", saved: false });
+    store.fail = false;
+    draft.text = "saved again";
+    expect(draft.saved).toBe(true);
+    expect(new ChatDrafts(store).open("one").text).toBe("saved again");
+  });
+
+  it("ignores saved data it didn't write", () => {
+    const store = new MemoryStore();
+    store.setItem("pal.draft.one", "not json");
+    store.setItem(
+      "pal.draft.two",
+      JSON.stringify({
+        v: 1,
+        revision: 1,
+        text: "x",
+        attachments: [],
+        whenBusy: "followUp",
+        feedback: [],
+        pending: { chatId: "elsewhere" },
+      }),
+    );
+    const valid = { v: 1, revision: 1, text: "x", attachments: [], whenBusy: "followUp", feedback: [] };
+    store.setItem("pal.draft.three", "null");
+    store.setItem("pal.draft.four", JSON.stringify({ ...valid, pending: null }));
+    expect(new ChatDrafts(store).open("one")).toMatchObject({ text: "", pending: undefined });
+    expect(store.getItem("pal.draft.one")).toBeNull();
+    for (const id of ["two", "three", "four"]) {
+      expect(new ChatDrafts(store).open(id)).toMatchObject({ text: "", pending: undefined });
+      expect(store.getItem(`pal.draft.${id}`)).toBeNull();
+    }
+  });
+
+  it("says a draft would be lost when the tab's storage can't be reached or read", () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+    Object.defineProperty(globalThis, "sessionStorage", {
+      configurable: true,
+      get() {
+        throw new DOMException("storage is disabled", "SecurityError");
+      },
+    });
+    try {
+      const draft = new ChatDrafts().open("one");
+      expect(draft.saved).toBe(true);
+      draft.text = "would be lost";
+      expect(draft.saved).toBe(false);
+      draft.text = "";
+      expect(draft.saved).toBe(true);
+    } finally {
+      if (original === undefined) Reflect.deleteProperty(globalThis, "sessionStorage");
+      else Object.defineProperty(globalThis, "sessionStorage", original);
+    }
+    const unreadable = new MemoryStore();
+    unreadable.getItem = () => {
+      throw new Error("read failed");
+    };
+    const draft = new ChatDrafts(unreadable).open("one");
+    draft.text = "kept only here";
+    expect(draft.saved).toBe(false);
+    expect(unreadable.items.size).toBe(0);
   });
 });

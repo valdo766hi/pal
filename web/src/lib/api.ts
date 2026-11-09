@@ -9,8 +9,8 @@ import type { McpServerInput, McpServerView as McpServer } from "../../../src/pi
 export type { McpAuth, McpState } from "../../../src/pi/mcp.ts";
 export type { McpServer, McpServerInput };
 
-import type { Admission } from "../../../src/core/chats.ts";
-export type { Admission };
+import type { Admission, BlockedInput, InputRecord } from "../../../src/core/chats.ts";
+export type { Admission, BlockedInput, InputRecord };
 import type { ScheduleInput, ScheduleNotice, ScheduleView } from "../../../src/core/schedules.ts";
 export type { ScheduleInput, ScheduleNotice, ScheduleView };
 export type { HelperView } from "../../../src/core/delegation.ts";
@@ -23,7 +23,6 @@ export type { RemovedWorkspace } from "../../../src/core/workspace-purge.ts";
 export type { ProjectMcp, ProjectMcpServer } from "../../../src/core/mcp-grants.ts";
 export type { GrantedFolder } from "../../../src/core/folders.ts";
 export type { Workspace, WorkspaceMode } from "../../../src/core/workspaces.ts";
-export type { MemoryItem, MemoryInput } from "../../../src/core/memory.ts";
 export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
 import type { WorkingState } from "../../../src/core/working-state.ts";
 export type WorkingStateInfo = Awaited<ReturnType<WorkingState["inspect"]>>;
@@ -61,9 +60,10 @@ export type ChatSummary = {
   workspace?: import("../../../src/core/workspaces.ts").Workspace | null;
   commandMode?: import("../../../src/core/approvals.ts").CommandMode;
   extensions: ExtensionScope["selected"];
+  blocked: BlockedInput | null;
 };
 
-const inWorkspace = (path: string, id?: string) => {
+export const inWorkspace = (path: string, id?: string) => {
   if (id === undefined) return path;
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}workspace=${encodeURIComponent(id)}`;
@@ -220,28 +220,9 @@ export const api = {
       "GET",
       `chats/${id}/context/prompt?offset=${offset}${request === undefined ? "" : `&request=${encodeURIComponent(request)}`}`,
     ),
-  memory: (id: string, workspace?: string) =>
-    call<{ items: import("../../../src/core/memory.ts").MemoryItem[] }>(
-      "GET",
-      inWorkspace(`projects/${id}/memory`, workspace),
-    ),
-  memorySave: (id: string, key: string, input: import("../../../src/core/memory.ts").MemoryInput, workspace?: string) =>
-    call<{ id: string }>("POST", `projects/${id}/memory`, { ...input, requestId: key, workspace }),
-  memoryCorrect: (
-    project: string,
-    id: string,
-    revision: number,
-    input: import("../../../src/core/memory.ts").MemoryInput,
-    workspace?: string,
-  ) => call<{ saved: true }>("PUT", `projects/${project}/memory/${id}`, { ...input, revision, workspace }),
-  memoryForget: (project: string, id: string, revision: number, workspace?: string) =>
-    call<{ forgotten: true }>("DELETE", `projects/${project}/memory/${id}`, { revision, workspace }),
-  memorySource: (project: string, id: string, workspace?: string) =>
-    call<Awaited<ReturnType<import("../../../src/core/memory.ts").ProjectMemory["source"]>>>(
-      "GET",
-      inWorkspace(`projects/${project}/memory/${id}/source`, workspace),
-    ),
-  memoryRebuild: (id: string) => call<{ rebuilt: true }>("POST", `projects/${id}/memory-index`),
+  /** A request to a plugin's own routes, `/api/plugins/<id>/<path>`. */
+  plugin: <T>(id: string, method: string, path: string, body?: unknown) =>
+    call<T>(method, `plugins/${id}/${path}`, body),
   projectFolders: (id: string, workspace?: string) =>
     call<{ folders: import("../../../src/core/folders.ts").GrantedFolder[] }>(
       "GET",
@@ -392,11 +373,20 @@ export const api = {
     }
     return data.upload;
   },
+  /** Send a blocked input again with the body Pal recorded for it. */
+  input: (id: string, requestId: string) =>
+    call<InputRecord>("GET", `chats/${id}/inputs/${encodeURIComponent(requestId)}`),
+  retryInput: (id: string, requestId: string) =>
+    call<{ admission: Admission }>("POST", `chats/${id}/inputs/${encodeURIComponent(requestId)}/retry`),
+  withdrawInput: (id: string, requestId: string) =>
+    call<{ withdrawn: true }>("POST", `chats/${id}/inputs/${encodeURIComponent(requestId)}/withdraw`),
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
   helpers: (chat: string) =>
     call<{ helpers: import("../../../src/core/delegation.ts").HelperView[] }>("GET", `chats/${chat}/helpers`),
   scheduler: () => call<Scheduler>("GET", "scheduler"),
   setScheduler: (enabled: boolean) => call<Scheduler>("PUT", "scheduler", { enabled }),
+  commandTimeout: () => call<{ seconds: number }>("GET", "command-timeout"),
+  setCommandTimeout: (seconds: number) => call<{ seconds: number }>("PUT", "command-timeout", { seconds }),
   schedules: (chat: string) =>
     call<{ enabled: boolean; notice: ScheduleNotice; schedules: ScheduleView[] }>("GET", `chats/${chat}/schedules`),
   /** Sending it is the owner's approval of the notice's cost and effects for every run. */

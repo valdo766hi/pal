@@ -4,7 +4,8 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
+import { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type {
@@ -22,15 +23,16 @@ import {
   type EntryRecord,
   type JsonObject,
   UsageDoc,
-  watchEvents,
 } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import type { Pal } from "../core/app.ts";
+import { MAX_TEXT_BYTES } from "../core/uploads.ts";
 import { readFileSnapshot, resolveProjectPath } from "../core/files.ts";
 import { gnuTimeout } from "../core/timeout.ts";
+import { currentView, history, liveDocs } from "../core/transcript.ts";
 import { evaluationBudgetExceeded, evaluationBudgetTurns, setEvaluationBudget } from "../pi/evaluation-budget.ts";
 import { CHATGPT_PROVIDER } from "../pi/chatgpt.ts";
-import type { Continuation } from "./tasks.ts";
+import type { Continuation, Task } from "./tasks.ts";
 
 export type ModelChoice = {
   readonly provider: string;
@@ -44,6 +46,14 @@ export type RunInput = {
   readonly continuations?: readonly Continuation[];
   readonly runId: string;
   readonly budget: Budget;
+  readonly requires?: NonNullable<Task["requires"]>;
+  /** Files the first input attaches; a `lost` one's stored copy is removed once that input is admitted. */
+  readonly attachments?: readonly {
+    readonly name: string;
+    readonly type: string;
+    readonly bytes: Buffer;
+    readonly lost?: true;
+  }[];
 };
 export type RunOutcome = {
   readonly status: "completed" | "budget_exceeded" | "harness_error";
@@ -140,20 +150,52 @@ export function palHarness(
 ): Harness {
   return {
     id: "pal",
-    version: 4,
+    version: 5,
     configuration: {
       model,
       approvals,
+      requirements: "research helpers and a longer command limit added as the task requires, for that run only",
+      attachments: "uploaded with the first input; a lost one's stored copy removed once it is admitted",
       tools: "Pal's selected capabilities through codemode",
       compaction: { method: "pi-native", policy: { ...DEFAULT_COMPACTION_POLICY } },
       recovery: "idle same-store close/reopen; no process-crash claim",
     },
     matched: true,
-    async run({ workspace, prompt, continuations = [], runId, budget }) {
+    async run({ workspace, prompt, continuations = [], runId, budget, requires = {}, attachments = [] }) {
       const expires = Date.now() + budget.seconds * 1000;
       const request = randomUUID();
       const project = await pal.projects.create(`eval-project-${request}`, { name: runId, folder: workspace });
-      const chat = await pal.chats.createChat(`eval-chat-${request}`, { projectId: project.id, title: runId }, context);
+      // A chat keeps the extensions selected when it is created, so required helpers are added just for its creation.
+      const selection = await pal.extensions.view();
+      const helpers = selection.catalog.find((item) => item.id === "helpers");
+      if (requires.helpers === true && helpers === undefined) throw new Error("this Pal build has no research helpers");
+      const reselect =
+        requires.helpers === true &&
+        helpers !== undefined &&
+        !selection.selected.some((choice) => choice.id === helpers.id);
+      if (reselect)
+        await pal.extensions.select({
+          selected: [...selection.selected, { id: "helpers", version: helpers.version }],
+          digest: selection.digest,
+        });
+      const chat = await pal.chats
+        .createChat(`eval-chat-${request}`, { projectId: project.id, title: runId }, context)
+        .finally(async () => {
+          if (reselect)
+            await pal.extensions.select({ selected: selection.selected, digest: (await pal.extensions.view()).digest });
+        });
+      const uploads = [];
+      for (const file of attachments) {
+        const admitted = await pal.uploads.admit(project.id, {
+          name: file.name,
+          size: file.bytes.length,
+          type: file.type,
+        });
+        uploads.push({
+          lost: file.lost === true,
+          upload: await pal.uploads.receive(admitted.id, Readable.from([file.bytes])),
+        });
+      }
       await pal.chats.configure(
         chat.id,
         { model: { provider: model.provider, modelId: model.modelId }, thinkingLevel: model.effort },
@@ -215,7 +257,10 @@ export function palHarness(
         return true;
       };
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const commandLimit = await pal.settings.commandTimeout();
+      const needed = Math.max(commandLimit, requires.commandSeconds ?? 0);
       try {
+        if (needed !== commandLimit) await pal.settings.setCommandTimeout(needed);
         await setEvaluationBudget(pal.harness, chat.conversationId, budget.turns, expires, context);
         const deadline = new Promise<"timeout">((done) => {
           timer = setTimeout(() => done("timeout"), Math.max(0, expires - Date.now()));
@@ -273,7 +318,20 @@ export function palHarness(
             if (await evaluationBudgetExceeded(pal.harness, chat.conversationId, context)) break;
           }
           if (input.owner) interventions++;
-          await pal.chats.submit(chat.id, `eval-input-${request}-${stage++}`, { text: input.prompt }, context);
+          const first = stage === 0;
+          await pal.chats.submit(
+            chat.id,
+            `eval-input-${request}-${stage++}`,
+            {
+              text: input.prompt,
+              ...(first && uploads.length > 0 ? { attachments: uploads.map(({ upload }) => upload.id) } : {}),
+            },
+            context,
+          );
+          // The model already has a lost attachment's inline part; reading the rest now finds it missing.
+          if (first)
+            for (const { lost, upload } of uploads)
+              if (lost) await rm(join(dirname(pal.store.path), "uploads", project.id, upload.id, "data"));
           if ((await Promise.race([conversation.waitForIdle(context), deadline])) === "timeout") {
             status = "budget_exceeded";
             await conversation.abort(context);
@@ -282,16 +340,12 @@ export function palHarness(
           }
           if (await evaluationBudgetExceeded(pal.harness, chat.conversationId, context)) break;
           if (stage <= continuations.length) {
-            const watch = await watchEvents(pal.harness, chat.conversationId, context);
-            const messages = watch.snapshot.entries.flatMap((entry) => entry.model ?? []) as Message[];
-            await watch.stop();
+            const messages = (await history(conversation, context)).flatMap((entry) => entry.model ?? []) as Message[];
             const last = messages.findLast((message) => message.role === "assistant");
             if (last?.stopReason === "error" || last?.stopReason === "aborted") break;
           }
         }
-        const watch = await watchEvents(pal.harness, chat.conversationId, context);
-        const compactions = watch.snapshot.compactions;
-        await watch.stop();
+        const compactions = liveDocs(await currentView(conversation, context, { min: 1 })).live.compactions ?? [];
         if (
           (await Promise.race([
             Promise.all(compactions.map((task) => pal.harness.waitForTask(task.taskId, context))),
@@ -308,6 +362,7 @@ export function palHarness(
       } finally {
         clearTimeout(timer);
         await stopApprovals();
+        if (needed !== commandLimit && pal.status === "ready") await pal.settings.setCommandTimeout(commandLimit);
       }
       const captured = connected && pal.status === "ready" ? await capture() : checkpoint;
       if (captured === undefined) throw new Error("the evaluation has no readable checkpoint");
@@ -386,16 +441,24 @@ export function baselineHarness(
   );
   return {
     id: "baseline-loop",
-    version: 4,
+    version: 5,
     configuration: {
       model: choice,
       approvals: "full",
       tools: TOOLS.map((tool) => tool.name),
+      commandSeconds: "30, or the task's command limit",
+      attachments: "the first input's inline text, as Pal's first 100 KiB; no reader for the rest",
       compaction: { method: "whole-active-context", maxTokens: summaryMaxTokens, cacheRetention: "none" },
       recovery: "private active-context JSON reload within controller; not process recovery",
     },
     matched: true,
-    async run({ workspace, prompt, continuations = [], budget }) {
+    async run({ workspace, prompt, continuations = [], budget, requires = {}, attachments = [] }) {
+      const commandSeconds = requires.commandSeconds ?? 30;
+      const offered = TOOLS.map((tool) =>
+        tool.name === "run"
+          ? { ...tool, description: tool.description.replace("(30 s limit)", `(${commandSeconds} s limit)`) }
+          : tool,
+      );
       const root = await realpath(workspace);
       const deadline = Date.now() + budget.seconds * 1000;
       const signal = AbortSignal.timeout(budget.seconds * 1000);
@@ -412,7 +475,13 @@ export function baselineHarness(
           return `wrote ${relative(root, target)}`;
         },
         run: async ({ command }) => {
-          const result = await shell(root, String(command), Math.min(30, (deadline - Date.now()) / 1000), {}, signal);
+          const result = await shell(
+            root,
+            String(command),
+            Math.min(commandSeconds, (deadline - Date.now()) / 1000),
+            {},
+            signal,
+          );
           const output = `exit ${result.exitCode}\n${result.output}`;
           if (result.exitCode !== 0 || result.timedOut) throw new Error(output);
           return output;
@@ -446,7 +515,28 @@ export function baselineHarness(
         messages.push(message);
         trace.push(message);
       };
-      record({ role: "user", content: prompt, timestamp: Date.now() });
+      record({
+        role: "user",
+        content:
+          attachments.length === 0
+            ? prompt
+            : [
+                { type: "text", text: prompt },
+                ...attachments.map((file) => {
+                  const head = file.bytes.subarray(0, MAX_TEXT_BYTES);
+                  const label = `name="${file.name}" type="${file.type}" size="${file.bytes.length}"`;
+                  const cut =
+                    file.bytes.length > head.length ? `\n[only the first ${head.length} bytes are shown]` : "";
+                  return {
+                    type: "text" as const,
+                    text: head.includes(0)
+                      ? `<attachment ${label}>binary file; its contents are not shown</attachment>`
+                      : `<attachment ${label}>\n${head.toString("utf8")}${cut}\n</attachment>`,
+                  };
+                }),
+              ],
+        timestamp: Date.now(),
+      });
       const assistant: AssistantMessage[] = [];
       let toolCalls = 0,
         failedToolCalls = 0,
@@ -490,7 +580,7 @@ export function baselineHarness(
           if (Date.now() >= deadline) return outcome("budget_exceeded", null);
           const reply = await models().completeSimple(
             model,
-            { systemPrompt: system, messages, tools: TOOLS },
+            { systemPrompt: system, messages, tools: offered },
             { signal, ...(choice.effort === "off" ? {} : { reasoning: choice.effort }) },
           );
           assistant.push(reply);
@@ -566,18 +656,20 @@ async function execute(
 export function externalHarness(id: string, command: string): Harness {
   return {
     id,
-    version: 2,
+    version: 3,
     configuration: {
       command,
       model: "uncontrolled",
       turns: "uncontrolled",
       permissions: "owner command",
       continuations: false,
+      attachments: false,
     },
     matched: false,
-    async run({ workspace, prompt, continuations = [], budget }) {
+    async run({ workspace, prompt, continuations = [], budget, attachments = [] }) {
       try {
         if (continuations.length !== 0) throw new Error("this external command cannot deliver continuations");
+        if (attachments.length !== 0) throw new Error("this external command cannot receive attachments");
         const result = await shell(workspace, command, budget.seconds, { PAL_EVAL_PROMPT: prompt });
         let status: RunOutcome["status"] = "completed";
         let error: string | null = null;

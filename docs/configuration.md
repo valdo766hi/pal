@@ -34,7 +34,8 @@ The Nix package installs the same program as `pal`.
 `pal doctor` exits 1 for a broken core and 0 when only optional prerequisites are missing. It checks native modules,
 Git/GNU timeout/Bash versions, and data-directory permissions and writability without creating the directory. A
 running store is reported as busy; its schema is not inspected. A stopped store is checked for a readable Pal schema,
-not fully integrity-checked or migrated. Doctor neither reads credentials nor contacts model providers, starts a
+not fully integrity-checked or migrated. An implementation it can't verify is reported with Pal's reason, such as
+the limit a source install exceeded, or only the system error's code. Doctor neither reads credentials nor contacts model providers, starts a
 browser, or activates a release. Browser program checks do not prove namespace, egress or user-scope protection;
 those remain mandatory at browser start. Missing macOS browser/release adapters are reported as unavailable, not
 parity. Review paths and other metadata before sharing the report.
@@ -171,6 +172,9 @@ Settings → **MCP servers**:
 
 - **Command approval** is set per chat with the composer's **Ask** / **Full access** pill. Ask is the default for
   every chat.
+- **Longest agent command** (Settings → General) bounds one command the model runs directly: 2 minutes by default,
+  at most 30. Commands from its scripts stay within 2 minutes. Stop ends a command and its process group. A command
+  cut off by a restart is reported as interrupted and never rerun; GNU `timeout` still ends it at its deadline.
 - **Workspace mode** is chosen when you start a chat:
   - **Local** works in the project folder.
   - **Worktree** works in a separate Git worktree from `HEAD`.
@@ -180,7 +184,8 @@ Settings → **MCP servers**:
 
 ## Research helpers
 
-Off unless selected in Settings → Extensions for new chats. A helper answers one self-contained research question
+Off unless selected in Settings → Extensions for new chats. The model calls helpers directly, not from a script, so a
+waiting helper holds no script worker and has its own deadline. A helper answers one self-contained research question
 using the parent chat's model/reasoning and admitted folder scope, with current project internet-tool grants.
 It cannot write files, run commands, use the browser or start helpers. The file tools are read-only; granted internet
 tools can still have external effects. Each helper uses additional provider requests and quota, not a free model.

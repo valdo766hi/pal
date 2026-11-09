@@ -40,6 +40,12 @@ function stats(values: ObjectValue[], field: string) {
   if (field === "rssBytes") assert(observed.every(Number.isSafeInteger), "Invalid RSS byte count.");
   return distribution(observed);
 }
+/** A startup report's separately measured first launch, validated like a sample. */
+function firstLaunchMs(report: ObjectValue) {
+  const launch = object(report.firstLaunch);
+  stats([launch], "rssBytes");
+  return stats([launch], "readyMs").p50;
+}
 function host(report: ObjectValue) {
   const value = object(report.host);
   const result = {
@@ -108,10 +114,13 @@ export function checkPerformance(mode: Mode, input: Record<string, unknown>) {
   };
   const unexecuted: string[] = [];
   if (mode === "core") {
-    const baseline = use("startup-baseline", "provider-unconfigured-http-startup", 2);
-    const candidate = use("startup-candidate", "provider-unconfigured-http-startup", 2);
+    const baseline = use("startup-baseline", "provider-unconfigured-http-startup", 3);
+    const candidate = use("startup-candidate", "provider-unconfigured-http-startup", 3);
     const before = rows(baseline),
       after = rows(candidate);
+    // The one-time first launch is held to the runner's own startup deadline, never folded into the samples.
+    firstLaunchMs(baseline);
+    add("startup.firstLaunch.readyMs", firstLaunchMs(candidate), 5000);
     add(
       "startup.readyMs.p50",
       stats(after, "readyMs").p50,

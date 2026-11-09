@@ -41,15 +41,24 @@ parses the command line (see [configuration](configuration.md)) and starts the H
 A chat is a Pal record mapped to a Pi conversation (`src/core/chats.ts`).
 
 1. `POST /api/chats/:id/inputs` carries a client request ID. Admission is bound to that ID and a digest of the
-   body, so a retried request is admitted once, and a different body under the same ID is refused.
+   body, so a retried request is admitted once, and a different body under the same ID is refused. The tab saves the
+   request in `sessionStorage` before sending it; after a reload, `GET /api/chats/:id/inputs/:request` says whether
+   Pal admitted, holds or withdrew it, or never received it, from the same admission records.
 2. Pi admits the input. The response is sent only after admission is durable, then a generation task streams the
-   model's answer.
-3. The model has one tool, `codemode`. Its script runs in a QuickJS worker with wall-clock, memory, output and
-   call-count caps, and calls host tools as **nested durable tasks**.
-4. Before a tool runs, `beforeTool` hooks decide whether it may: the grant policy (`src/pi/codemode.ts`), then
-   command approval for shell commands (`src/core/approvals.ts`). Pi then records the tool's intent and executes it.
-5. Events reach the page over server-sent events (`GET /api/chats/:id/events`): a snapshot, then one batch per
-   commit. Reconnecting gets a fresh snapshot, so another device can pick up a running chat.
+   model's answer. A recorded input whose attachment is missing or damaged is not sent without it: it holds back
+   only its own chat's later inputs, across restarts, until the owner retries it with its recorded body or
+   withdraws it. A storage failure, whose outcome is unknown, stops all admission until restart.
+3. The model calls `codemode`, plus the few tools on the kernel's direct list (`MODEL_TOOLS`): research helpers
+   when selected, and `shell_run` for a command longer than a script allows. A script runs in a QuickJS worker
+   with wall-clock, memory, output and call-count caps, and calls host tools as **nested durable tasks**. A direct
+   call holds no script worker or script deadline.
+4. Before a tool runs, direct or nested, `beforeTool` hooks decide whether it may: the grant policy (`src/pi/codemode.ts`),
+   a shell command's timeout limit (`src/core/execution.ts`), then command approval for shell commands
+   (`src/core/approvals.ts`). Pi then records the tool's intent and executes it.
+5. The chat reaches the page over server-sent events (`GET /api/chats/:id/events`): a snapshot of Pi's conversation
+   view (its newest entries and run state) with the history before it, then each change to that view as Chord ops.
+   The page keeps every entry it was sent. A reader that falls further behind than the view holds gets a new
+   snapshot, and reconnecting gets one too, so another device can pick up a running chat.
 
 After a crash or restart, Pi resumes from its journal. A Code Mode script replays without repeating calls that
 already finished. A tool marked replay-safe may run again. One marked unsafe, such as a shell command or a file
@@ -69,7 +78,9 @@ grants and approvals.
 - `src/core/workspaces.ts`, `worktree-files.ts`: each chat gets a fixed workspace in Local, Worktree or Read-only
   mode. A worktree is materialized from committed `HEAD` without running hooks, filters or network access.
 - `src/core/folders.ts`: read-only reference folders, bound to a run when it starts.
-- `src/core/uploads.ts`: device uploads stored under the data directory, up to 25 MiB each.
+- `src/core/uploads.ts`: device uploads stored under the data directory, up to 25 MiB each. A message gives the
+  model an image up to 8 MiB or a text file's first 100 KiB, and its transcript entry records which. `files_attachment`
+  reads more lines of an attachment the same chat sent, streamed through its recorded length and hash.
 
 ## Instruction sources
 
@@ -144,7 +155,7 @@ claim an atomic filesystem or a hostile-host sandbox.
 | shell     | `shell_run`                                                                           | `src/core/execution.ts`   |
 | instructions | `instructions_scope` | `src/core/instructions.ts` |
 | skills | `skills_search`, `skills_read` | `src/core/skills.ts` |
-| memory    | `memory_search`                                                                       | `src/core/memory.ts`      |
+| memory    | `memory_search`                                                                       | `plugins/memory/memory.ts` |
 | browser   | `browser_observe`, `browser_act` (only while the owner has handed control over)       | `src/pi/browser-tools.ts` |
 | MCP       | one tool per approved server tool, such as Exa search or Context7 docs                | `src/pi/mcp-tools.ts`     |
 
@@ -163,8 +174,9 @@ folders and away from Pal's data. Guidance readers separately authorize only the
 
 ## Browser
 
-`src/core/browser.ts` starts one Chromium per project on demand, using the headless shell that matches
-`playwright-core`.
+`src/core/browser.ts` starts one Chromium per project on demand, driven by `playwright-core`. It uses Chrome for
+Testing's stable headless shell pinned in `nix/package.nix`, not the older build Playwright bundles, because it renders
+untrusted pages; update that pin at each Chrome security release.
 
 - **Sandbox.** It runs inside bubblewrap with every namespace unshared. It sees only the read-only Nix store, a
   private `/tmp` and its own profile, and it has no network.
@@ -190,41 +202,60 @@ core. Capabilities belong in contributions around that core: agent tools, panels
 extras. The goal is for built-in and community extensions to follow the same model, bundled into reusable packages
 people can create, customize and share.
 
-The current catalog is compiled into Pal, not a public plug-in SDK or a downloadable package loader. Custom MCP
-servers are today's way to add tools without rebuilding Pal. Extensions never bypass host policy, and in-process
-code requires full application-code trust.
+Plugins are compiled into Pal; there is no downloadable package or runtime loader. Skills add procedures and MCP
+servers add tools without a rebuild. [Adding capabilities](development.md#adding-capabilities) compares the three
+and walks through writing a plugin.
 
-`src/capabilities/contract.ts` is the first internal compiled-capability adapter. The kernel retains authentication,
-one database owner, credentials, grants, approvals, native task/replay policy and release verification. A capability
-supplies a bounded manifest and a factory, not registry access or replacement kernel hooks. Its manifest declares
-identity/version, compatible capability-API range, Code Mode namespace, tool names/replay/output bounds, permissions,
-named precompiled panels and the existing new-chat selection setting. Factories may dispose ephemeral resources after
-durable work stops; failed opens must release their own unfinished acquisitions. Previously opened contributions are
-disposed in reverse order, once, including partial-startup failures.
+**Trust model.** A plugin is trusted code in Pal's process and can use any Node API. Its declared permissions,
+callers and tables are policy that the kernel checks at its boundaries, not a sandbox or proof of read-only behavior.
+Review a plugin as Pal's own code. Effectful adapters require further reviewed kernel integration, not a permission
+string supplied by a skill or manifest.
 
-Memory is composed through `src/capabilities/memory.ts`; `src/capabilities/compiled.ts` is the build-time selection.
-Removing its entry removes its service, native tools and namespace, not saved data or core Context/guidance inspection.
+`src/capabilities/contract.ts` is the plugin contract.
+
+- **The kernel keeps** authentication, one database owner, credentials, grants, approvals, native task/replay policy
+  and release verification. Plugins never get registry access, replacement kernel hooks, the `Pal` object or the
+  database itself.
+- **A plugin** in `plugins/<id>/` supplies a manifest (`manifest.ts`, plain data the web build also reads) and a
+  factory (`server.ts`). The manifest declares identity and version, the compatible capability-API range, catalog
+  order, an optional Code Mode namespace, tools with their callers, replay, output bounds and permissions, the tables
+  its SQL may change or read, and interface components. A tool the model may call directly must already be on the
+  kernel's direct list; the plugin cannot add itself.
+- **Host services:** folder leases, Pi storage, its own settings (JSON values kept under `plugin:<id>:` in
+  `pal_settings`), SQL limited to its declared tables and owner requests under `/api/plugins/<id>/`.
+- **Permissions:** `project.read` is the only declared permission; with it, the kernel checks live folder authority
+  around every native tool execution. It also verifies each tool's declared callers and replay.
+- **Lifecycle:** factories may dispose ephemeral resources after durable work stops; failed opens must release their
+  own unfinished acquisitions. Opened plugins are disposed in reverse order, once, including after a partial-startup
+  failure.
+
+`plugins/index.ts` is the build-time selection, one line per plugin with a server part: memory and research helpers
+today. Add a reviewed plugin's line and rebuild; no runtime directory scan or package install occurs. Removing a line
+removes the plugin's service, native tools, namespace and interface, not its saved data or core Context/guidance
+inspection. Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins.
+
+Interface components are bundled from `plugins/<id>/ui/` at build time, never downloaded. Settings tabs come from
+every plugin in the build; Context sections, workspace panels after the kernel's, composer pieces and renderers for
+the plugin's own `pal.<id>` entries appear only in chats that selected it. In a build without a plugin a chat used,
+those entries show as a short note, and a component that fails to load says so in its place. A browser plugin such as
+pets has no server part or inventory line: only Settings tabs and composer pieces that every chat shows, switched in
+the browser.
+
 Unavailable saved defaults remain visible for explicit removal. Existing chats never silently adopt another capability
 version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid
 new-chat defaults are refused before recording provisioning. Existing creation/admission receipts still deduplicate;
 changing another default never silently upgrades a version pin. Unfinished work also blocks startup under a changed
 release or compiled catalog. Request inspection joins additive `pal.capabilities` identity receipts to the unchanged
 `pal.extensions` wire records, keeping older inspectors readable. Historical records without those identities stay
-historical, without invented digests.
+historical, without invented digests. The implementation digest binds the manifest to the verified **whole Pal
+release**, not an independently upgradable package.
 
-The implementation digest binds the manifest to the verified **whole Pal release**, not an independently upgradable
-package. `project.read` is this first adapter's only declared permission; the kernel checks live folder authority around
-every native tool execution, requires Code Mode-only callers and verifies replay declarations. Trusted source can still
-use Node APIs: declarations are not a sandbox or proof of read-only behavior. Effectful adapters require further reviewed
-kernel integration, not a permission string supplied by a skill or manifest.
+`test/capabilities.test.ts` exercises the contract and composition boundaries; `test/e2e/plugins.test.ts` adds the
+test plugin in `test/fixtures/plugins/example/` to a copy of the source and uses it in a browser.
 
-Copy `src/capabilities/example.ts` for a tiny opt-in bounded echo tool. Add the reviewed definition to the compiled list
-and rebuild; no runtime directory scan or package install occurs. Its new-chat switch and manifest/identity appear in
-Settings; Context inspects request pins. The optional panel declaration references an already compiled named panel,
-not executable or downloaded UI. `test/capabilities.test.ts` exercises the contract and composition boundaries.
-
-- `src/core/extensions.ts`: built-in contributions (files, shell, memory, browser, compact) can be switched for new
-  chats. Each chat freezes its selection and the implementation versions it ran with. Compact output is opt-in: in
+- `src/core/extensions.ts`: the kernel's contributions (files, shell, browser, compact) and the plugins (memory,
+  research helpers) can be switched for new chats. The helpers plugin offers `agents_delegate`; helper conversations,
+  their links and budget hooks stay in the kernel (`src/core/delegation.ts`). Each chat freezes its selection and the implementation versions it ran with. Compact output is opt-in: in
   a chat that selected it, `shell_run` asks `rtk rewrite` for an equivalent before recording its intent, runs that
   instead and returns it as `executed`, but only for calls no owner approved and whose output reaches the model.
 - `pal check-release` (`src/core/release-check.ts`): builds and tests a candidate Git worktree with the running

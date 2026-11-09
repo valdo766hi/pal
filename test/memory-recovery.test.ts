@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it } from "vitest";
 import { openPal } from "../src/core/app.ts";
+import { projectMemory } from "../plugins/memory/server.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -47,9 +48,11 @@ describe("memory projection recovery", () => {
     for (const table of ["pal_memory", "pal_memory_versions", "pal_memory_fts"])
       expect(await pal.store.database.get(`SELECT count(*) AS n FROM ${table}`)).toEqual({ n: expected });
     const input = { title: "Journal", body: "Use SQLite", source: { kind: "owner" } };
-    const id = await pal.memory.save(project, "recovery-memory-note", input, context);
-    expect(await pal.memory.save(project, "recovery-memory-note", input, context)).toBe(id);
-    expect(await pal.memory.list(project, context)).toMatchObject([{ id, revision: 1, body: "Use SQLite" }]);
+    const id = await projectMemory(pal.capabilities).save(project, "recovery-memory-note", input, context);
+    expect(await projectMemory(pal.capabilities).save(project, "recovery-memory-note", input, context)).toBe(id);
+    expect(await projectMemory(pal.capabilities).list(project, context)).toMatchObject([
+      { id, revision: 1, body: "Use SQLite" },
+    ]);
     expect(await pal.store.database.all("SELECT id FROM pal_memory_fts WHERE pal_memory_fts MATCH 'SQLite'")).toEqual([
       { id },
     ]);

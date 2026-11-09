@@ -28,7 +28,7 @@ const runtime: BrowserRuntime | undefined =
       ? undefined
       : { ...packaged, scope: null };
 const cleanups: (() => unknown)[] = [];
-const requests: { path: string; cookie: string }[] = [];
+const requests: { path: string; cookie: string; agent: string }[] = [];
 let site: number;
 
 beforeAll(async () => {
@@ -36,7 +36,7 @@ beforeAll(async () => {
     throw new Error("run via nix build .#checks.<system>.e2e, which provides the browser runtime");
   const server = createServer((request, response) => {
     const path = request.url ?? "/";
-    requests.push({ path, cookie: request.headers.cookie ?? "" });
+    requests.push({ path, cookie: request.headers.cookie ?? "", agent: request.headers["user-agent"] ?? "" });
     if (path.startsWith("/external-effect/")) return;
     response.setHeader("content-type", "text/html");
     if (path === "/login") response.setHeader("set-cookie", "session=fixture; Max-Age=3600; Path=/; HttpOnly");
@@ -258,7 +258,7 @@ describe("agent browser", () => {
   it("requires explicit per-chat control and excludes owner inputs, hidden text and page prototypes", async () => {
     const { pal, project, chat, client, handoff, conversation } = await agentFixture();
     const other = await pal.chats.createChat("browser-other-chat", { projectId: project.id }, context);
-    expect((await conversation.agent(context)).tools.map((tool) => tool.name)).toEqual(["codemode"]);
+    expect((await conversation.agent(context)).tools.map((tool) => tool.name)).toEqual(["codemode", "shell_run"]);
     expect(pal.browsers.allows(chat.conversationId)).toBe(false);
     await expect(pal.browsers.observe(chat.conversationId)).rejects.toMatchObject({ code: "browser_not_granted" });
     client.send({ type: "mode", mode: "private-login" });
@@ -569,6 +569,11 @@ describe("owner browser", () => {
     const navigation = requests.length;
     owner.send({ type: "navigate", url: `http://127.0.0.1:${site}/` });
     await until(() => requests.slice(navigation).some((request) => request.path === "/ready/"), Boolean, "page parsed");
+    // The packaged Chrome for Testing build, not the older one playwright-core bundles; the agent string names only its
+    // major version.
+    expect(requests.find((request) => request.path === "/ready/")?.agent).toContain(
+      `HeadlessChrome/${process.env.PAL_EXPECTED_CHROME?.split(".")[0]}.`,
+    );
     await until(
       () => owner.frames.at(-1),
       (frame) => frame?.[0] === 0xff && frame[1] === 0xd8,

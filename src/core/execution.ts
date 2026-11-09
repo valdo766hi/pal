@@ -3,7 +3,14 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, isAbsolute, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
-import { defineExtension, defineTool, type ConversationId, type TaskId } from "@earendil-works/pi-durable";
+import {
+  defineExtension,
+  defineTool,
+  hook,
+  ToolTask,
+  type ConversationId,
+  type TaskId,
+} from "@earendil-works/pi-durable";
 import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
 import type { Context } from "@earendil-works/chord";
 import { Type } from "typebox";
@@ -11,6 +18,14 @@ import { gnuTimeout } from "./timeout.ts";
 import type { WorkingChecks } from "./working-checks.ts";
 
 const MAX_OUTPUT = 64 * 1024;
+/** Seconds: a command's default timeout, and the most one called from a script may ask for. */
+export const COMMAND_TIMEOUT = 120;
+/** Seconds: the most the owner may allow one command the model calls directly. */
+export const MAX_COMMAND_TIMEOUT = 1800;
+export const CommandTimeoutBody = Type.Object(
+  { seconds: Type.Integer({ minimum: COMMAND_TIMEOUT, maximum: MAX_COMMAND_TIMEOUT }) },
+  { additionalProperties: false },
+);
 export const SHELL_NAMESPACE: CodemodeNamespace = {
   name: "shell",
   prefix: "shell_",
@@ -174,8 +189,8 @@ export class HostCommands {
     onOutput?: (text: string) => void,
   ): Promise<ShellResult> {
     if (this.#running.size >= 2) throw new Error("at most two host commands may run at once");
-    if (!(timeout > 0 && timeout <= 120) || command.length > 16_384 || command.includes("\0"))
-      throw new Error("invalid command or timeout (maximum 120 seconds)");
+    if (!(timeout > 0 && timeout <= MAX_COMMAND_TIMEOUT) || command.length > 16_384 || command.includes("\0"))
+      throw new Error(`invalid command or timeout (maximum ${MAX_COMMAND_TIMEOUT} seconds)`);
     const controller = new AbortController();
     const active = signal === undefined ? controller.signal : AbortSignal.any([signal, controller.signal]);
     const job = this.#execute(cwd, command, timeout, active, onOutput);
@@ -289,17 +304,38 @@ export function shellTools(options: {
   /** Approved calls must stay exact, even if the chat later switches to Full access. */
   compact?: (id: ConversationId, task: TaskId, context: Context) => Promise<boolean>;
   verification?: Pick<WorkingChecks, "start" | "finish">;
+  /** The owner's current maximum timeout, in seconds, for a command the model calls directly. */
+  limit?: () => Promise<number>;
 }) {
   return defineExtension({
     name: "pal.shell",
+    // Installed before command approval, so the owner is never asked for a command its limit refuses.
+    hooks: [
+      hook(ToolTask, {
+        beforeTool: async (call) => {
+          const timeout = call.arguments.timeout;
+          if (call.name !== "shell_run" || typeof timeout !== "number") return undefined;
+          if (call.parent !== undefined)
+            return timeout > COMMAND_TIMEOUT
+              ? {
+                  block: `a command from a script may take at most ${COMMAND_TIMEOUT} seconds; call shell_run directly for a longer one. Nothing was run.`,
+                }
+              : undefined;
+          const limit = (await options.limit?.()) ?? COMMAND_TIMEOUT;
+          return timeout > limit
+            ? { block: `the owner allows one command at most ${limit} seconds. Nothing was run.` }
+            : undefined;
+        },
+      }),
+    ],
     tools: [
       defineTool({
         name: "shell_run",
         description:
-          "Run a trusted host command in the project folder. Not sandboxed; clean environment, bounded output, 120-second maximum. Never access Pal secrets. An interrupted command must not be blindly retried. When `executed` is present, the command ran as that rtk equivalent and its output is condensed; if the result is unusable, run `rtk bypass <command>` for the unfiltered output. Output sent to files or other programs is never condensed. Optional check binds this execution to an owner goalRevision and zero-based acceptance criterion; working_checks shows its host receipt and source freshness.",
+          "Run a trusted host command in the project folder. Not sandboxed; clean environment, bounded output. The timeout is 120 seconds by default and at most that from a script; call this tool directly for a longer command, up to the owner's limit. Never access Pal secrets. An interrupted command must not be blindly retried. When `executed` is present, the command ran as that rtk equivalent and its output is condensed; if the result is unusable, run `rtk bypass <command>` for the unfiltered output. Output sent to files or other programs is never condensed. Optional check binds this execution to an owner goalRevision and zero-based acceptance criterion; working_checks shows its host receipt and source freshness.",
         parameters: Type.Object({
           command: Type.String({ minLength: 1, maxLength: 16_384 }),
-          timeout: Type.Optional(Type.Number({ minimum: 0.01, maximum: 120 })),
+          timeout: Type.Optional(Type.Number({ minimum: 0.01, maximum: MAX_COMMAND_TIMEOUT })),
           check: Type.Optional(
             Type.Object(
               { goalRevision: Type.Integer({ minimum: 1 }), criterion: Type.Integer({ minimum: 0, maximum: 7 }) },
@@ -307,7 +343,7 @@ export function shellTools(options: {
             ),
           ),
         }),
-        callers: ["tools"],
+        callers: ["model", "tools"],
         replay: "unsafe",
         outputLimits: { maxBytes: MAX_OUTPUT, maxLines: 2000 },
         structuredOutputSchema: Type.Object({
@@ -347,7 +383,7 @@ export function shellTools(options: {
             const ran = await options.commands.run(
               cwd,
               executed ?? args.command,
-              args.timeout ?? 120,
+              args.timeout ?? COMMAND_TIMEOUT,
               context.abortSignal,
               (text) => api.output(text),
             );

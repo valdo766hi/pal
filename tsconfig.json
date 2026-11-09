@@ -17,5 +17,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "test", "*.config.ts"]
+  "include": ["src", "test", "plugins", "*.config.ts"],
+  "exclude": ["plugins/*/ui"]
 }

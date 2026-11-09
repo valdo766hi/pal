@@ -1,5 +1,17 @@
-// Reconnect replaces live state from a snapshot; event offsets are not replayable.
-import type { ToolEventCall, ToolSlot } from "@earendil-works/pi-durable";
+// Reconnect replaces live state from a snapshot; the changes after it apply to the view it carried.
+import { applyImmutable, type Decoder, decoder } from "@earendil-works/chord/delta";
+import type {
+  CompactionFailure,
+  CompactionStatus,
+  ConversationView,
+  EntryRecord,
+  InboxItem,
+  InboxState,
+  LiveState,
+  NestedToolSlot,
+  RunFailureReason,
+  ToolSlot,
+} from "@earendil-works/pi-durable";
 import type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
 import type { McpReceipt } from "../../../src/pi/mcp-source.ts";
 export type { CommandApproval, McpReceipt };
@@ -32,7 +44,14 @@ export type NestedCall = {
   error?: string;
 };
 
-export type Attachment = { id: string; name: string; size: number; mediaType: string };
+export type Attachment = {
+  id: string;
+  name: string;
+  size: number;
+  mediaType: string;
+  /** What of it the model got with its message; absent on drafts and older messages. */
+  received?: import("../../../src/core/uploads.ts").Received;
+};
 
 export type ShellReceipt = {
   callId: string;
@@ -58,39 +77,29 @@ export type Entry = {
   };
 };
 
-type Change =
-  | { type: "text_start" | "thinking_start" | "toolcall_start" | "block"; contentIndex: number; block: Block }
-  | { type: "text_delta" | "thinking_delta"; contentIndex: number; delta: string }
-  | { type: "toolcall_delta"; contentIndex: number }
-  | { type: "message"; message: Message };
+/** What the server sends first, and again whenever its view no longer continues what the client has. */
+export type Snapshot = { view: ConversationView; earlier: readonly EntryRecord[] };
 
-type Snapshot = {
-  entries: Entry[];
-  run?: unknown;
-  tools?: readonly ToolSlot[];
-  generation?: { message?: Message; retry?: { at: number; error: string } };
-  inbox: { id: number; mode: "steer" | "followUp" }[];
-};
-
-type AgentEvent =
-  | { type: "run_start" | "run_end" }
-  | ({ type: "tool_execution_start" | "tool_execution_end" } & ToolEventCall)
-  | { type: "entry_appended"; entry: Entry }
-  | { type: "message_start"; message: Message }
-  | { type: "message_update"; changes: Change[] }
-  | { type: "message_end"; entry: Entry }
-  | { type: "inbox_update"; items: { id: number; mode: "steer" | "followUp" }[] }
-  | { type: "auto_retry_start"; at: number; errorMessage: string }
-  | { type: "auto_retry_end" }
-  | { type: string };
+const NONE: readonly never[] = Object.freeze([]);
+/** A run that ended this way already shows: the owner stopped it, a reset began a new context, or the answer is an error. */
+const SHOWN: ReadonlySet<RunFailureReason> = new Set(["aborted", "reset", "model_error"]);
 
 export class ChatStream {
-  entries: Entry[] = $state([]);
-  partial: Message | undefined = $state();
+  /** Every entry the client has, oldest first: the snapshot's history, then each one the view's window adds. */
+  entries: readonly Entry[] = $state.raw([]);
+  partial: Message | undefined = $state.raw();
   running = $state(false);
   tools: readonly ToolSlot[] = $state.raw([]);
-  inbox: { id: number; mode: "steer" | "followUp" }[] = $state([]);
-  retry: { at: number; error: string } | undefined = $state();
+  /** Calls the running tools made, such as a script's tool calls, related by native call and task IDs. */
+  nested: readonly NestedToolSlot[] = $state.raw([]);
+  inbox: readonly InboxItem[] = $state.raw([]);
+  retry: { at: number; error: string } | undefined = $state.raw();
+  /** When Pal next asks the provider for a deferred response. */
+  deferredPoll: number | undefined = $state();
+  compactions: readonly CompactionStatus[] = $state.raw([]);
+  compactionFailure: CompactionFailure | undefined = $state.raw();
+  /** Why the latest run ended without an answer, when nothing else shows it; never shown as success. */
+  failure: { reason: RunFailureReason; message: string } | undefined = $state.raw();
   connected = $state(false);
   loaded = $state(false);
   /** The browser retries a dropped stream by itself; one the server refused stays closed until replaced. */
@@ -98,6 +107,8 @@ export class ChatStream {
   mode: CommandMode | undefined = $state();
   approvals: readonly CommandApproval[] = $state([]);
   #source: EventSource | undefined;
+  #view: ConversationView | undefined;
+  #decoder: Decoder = decoder();
 
   constructor(chatId: string) {
     const source = new EventSource(`/api/chats/${chatId}/events`);
@@ -114,7 +125,7 @@ export class ChatStream {
       });
     }
     listen<Snapshot>("snapshot", (snapshot) => this.#reset(snapshot));
-    listen<AgentEvent>("event", (event) => this.#apply(event));
+    listen<unknown[]>("change", (ops) => this.#change(ops));
     listen<ApprovalView>("approvals", (view) => this.showApprovals(view));
     source.addEventListener("open", () => {
       this.connected = true;
@@ -135,74 +146,59 @@ export class ChatStream {
     this.approvals = view.approvals;
   }
 
-  #reset(snapshot: Snapshot): void {
-    this.entries = snapshot.entries;
-    this.running = snapshot.run !== undefined;
-    this.tools = snapshot.tools ?? [];
-    this.partial = snapshot.generation?.message;
-    this.retry = snapshot.generation?.retry;
-    this.inbox = snapshot.inbox;
+  /** Snapshots are authoritative: whatever one leaves out is cleared. */
+  #reset({ view, earlier }: Snapshot): void {
+    this.#decoder = decoder();
+    this.#view = view;
+    // SAFETY: Pi entries are read through Pal's narrower view: `model` holds Pi's own messages, and every `data` field the
+    // view reads is checked against the entry kind that writes it (pal.shell, pal.mcp, pal.helper, pal.user) first.
+    this.entries = [...earlier, ...view.entries] as unknown as Entry[];
+    this.#live(view);
     this.loaded = true;
     this.connected = true;
     this.problem = undefined;
   }
 
-  #append(entry: Entry): void {
-    if (!this.entries.some((known) => known.id === entry.id)) this.entries.push(entry);
-  }
-
-  #apply(event: AgentEvent): void {
-    if (event.type === "run_start") this.running = true;
-    else if (event.type === "run_end") {
-      this.running = false;
-      this.tools = [];
-      this.partial = undefined;
-    } else if (
-      (event.type === "tool_execution_start" || event.type === "tool_execution_end") &&
-      "toolCallId" in event &&
-      event.parentToolCallId === undefined
-    ) {
-      this.tools = this.tools.filter((tool) => tool.callId !== event.toolCallId);
-      if (event.type === "tool_execution_start") {
-        const tool: ToolSlot = { callId: event.toolCallId, name: event.toolName, status: "running" };
-        if (event.taskId !== undefined) tool.taskId = event.taskId;
-        this.tools = [...this.tools, tool];
-      }
-    } else if ("entry" in event && (event.type === "entry_appended" || event.type === "message_end")) {
-      this.#append(event.entry);
-      if (event.type === "message_end") this.partial = undefined;
-    } else if (event.type === "message_start" && "message" in event) {
-      if (event.message.role === "assistant") this.partial = event.message;
-    } else if (event.type === "message_update" && "changes" in event) {
-      for (const change of event.changes) this.#change(change);
-    } else if (event.type === "inbox_update" && "items" in event) {
-      this.inbox = event.items;
-    } else if (event.type === "auto_retry_start" && "errorMessage" in event) {
-      this.retry = { at: event.at, error: event.errorMessage };
-    } else if (event.type === "auto_retry_end") {
-      this.retry = undefined;
-    }
-  }
-
-  #change(change: Change): void {
-    if (change.type === "message") {
-      this.partial = change.message;
+  /** A change to the view, as Chord ops; a malformed one leaves the view as it was until the next snapshot. */
+  #change(wire: unknown[]): void {
+    const view = this.#view;
+    if (view === undefined) return;
+    let next: ConversationView;
+    try {
+      next = applyImmutable(view, this.#decoder.decode(wire));
+    } catch {
       return;
     }
-    const partial = this.partial;
-    if (partial === undefined || typeof partial.content === "string") return;
-    if (
-      change.type === "text_start" ||
-      change.type === "thinking_start" ||
-      change.type === "toolcall_start" ||
-      change.type === "block"
-    ) {
-      partial.content[change.contentIndex] = change.block;
-    } else if (change.type === "text_delta" || change.type === "thinking_delta") {
-      const block = partial.content[change.contentIndex];
-      if (block?.type === "text") block.text += change.delta;
-      else if (block?.type === "thinking") block.thinking += change.delta;
+    this.#view = next;
+    if (next.entries !== view.entries) {
+      // The window only appends; the entries it drops stay here. The server resends a snapshot instead of a gap.
+      const newest = this.entries.at(-1)?.id;
+      const added = next.entries.filter((entry) => newest === undefined || entry.id > newest);
+      // SAFETY: as in #reset.
+      if (added.length > 0) this.entries = [...this.entries, ...(added as unknown as Entry[])];
     }
+    if (next.docs !== view.docs) this.#live(next);
+  }
+
+  /** Run state from the view's built-in documents, each field replaced only when its part of the view changed. */
+  #live(view: ConversationView): void {
+    // SAFETY: Pi keys a view's built-in documents by kind, so `pi.live` and `pi.inbox` hold their documents' values.
+    const live = (view.docs["pi.live"] ?? {}) as LiveState;
+    const inbox = view.docs["pi.inbox"] as InboxState | undefined;
+    this.running = live.run !== undefined;
+    this.tools = live.tools ?? NONE;
+    this.nested = live.nestedTools ?? NONE;
+    this.partial = live.generation?.message as Message | undefined;
+    this.retry = live.generation?.retry;
+    this.deferredPoll = live.generation?.deferred?.pollAt;
+    this.inbox = inbox?.items ?? NONE;
+    this.compactions = live.compactions ?? NONE;
+    this.compactionFailure = live.compactionFailure;
+    const failed = live.runFailure;
+    this.failure =
+      failed === undefined || SHOWN.has(failed.reason)
+        ? undefined
+        : { reason: failed.reason, message: failed.detail ?? failed.reason.replaceAll("_", " ") };
   }
 }
 

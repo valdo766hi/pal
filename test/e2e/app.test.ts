@@ -21,6 +21,7 @@ import { STDIO_FIXTURE } from "../fixtures/stdio-server.ts";
 import { browse, startOpenAIFixture } from "../fixtures/openai-server.ts";
 import { startProviderFixture } from "../fixtures/provider-server.ts";
 import { fakeReleaseControl } from "../fixtures/releases.ts";
+import { projectMemory } from "../../plugins/memory/server.ts";
 
 const webRoot = join(import.meta.dirname, "..", "..", "dist", "public");
 const exec = promisify(execFile);
@@ -291,15 +292,19 @@ describe("Pal in a browser", () => {
     const events = "**/api/chats/*/events";
     const text = "Stream recovered after invalid frames";
     const snapshot = {
-      entries: [{ id: 1, kind: "pi.user", model: [{ role: "user", content: text }] }],
-      inbox: [],
+      view: {
+        conversation: { id: 1 },
+        entries: [{ id: 1, kind: "pi.user", model: [{ role: "user", content: text }] }],
+        docs: { "pi.inbox": { items: [] } },
+      },
+      earlier: [],
     };
     page.on("pageerror", recordError);
     await page.route(events, (route) =>
       route.fulfill({
         contentType: "text/event-stream",
         body:
-          "event: snapshot\ndata: {\n\nevent: event\ndata: invalid\n\nevent: approvals\ndata: invalid\n\n" +
+          "event: snapshot\ndata: {\n\nevent: change\ndata: invalid\n\nevent: approvals\ndata: invalid\n\n" +
           `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n` +
           'event: approvals\ndata: {"mode":"ask","approvals":[]}\n\n',
       }),
@@ -445,12 +450,13 @@ describe("Pal in a browser", () => {
     await page.reload();
     await page.getByLabel("Message").waitFor();
     expect(await pet.count()).toBe(0);
-    // Off means its code is never fetched, not merely hidden.
+    // Off means the pet's own code is never fetched, not merely hidden; only the small composer piece that reads the
+    // choice loads.
     expect(
       await page.evaluate(() =>
         performance
           .getEntriesByType("resource")
-          .some((entry) => /\/assets\/(Pet|PetSprite|pets)-[^/]+\.js$/.test(entry.name)),
+          .some((entry) => /\/assets\/(Companion|PetSprite|pets)-[^/]+\.js$/.test(entry.name)),
       ),
     ).toBe(false);
     await page.evaluate(() => ["pal.pet", "pal.petId"].forEach((key) => localStorage.removeItem(key)));
@@ -690,11 +696,13 @@ describe("Pal in a browser", () => {
       await panel.getByLabel("Memory fact", { exact: true }).fill("cobalt owner decision");
       await panel.getByRole("button", { name: "Save memory", exact: true }).click();
       await panel.getByRole("heading", { name: "Owner decision", exact: true }).waitFor();
-      const owner = (await pal.memory.list(project.id, context)).find((item) => item.title === "Owner decision");
+      const owner = (await projectMemory(pal.capabilities).list(project.id, context)).find(
+        (item) => item.title === "Owner decision",
+      );
       if (owner === undefined) throw new Error("missing owner memory");
       await panel.getByRole("button", { name: "Correct Owner decision", exact: true }).click();
       await panel.getByLabel("Memory fact", { exact: true }).fill("my retained draft");
-      await pal.memory.correct(
+      await projectMemory(pal.capabilities).correct(
         project.id,
         owner.id,
         1,
@@ -715,7 +723,7 @@ describe("Pal in a browser", () => {
           .getByRole("button", { name: "Cancel", exact: true })
           .evaluate((el) => el === document.activeElement),
       ).toBe(true);
-      await pal.memory.correct(
+      await projectMemory(pal.capabilities).correct(
         project.id,
         owner.id,
         2,
@@ -727,7 +735,10 @@ describe("Pal in a browser", () => {
         .getByRole("alert")
         .filter({ hasText: /changed/ })
         .waitFor();
-      expect((await pal.memory.list(project.id, context)).find((item) => item.id === owner.id)?.revision).toBe(3);
+      expect(
+        (await projectMemory(pal.capabilities).list(project.id, context)).find((item) => item.id === owner.id)
+          ?.revision,
+      ).toBe(3);
       await page.keyboard.press("Escape");
       await dialog.waitFor({ state: "detached" });
       expect(await panel.isVisible()).toBe(true);
@@ -1174,6 +1185,7 @@ describe("Pal in a browser", () => {
     await picked.setFiles([
       { name: "plan.txt", mimeType: "text/plain", buffer: Buffer.from("The launch is on Tuesday.") },
       { name: "draft.txt", mimeType: "text/plain", buffer: Buffer.from("Not for this message.") },
+      { name: "long.txt", mimeType: "text/plain", buffer: Buffer.from("z".repeat(120 * 1024)) },
     ]);
     await page.getByRole("button", { name: "Remove draft.txt" }).click();
     await page.getByRole("button", { name: "Remove draft.txt" }).waitFor({ state: "detached" });
@@ -1184,6 +1196,8 @@ describe("Pal in a browser", () => {
     await page.getByRole("button", { name: "Send" }).click();
     // The sent message shows its attachment; the upload reached the model with it.
     await page.locator(".user .chip").filter({ hasText: "plan.txt" }).waitFor();
+    // The owner sees what of each file the model got.
+    await page.locator(".user .chip").filter({ hasText: "long.txt" }).getByText("120 KB · first 100 KB sent").waitFor();
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     const sent = fixture.apiRequests.filter((call) => call.path === "/v1/responses");
     expect(JSON.stringify(sent.map((call) => call.body.input))).toContain("The launch is on Tuesday.");
@@ -1246,13 +1260,54 @@ describe("Pal in a browser", () => {
     const chat = (await pal.chats.list(project.id))[0];
     if (chat === undefined) throw new Error("missing chat");
     const agent = await (await pal.harness.conversation(chat.conversationId, context))?.agent(context);
-    expect(agent?.tools.map((tool) => tool.name)).toEqual(["codemode"]);
-    for (const name of ["files_write", "files_edit", "shell_run"])
-      expect(agent?.callable.find((tool) => tool.name === name)).toMatchObject({
-        replay: "unsafe",
-        callers: ["tools"],
-      });
+    expect(agent?.tools.map((tool) => tool.name)).toEqual(["codemode", "shell_run"]);
+    for (const [name, callers] of [
+      ["files_write", ["tools"]],
+      ["files_edit", ["tools"]],
+      ["shell_run", ["model", "tools"]],
+    ] as const)
+      expect(agent?.callable.find((tool) => tool.name === name)).toMatchObject({ replay: "unsafe", callers });
     await shoot("host-command-1440");
+    fixture.behavior.responses = "ok";
+  });
+
+  it("runs a long direct command with live progress once the owner raises the limit", async () => {
+    const project = (await pal.projects.list())[0];
+    if (project === undefined) throw new Error("missing project");
+    await page.goto(`${base}/#/settings/general`);
+    await page.getByLabel("Longest agent command").selectOption("300");
+    await expect.poll(() => pal.settings.commandTimeout()).toBe(300);
+    for (const width of [1440, 768, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      expect(await page.evaluate("document.documentElement.scrollWidth <= innerWidth")).toBe(true);
+      await shoot(`settings-command-${width}`);
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(chatUrl);
+    fixture.behavior.responses = "script";
+    fixture.behavior.call = {
+      name: "shell_run",
+      arguments: { command: "echo started; while [ ! -e release ]; do sleep 0.1; done; echo finished", timeout: 300 },
+    };
+    await page.getByLabel("Message").fill("run the long check");
+    await page.getByRole("button", { name: "Send" }).click();
+    const request = page.getByRole("group", { name: "Approval request" }).filter({ hasText: "-e release" });
+    await request.getByText("timeout 300 s", { exact: false }).waitFor();
+    await request.getByRole("button", { name: "Approve once" }).click();
+    const receipt = page.locator("details.activity").filter({ hasText: "-e release" });
+    await receipt.locator("summary").filter({ hasText: "Running" }).click();
+    await receipt.getByText("started", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "1 command, running" }).waitFor();
+    await shoot("long-command-1440");
+    await writeFile(join(project.root, "release"), "");
+    await receipt.getByText("Exit 0", { exact: true }).waitFor();
+    await receipt
+      .locator("pre.out")
+      .filter({ hasText: /started\s+finished/ })
+      .waitFor();
+    await page.getByRole("button", { name: "Ran 1 command" }).waitFor();
+    await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+    delete fixture.behavior.call;
     fixture.behavior.responses = "ok";
   });
 
@@ -2753,6 +2808,8 @@ describe("Pal in a browser", () => {
       await page.goto(`${base}/#/settings/extensions`);
       await page.reload();
       const control = page.getByRole("region", { name: "Controlled releases", exact: true });
+      // The retention shown is the supervisor's own limit.
+      await control.getByText(/^2\/8 releases retained\./).waitFor();
       await control.getByRole("button", { name: `Review candidate ${releases.digest.slice(0, 12)}` }).click();
       await control.getByRole("checkbox", { name: /I reviewed all changes/ }).check();
       await control.getByRole("button", { name: "Approve exact digest", exact: true }).click();

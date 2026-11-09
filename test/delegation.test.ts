@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
+  type FauxResponseFactory,
   type FauxResponseStep,
   createModels,
   fauxAssistantMessage,
@@ -24,10 +25,11 @@ afterEach(async () => {
 
 const code = (body: string) =>
   fauxAssistantMessage(fauxToolCall("codemode", { code: body }), { stopReason: "toolUse" });
-const DELEGATE =
-  'return await tools.agents_delegate({purpose:"Find the fact", task:"Read notes.txt; report line one."});';
+/** The parent model's direct helper call; scripts cannot reach the tool. */
+const delegate = (purpose = "Find the fact", task = "Read notes.txt; report line one.") =>
+  fauxAssistantMessage(fauxToolCall("agents_delegate", { purpose, task }), { stopReason: "toolUse" });
 
-async function fixture(options: { helpers?: boolean; limits?: HelperLimits } = {}) {
+async function fixture(options: { helpers?: boolean; limits?: HelperLimits; now?: () => number } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pal-helpers-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const settings = {
@@ -35,6 +37,7 @@ async function fixture(options: { helpers?: boolean; limits?: HelperLimits } = {
     installRoot: "/nonexistent-install",
     guidanceHome: join(root, "home"),
     ...(options.limits === undefined ? {} : { helperLimits: options.limits }),
+    ...(options.now === undefined ? {} : { now: options.now }),
   };
   let pal = await openPal(settings, context);
   cleanups.push(() => pal.close());
@@ -90,7 +93,7 @@ describe("research helpers", () => {
     const f = await fixture();
     const chat = await f.chat("helper-chat");
     await f.send(chat, [
-      code(DELEGATE),
+      delegate(),
       code('return await tools.files_read({path:"notes.txt"});'),
       fauxAssistantMessage("Line one is HELPER-FACT."),
       fauxAssistantMessage("The helper found it."),
@@ -106,6 +109,13 @@ describe("research helpers", () => {
     const names = agent?.extensions.map((extension) => extension.name) ?? [];
     expect(names).toContain("pal.files");
     for (const excluded of ["pal.helpers", "pal.shell", "pal.browser"]) expect(names).not.toContain(excluded);
+    // Only the model calls it: scripts cannot discover or reach it.
+    await f.send(chat, [
+      code('return await tools.agents_delegate({purpose:"p", task:"t"});'),
+      fauxAssistantMessage("ok"),
+    ]);
+    expect((await f.results(chat.conversationId)).at(-1)).toContain("does not exist");
+    expect(await f.helpers(chat)).toHaveLength(1);
   });
 
   it("narrows native folder leases and listings without narrowing the parent's lease", async () => {
@@ -119,7 +129,7 @@ describe("research helpers", () => {
       return lease;
     });
     await f.send(chat, [
-      code(DELEGATE),
+      delegate(),
       code("return await tools.files_folders({});"),
       code('return await tools.files_read({path:"notes.txt"});'),
       fauxAssistantMessage("Found."),
@@ -150,7 +160,7 @@ describe("research helpers", () => {
       'tools.working_checkpoint({revision:0,goalRevision:1,summary:"helper note",plan:[],next:"",questions:[]})',
     ];
     await f.send(chat, [
-      code(DELEGATE),
+      delegate(),
       code(
         `const out = []; for (const call of [${attempts.map((attempt) => `() => ${attempt}`).join(", ")}]) { try { await call(); out.push("ran"); } catch (error) { out.push(String(error.message ?? error)); } } return out;`,
       ),
@@ -180,7 +190,7 @@ describe("research helpers", () => {
     const chat = await f.chat("helper-grants");
     let later = "";
     await f.send(chat, [
-      code(DELEGATE),
+      delegate(),
       code(`return await tools.files_read({folder:${JSON.stringify(grant.id)},path:"fact.txt"});`),
       async () => {
         await f.pal.folders.remove(f.project.id, grant.id);
@@ -218,7 +228,7 @@ describe("research helpers", () => {
     const chat = await f.chat("helper-internet-grants");
     const name = `mcp__${server.id}__search`;
     await f.send(chat, [
-      code(DELEGATE),
+      delegate(),
       code(`return await tools.${name}({query:"before"});`),
       async () => {
         const current = (await f.pal.mcp.grants.view(f.project.id)).servers.find((item) => item.id === server.id);
@@ -244,7 +254,7 @@ describe("research helpers", () => {
     const chat = await f.chat("plain-chat");
     const agent = await (await f.pal.harness.conversation(chat.conversationId, context))?.agent(context);
     expect(agent?.callable.map((tool) => tool.name)).not.toContain("agents_delegate");
-    await f.send(chat, [code(DELEGATE), fauxAssistantMessage("No helpers here.")]);
+    await f.send(chat, [delegate(), fauxAssistantMessage("No helpers here.")]);
     expect((await f.results(chat.conversationId))[0]).toMatch(/agents_delegate/);
     expect(await f.helpers(chat)).toEqual([]);
     const conversation = await f.pal.harness.conversation(chat.conversationId, context);
@@ -254,20 +264,22 @@ describe("research helpers", () => {
   it("starts at most the per-run number of helpers and stops a helper at its request budget", async () => {
     const f = await fixture();
     const chat = await f.chat("budget-chat");
-    const many = `const out = []; for (let i = 0; i < ${HELPER_LIMITS.perRun + 1}; i++) { try { out.push((await tools.agents_delegate({purpose:"p"+i, task:"answer"})).status); } catch (error) { out.push(String(error.message ?? error)); } } return out;`;
     await f.send(chat, [
-      code(many),
-      ...Array.from({ length: HELPER_LIMITS.perRun }, (_, index) => fauxAssistantMessage(`answer ${index}`)),
+      ...Array.from({ length: HELPER_LIMITS.perRun }, (_, index) => [
+        delegate(`p${index}`, "answer"),
+        fauxAssistantMessage(`answer ${index}`),
+      ]).flat(),
+      delegate(`p${HELPER_LIMITS.perRun}`, "answer"),
       fauxAssistantMessage("done"),
     ]);
-    const output = (await f.results(chat.conversationId))[0] ?? "";
-    expect(output.match(/answered/g)).toHaveLength(HELPER_LIMITS.perRun);
+    const output = (await f.results(chat.conversationId)).join("\n");
+    expect(output.match(/answer \d/g)).toHaveLength(HELPER_LIMITS.perRun);
     expect(output).toContain(`already started ${HELPER_LIMITS.perRun} helpers`);
     expect(await f.helpers(chat)).toHaveLength(HELPER_LIMITS.perRun);
 
     const looping = await f.chat("looping-chat");
     await f.send(looping, [
-      code(DELEGATE),
+      delegate(),
       ...Array.from({ length: HELPER_LIMITS.turns }, () => code('return "again";')),
       fauxAssistantMessage("done"),
     ]);
@@ -275,14 +287,14 @@ describe("research helpers", () => {
     expect(stopped).toMatchObject({ status: "unanswered", turns: HELPER_LIMITS.turns });
     expect(stopped?.reason).toContain(`${HELPER_LIMITS.turns} model requests`);
     const reported = (await f.results(looping.conversationId))[0] ?? "";
-    expect(reported).toContain('"status":"unanswered"');
+    expect(reported).toContain("The helper stopped without an answer");
     expect(reported).toContain(`${HELPER_LIMITS.turns} model requests`);
   });
 
   it("does not spend uncounted summary requests for bounded helpers", async () => {
     const f = await fixture({ limits: { ...HELPER_LIMITS, turns: 1 } });
     const chat = await f.chat("helper-compaction-budget");
-    await f.send(chat, [code(DELEGATE), fauxAssistantMessage("Found."), fauxAssistantMessage("done")]);
+    await f.send(chat, [delegate(), fauxAssistantMessage("Found."), fauxAssistantMessage("done")]);
     const [helper] = await f.helpers(chat);
     const child = await f.pal.harness.conversation(helper?.conversation as ConversationId, context);
     const parent = await f.pal.harness.conversation(chat.conversationId, context);
@@ -329,7 +341,7 @@ describe("research helpers", () => {
     const f = await fixture({ limits: { ...HELPER_LIMITS, turns: 1 } });
     const chat = await f.chat("last-helper-turn");
     await f.send(chat, [
-      code(DELEGATE),
+      delegate(),
       code('return await tools.files_read({path:"notes.txt"});'),
       fauxAssistantMessage("done"),
     ]);
@@ -357,11 +369,7 @@ describe("research helpers", () => {
     const chat = await f.chat("helper-deadline");
     await f.send(
       chat,
-      [
-        code(DELEGATE),
-        code(`return await tools.mcp__${server.id}__search({query:"x"});`),
-        fauxAssistantMessage("done"),
-      ],
+      [delegate(), code(`return await tools.mcp__${server.id}__search({query:"x"});`), fauxAssistantMessage("done")],
       false,
     );
     await held.promise;
@@ -388,13 +396,13 @@ describe("research helpers", () => {
     const answer = [code('return "looked";'), fauxAssistantMessage("found")];
     // Identical helpers spend identical tokens with this model; measure one.
     const measured = await f.chat("measured-chat");
-    await f.send(measured, [code(DELEGATE), ...answer, fauxAssistantMessage("done")]);
+    await f.send(measured, [delegate(), ...answer, fauxAssistantMessage("done")]);
     const each = (await f.helpers(measured))[0]?.tokens ?? 0;
     expect(each).toBeGreaterThan(0);
 
     limits.tokens = 1;
     const greedy = await f.chat("greedy-chat");
-    await f.send(greedy, [code(DELEGATE), ...answer, fauxAssistantMessage("done")]);
+    await f.send(greedy, [delegate(), ...answer, fauxAssistantMessage("done")]);
     expect((await f.helpers(greedy))[0]).toMatchObject({ status: "unanswered", turns: 1 });
     expect((await f.helpers(greedy))[0]?.reason).toContain("its 1 tokens");
 
@@ -402,14 +410,7 @@ describe("research helpers", () => {
     limits.tokens = HELPER_LIMITS.tokens;
     limits.runTokens = 2 * each;
     const shared = await f.chat("shared-chat");
-    await f.send(shared, [
-      code(
-        'const out = []; for (const p of ["a","b","c"]) out.push((await tools.agents_delegate({purpose:"Find the fact", task:"Read notes.txt; report line one."})).status); return out;',
-      ),
-      ...answer,
-      ...answer,
-      fauxAssistantMessage("done"),
-    ]);
+    await f.send(shared, [delegate(), ...answer, delegate(), ...answer, delegate(), fauxAssistantMessage("done")]);
     const views = await f.helpers(shared);
     expect(views.map((view) => [view.status, view.turns])).toEqual([
       ["answered", 2],
@@ -422,7 +423,7 @@ describe("research helpers", () => {
     limits.calls = 5;
     const busy = await f.chat("busy-chat");
     await f.send(busy, [
-      code(DELEGATE),
+      delegate(),
       code("let n = 0; for (let i = 0; i < 10; i++) { try { await tools.files_list({}); n++; } catch {} } return n;"),
       fauxAssistantMessage("done"),
     ]);
@@ -456,7 +457,10 @@ describe("research helpers", () => {
       await f.send(
         parent,
         [
-          code('return await Promise.all(["a","b"].map(purpose => tools.agents_delegate({purpose,task:"Answer"})));'),
+          fauxAssistantMessage(
+            ["a", "b"].map((purpose) => fauxToolCall("agents_delegate", { purpose, task: "Answer" })),
+            { stopReason: "toolUse" },
+          ),
           hold,
           hold,
         ],
@@ -482,7 +486,7 @@ describe("research helpers", () => {
       });
       await expect.poll(() => seen.size, { timeout: 3000 }).toBe(2);
       const third = await f.chat("third-helper-during-recovery");
-      await f.send(third, [code(DELEGATE), fauxAssistantMessage("No slot yet.")], false);
+      await f.send(third, [delegate(), fauxAssistantMessage("No slot yet.")], false);
       await (await f.pal.harness.conversation(third.conversationId, context))?.waitForIdle(context);
       expect(await f.helpers(third)).toEqual([]);
       expect((await f.results(third.conversationId)).join("\n")).toContain("helpers are already running");
@@ -510,11 +514,14 @@ describe("research helpers", () => {
     };
     cleanups.push(async () => release.resolve(undefined));
     const chat = await f.chat("cancel-chat");
-    await f.send(chat, [code(DELEGATE), code(`return await tools.mcp__${server.id}__search({query:"x"});`)], false);
+    await f.send(chat, [delegate(), code(`return await tools.mcp__${server.id}__search({query:"x"});`)], false);
     await held.promise;
     await (await f.pal.harness.conversation(chat.conversationId, context))?.abort(context);
     const [helper] = await f.helpers(chat);
     expect(helper).toMatchObject({ status: "stopped", unknownEffects: [{ tool: `mcp__${server.id}__search` }] });
+    // Stop leaves no helper, tool or parent task running.
+    await f.pal.harness.waitForIdle(context);
+    expect((await f.pal.harness.inspect(context)).tasks).toEqual([]);
   });
 
   it.each(["requests", "aggregate tokens"])(
@@ -536,16 +543,19 @@ describe("research helpers", () => {
       };
       cleanups.push(async () => release.resolve(undefined));
       const chat = await f.chat("helper-restart-budgets");
-      const parent =
-        'const out = []; for (const purpose of ["first","second"]) { try { out.push(await tools.agents_delegate({purpose,task:"Search"})); } catch(error) { out.push(String(error.message ?? error)); } } return out;';
-      await f.send(chat, [code(parent), code(`return await tools.mcp__${server.id}__search({query:"x"});`)], false);
+      await f.send(
+        chat,
+        [delegate("first", "Search"), code(`return await tools.mcp__${server.id}__search({query:"x"});`)],
+        false,
+      );
       await held.promise;
       if (budget === "requests") limits.turns = 1;
       else limits.runTokens = 1;
       mcp.state.beforeCall = undefined;
-      f.faux.setResponses([fauxAssistantMessage("done")]);
+      const after = [delegate("second", "Search"), fauxAssistantMessage("done")];
+      f.faux.setResponses(after);
       await f.reopen();
-      f.faux.setResponses([fauxAssistantMessage("done")]);
+      f.faux.setResponses(after);
       await f.pal.harness.waitForIdle(context);
       const helpers = await f.helpers(chat);
       expect(helpers).toHaveLength(1);
@@ -555,7 +565,7 @@ describe("research helpers", () => {
       );
       expect(helpers[0]?.tokens).toBeGreaterThan(0);
       expect((await f.results(chat.conversationId)).join("\n")).toContain("already started 1 helpers");
-      expect(f.faux.state.callCount).toBe(3);
+      expect(f.faux.state.callCount).toBe(4);
     },
   );
 
@@ -573,7 +583,7 @@ describe("research helpers", () => {
       await new Promise(() => {});
     };
     const chat = await f.chat("restart-chat");
-    await f.send(chat, [code(DELEGATE), code(`return await tools.mcp__${server.id}__search({query:"x"});`)], false);
+    await f.send(chat, [delegate(), code(`return await tools.mcp__${server.id}__search({query:"x"});`)], false);
     await held.promise;
     mcp.state.beforeCall = undefined;
     f.faux.setResponses([fauxAssistantMessage("Found after restart."), fauxAssistantMessage("done")]);
@@ -596,5 +606,60 @@ describe("research helpers", () => {
     });
     expect(results).toEqual([expect.objectContaining({ task: helpers[0]?.task, id: `helper-${helpers[0]?.task}` })]);
     expect((await f.results(chat.conversationId)).join("\n")).toContain("Found after restart.");
+  });
+
+  it("runs two concurrent parents' helpers and their real tools within the two script workers", async () => {
+    const f = await fixture();
+    // Answers each parent and helper from its own transcript, so interleaved chats get the right turn.
+    const brain: FauxResponseFactory = (transcript) => {
+      const helper = JSON.stringify(transcript.messages).includes("You are a read-only research helper");
+      if (transcript.messages.at(-1)?.role === "user")
+        return helper ? code('return await tools.files_read({path:"notes.txt"});') : delegate();
+      return fauxAssistantMessage(helper ? "Line one is HELPER-FACT." : "The helper found it.");
+    };
+    f.faux.setResponses(Array.from({ length: 16 }, () => brain));
+    const chats = [await f.chat("concurrent-parent-a"), await f.chat("concurrent-parent-b")];
+    await Promise.all(
+      chats.map((chat, index) => f.pal.chats.submit(chat.id, `concurrent-input-${index}`, { text: "go" }, context)),
+    );
+    await f.pal.harness.waitForIdle(context);
+    for (const chat of chats) {
+      const [helper] = await f.helpers(chat);
+      expect(helper).toMatchObject({ status: "answered" });
+      const read = await f.results(helper?.conversation as ConversationId);
+      expect(read.join("\n")).toContain("HELPER-FACT");
+      expect(read.join("\n")).not.toContain("scripts may run at once");
+      expect((await f.results(chat.conversationId))[0]).toContain("Line one is HELPER-FACT.");
+    }
+  });
+
+  it("times helpers on the Harness clock, apart from the 120-second script deadline", async () => {
+    let clock = Date.now();
+    const f = await fixture({ now: () => clock });
+    const slow = await f.chat("slow-helper");
+    await f.send(slow, [
+      delegate(),
+      () => {
+        clock += 121_000;
+        return code('return await tools.files_read({path:"notes.txt"});');
+      },
+      fauxAssistantMessage("Line one is HELPER-FACT."),
+      fauxAssistantMessage("done"),
+    ]);
+    expect((await f.helpers(slow))[0]).toMatchObject({ status: "answered" });
+    expect((await f.results(slow.conversationId))[0]).toContain("Line one is HELPER-FACT.");
+
+    const late = await f.chat("late-helper");
+    await f.send(late, [
+      delegate(),
+      () => {
+        clock += (HELPER_LIMITS.minutes + 1) * 60_000;
+        return code('return "looked";');
+      },
+      fauxAssistantMessage("done"),
+    ]);
+    const [stopped] = await f.helpers(late);
+    expect(stopped).toMatchObject({ status: "unanswered", turns: 1 });
+    expect(stopped?.reason).toContain(`${HELPER_LIMITS.minutes}-minute limit`);
   });
 });

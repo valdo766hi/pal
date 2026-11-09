@@ -26,7 +26,8 @@ async function setup() {
   cleanups.push(() => pal.close());
   const project = await pal.projects.create("context-project", { name: "Context fixture" });
   const chat = await pal.chats.createChat("context-chat", { projectId: project.id }, context);
-  const faux = fauxProvider({ models: [{ id: "context-fixture", input: ["text", "image"] }] });
+  // Room for the large inputs below automatic compaction, so only the test's explicit compaction summarizes.
+  const faux = fauxProvider({ models: [{ id: "context-fixture", input: ["text", "image"], contextWindow: 256_000 }] });
   const requests: (readonly Message[])[] = [];
   let sequence = 0;
   const conversation = async () => {

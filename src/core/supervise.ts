@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import { Type } from "typebox";
+import { MAX_RETAINED_RELEASES } from "../protocol/limits.ts";
 import type { ServeConfig } from "./config.ts";
 import { HttpError } from "./http.ts";
 import { checkedReleases, releaseManifest, verifyRelease, type CheckedRelease } from "./release-check.ts";
@@ -379,11 +380,11 @@ export async function supervise(
   const begin = async (next: ReleaseArtifact, receipt?: CheckedRelease) => {
     if (next.digest === state.current.digest)
       throw new HttpError(409, "release_current", "That artifact is already selected.");
-    if (!state.retained.some((item) => item.digest === next.digest) && state.retained.length >= 8)
+    if (!state.retained.some((item) => item.digest === next.digest) && state.retained.length >= MAX_RETAINED_RELEASES)
       throw new HttpError(
         409,
         "release_retention",
-        "Eight immutable releases are retained; review retention before adding another.",
+        `${MAX_RETAINED_RELEASES} immutable releases are retained; review retention before adding another.`,
       );
     const old = running;
     if (old === undefined || !alive(old))

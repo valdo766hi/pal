@@ -2,7 +2,14 @@ import { once } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { clampThinkingLevel, type ProviderAuthInteraction } from "@earendil-works/pi-ai";
-import { type AgentEvent, type Conversation, watchEvents } from "@earendil-works/pi-durable";
+import { encoder } from "@earendil-works/chord/delta";
+import type {
+  Conversation,
+  ConversationId,
+  ConversationView,
+  ConversationWatch,
+  EntryId,
+} from "@earendil-works/pi-durable";
 import { Type } from "typebox";
 import {
   CHATGPT_PROVIDER,
@@ -24,12 +31,14 @@ import {
   chatConfiguration,
   ChatNotFound,
   ConfigurationRevision,
+  InputBlocked,
+  InputHeld,
   ProjectUnavailable,
   type ChatSummary,
 } from "./chats.ts";
 import { cookie, HttpError, isOwnOrigin, readJson, sendJson } from "./http.ts";
 import { OwnerError, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS } from "./owner.ts";
-import { WorkspaceBusy } from "./execution.ts";
+import { CommandTimeoutBody, WorkspaceBusy } from "./execution.ts";
 import { AllowanceChange } from "./working-allowance.ts";
 import { FileAccessError, searchFolder } from "./files.ts";
 import { SearchError } from "./search.ts";
@@ -37,7 +46,7 @@ import { FolderError } from "./projects.ts";
 import { InvalidRequest, RequestConflict, validate } from "./requests.ts";
 import { UploadBody, UploadError } from "./uploads.ts";
 import { TerminalSize } from "./terminals.ts";
-import { MemoryBody } from "./memory.ts";
+import { history } from "./transcript.ts";
 import type { ReleaseRpc } from "./release-rpc.ts";
 import { ReleaseDigest } from "./release-state.ts";
 import type { ScheduleNotice, ScheduleView } from "./schedules.ts";
@@ -49,18 +58,6 @@ const workspaceQuery = (url: URL) => {
 };
 const NewTerminal = Type.Object(
   { ...TerminalSize.properties, trust: Type.Literal(true), workspace: WorkspaceId },
-  { additionalProperties: false },
-);
-const NewMemory = Type.Object(
-  { ...MemoryBody.properties, requestId: Type.Unknown(), workspace: WorkspaceId },
-  { additionalProperties: false },
-);
-const CorrectMemory = Type.Object(
-  { ...MemoryBody.properties, revision: Type.Integer({ minimum: 1 }), workspace: WorkspaceId },
-  { additionalProperties: false },
-);
-const ForgetMemory = Type.Object(
-  { revision: Type.Integer({ minimum: 1 }), workspace: WorkspaceId },
   { additionalProperties: false },
 );
 const HEARTBEAT_MS = 25_000;
@@ -381,6 +378,12 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       return send(200, { deferred: await pal.settings.modelSetupDeferred() });
     }
 
+    if (resource === "command-timeout" && path.length === 1 && (method === "GET" || method === "PUT")) {
+      if (method === "PUT")
+        await pal.settings.setCommandTimeout(validate(CommandTimeoutBody, await readJson(request)).seconds);
+      return send(200, { seconds: await pal.settings.commandTimeout() });
+    }
+
     if (resource === "releases") {
       if (path.length === 1 && method === "GET")
         return send(200, releases === undefined ? { available: false } : await releases.call("view"));
@@ -425,6 +428,14 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           enabled: await pal.schedules.enabled(),
           schedules: await scheduleViews(await pal.schedules.list()),
         });
+    }
+
+    if (resource === "plugins" && id !== undefined) {
+      const body = request.headers["content-type"] === undefined ? undefined : await readJson(request);
+      return send(
+        200,
+        await pal.capabilities.request(id, { method, path: path.slice(2), query: url.searchParams, body }, context),
+      );
     }
 
     if (resource === "extensions" && path.length === 1) {
@@ -666,37 +677,6 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         return send(200, { deleted: true });
       }
     }
-    if (resource === "projects" && id !== undefined && action === "memory") {
-      const memoryId = path[3];
-      if (path.length === 3 && method === "GET")
-        return send(200, { items: await pal.memory.list(id, context, workspaceQuery(url)) });
-      if (path.length === 3 && method === "POST") {
-        const { requestId, workspace, ...body } = validate(NewMemory, await readJson(request));
-        return send(200, { id: await pal.memory.save(id, requestId, body, context, workspace) });
-      }
-      if (memoryId !== undefined && path.length === 4 && method === "PUT") {
-        const { revision, workspace, ...body } = validate(CorrectMemory, await readJson(request));
-        await pal.memory.correct(id, memoryId, revision, body, context, workspace);
-        return send(200, { saved: true });
-      }
-      if (memoryId !== undefined && path.length === 4 && method === "DELETE") {
-        const { revision, workspace } = validate(ForgetMemory, await readJson(request));
-        await pal.memory.forget(id, memoryId, revision, workspace);
-        return send(200, { forgotten: true });
-      }
-      if (memoryId !== undefined && path.length === 5 && path[4] === "source" && method === "GET")
-        return send(200, await pal.memory.source(id, memoryId, context, workspaceQuery(url)));
-    }
-    if (
-      resource === "projects" &&
-      id !== undefined &&
-      action === "memory-index" &&
-      path.length === 3 &&
-      method === "POST"
-    ) {
-      await pal.memory.rebuild(id);
-      return send(200, { rebuilt: true });
-    }
     if (resource === "projects" && id !== undefined && action === "search" && path.length === 3 && method === "GET") {
       const folder = await pal.folders.owner(id, url.searchParams.get("folder") ?? undefined, workspaceQuery(url));
       const query = url.searchParams.get("q") ?? "";
@@ -873,7 +853,22 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
             ),
           );
       }
-      if (action === "inputs" && method === "POST") {
+      if (action === "inputs" && path.length === 4 && method === "GET") {
+        const input = await pal.chats.input(chat.id, path[3] ?? "");
+        if (input === undefined) throw new HttpError(404, "input_not_found", "Pal has no record of this input.");
+        return send(200, input);
+      }
+      if (action === "inputs" && path.length === 5 && path[4] === "withdraw" && method === "POST") {
+        await pal.chats.withdraw(chat.id, path[3] ?? "", context);
+        return send(200, { withdrawn: true });
+      }
+      if (action === "inputs" && path.length === 5 && path[4] === "retry" && method === "POST") {
+        const chosen = (await conversation.agent(context)).model;
+        const problem = chosen === undefined ? undefined : await pal.providers.problem(chosen);
+        if (problem !== undefined) throw new HttpError(409, problem.code, problem.message);
+        return send(200, { admission: await pal.chats.retry(chat.id, path[3] ?? "", context) });
+      }
+      if (action === "inputs" && path.length === 3 && method === "POST") {
         const { requestId, ...body } = validate(Keyed, await readJson(request));
         // A chat on a disabled provider or a removed model stops here; it is never sent anywhere else instead.
         const chosen = (await conversation.agent(context)).model;
@@ -919,23 +914,27 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
   }
 
   /**
-   * Server-sent events: the conversation's snapshot, then one event batch per commit until the client leaves, the
-   * owner session ends or expires, or the stream closes. The chat's command approvals arrive as whole `approvals`
-   * views, first with the snapshot and again on every change. Cleanup is registered before the first write, and a
-   * write blocked by backpressure also ends when the stream does, so a vanished client never holds the handler.
+   * Server-sent events: a `snapshot` of the conversation's view with every entry before its window, then each
+   * `change` to that view as Chord ops, encoded from the latest snapshot on, until the client leaves, the owner session
+   * ends or expires, or the stream closes. A window that no longer continues what the client has, after a backlog,
+   * arrives as a new snapshot. The chat's command approvals arrive as whole `approvals` views, first with the snapshot
+   * and again on every change. Cleanup is registered before the first write, and a write blocked by backpressure also
+   * ends when the stream does, so a vanished client never holds the handler.
    */
   async function observe(
     response: ServerResponse,
     chatId: string,
-    conversationId: Parameters<typeof watchEvents>[1],
+    conversationId: ConversationId,
     token: string | undefined,
   ): Promise<void> {
     const expiry = await pal.owner.sessionExpiry(token);
     if (expiry === undefined) throw new HttpError(401, "signed_out", "sign in to Pal first");
+    const conversation = await pal.harness.conversation(conversationId, context);
+    if (conversation === undefined) throw new HttpError(404, "not_found", "no such chat");
     const scope = new AbortController();
     // What `end` must release, filled in as the stream starts.
     const live: {
-      stream?: Awaited<ReturnType<typeof watchEvents>>;
+      watch?: ConversationWatch;
       heartbeat?: ReturnType<typeof setInterval>;
       unwatch?: () => void;
     } = {};
@@ -947,7 +946,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       clearTimeout(expiryTimer);
       clearInterval(live.heartbeat);
       live.unwatch?.();
-      void live.stream?.stop();
+      void live.watch?.stop();
       if (revoked) response.destroy();
       else if (!response.writableEnded) response.end();
     };
@@ -958,10 +957,10 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     response.once("close", () => end(true));
     response.once("error", () => end(true));
 
-    const stream = await watchEvents(pal.harness, conversationId, context);
-    live.stream = stream;
+    const watch = await conversation.watch(context);
+    live.watch = watch;
     if (scope.signal.aborted) {
-      void stream.stop();
+      void watch.stop();
       return;
     }
     response.writeHead(200, {
@@ -975,7 +974,16 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         await once(response, "drain", { signal: scope.signal }).catch(() => undefined);
       }
     };
-    await write("snapshot", stream.snapshot);
+    // Ops after a snapshot are encoded with a dictionary that starts at it, as the client's decoder does.
+    let encoding = encoder();
+    let newest: EntryId | undefined;
+    const snapshot = async (view: ConversationView) => {
+      encoding = encoder();
+      newest = view.entries.at(-1)?.id ?? view.before;
+      const earlier = view.before === undefined ? [] : await history(conversation, context, view.before);
+      await write("snapshot", { view, earlier });
+    };
+    await snapshot(watch.value);
     if (scope.signal.aborted) return;
     // Views are written in order; a change during a write is folded into the next one.
     let approvals: Promise<void> = Promise.resolve();
@@ -998,11 +1006,15 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     live.heartbeat = setInterval(() => {
       if (!scope.signal.aborted && !response.writableNeedDrain) response.write(": keep-alive\n\n");
     }, HEARTBEAT_MS);
-    stream.start(async (events: readonly AgentEvent[]) => {
-      // An overflowed watch replaces its undelivered batches with a snapshot, which the client applies as a reset.
-      for (const event of events) await write(event.type === "snapshot" ? "snapshot" : "event", event);
+    watch.start(async (call) => {
+      // Pi ends a conversation watch when its source fails, so a recoverable `failed` call never comes.
+      if (call.kind !== "value") return;
+      const { value } = call;
+      if (value.before !== undefined && (newest === undefined || value.before > newest)) return snapshot(value);
+      await write("change", encoding.encode(call.ops));
+      newest = value.entries.at(-1)?.id ?? value.before ?? newest;
     });
-    void stream.closed.then(() => end(false));
+    void watch.closed.then(() => end(false));
   }
 
   const unavailable = new HttpError(
@@ -1035,13 +1047,22 @@ function classify(error: unknown): [number, string] {
   if (error instanceof ProjectUnavailable) return [409, "project_unavailable"];
   if (error instanceof FolderError) return [422, `folder_${error.code}`];
   if (error instanceof AdmissionStopped) return [503, "admission_stopped"];
+  if (error instanceof InputBlocked) return [409, "input_blocked"];
+  if (error instanceof InputHeld) return [409, "input_held"];
   if (error instanceof McpConfigError || error instanceof StdioConfigError) return [400, "mcp_config"];
   if (error instanceof ProviderConfigError) return [400, "provider_config"];
   if (error instanceof FileAccessError) return [403, "file_access"];
   if (error instanceof SearchError) return [422, "search_unavailable"];
   if (error instanceof WorkspaceBusy) return [409, "workspace_busy"];
   if (error instanceof UploadError) {
-    const status = { not_found: 404, too_large: 413, size_mismatch: 400, not_receiving: 409, not_ready: 409 };
+    const status = {
+      not_found: 404,
+      too_large: 413,
+      size_mismatch: 400,
+      not_receiving: 409,
+      not_ready: 409,
+      unavailable: 409,
+    };
     return [status[error.code], `upload_${error.code}`];
   }
   if (error instanceof ChatGPTAuthError) return [400, `chatgpt_${error.code}`];

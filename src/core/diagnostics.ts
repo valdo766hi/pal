@@ -2,12 +2,36 @@
 // includes credentials, tokens, server addresses, commands, outputs, or chat and file contents.
 import { arch, platform } from "node:os";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { watchEvents } from "@earendil-works/pi-durable";
+import type { ConversationId, ReportInfo } from "@earendil-works/pi-durable";
 import pkg from "../../package.json" with { type: "json" };
 import type { Pal } from "./app.ts";
 import { unfinishedWork } from "./backup.ts";
+import { DESTINATION_CHANGED } from "./chats.ts";
+import { currentView, history, liveDocs } from "./transcript.ts";
 
 const RECENT = 20;
+
+/** Pi's non-fatal reports by category; their errors are dropped, since an error's text can carry secrets or content. */
+export class Reports {
+  readonly #counts: Partial<Record<ReportInfo["kind"], number>> = {};
+  readonly #recent: Record<string, string>[] = [];
+  record(info: ReportInfo, at: number): void {
+    this.#counts[info.kind] = (this.#counts[info.kind] ?? 0) + 1;
+    const task = "task" in info ? info.task?.kind : undefined;
+    this.#recent.push({
+      at: new Date(at).toISOString(),
+      type: info.kind,
+      ...("extension" in info && info.extension !== undefined ? { extension: info.extension } : {}),
+      ...(task === undefined ? {} : { task }),
+      ...("reason" in info ? { reason: info.reason } : {}),
+      ...("callback" in info ? { callback: info.callback } : {}),
+    });
+    if (this.#recent.length > RECENT) this.#recent.shift();
+  }
+  view() {
+    return { counts: { ...this.#counts }, recent: [...this.#recent] };
+  }
+}
 
 type Entry = {
   readonly id: number;
@@ -54,38 +78,45 @@ export async function installationDiagnostics(pal: Pal) {
       approvedTools: server.tools.filter((tool) => tool.approved).length,
     })),
     unfinished: await unfinishedWork(database, tables),
+    admission: pal.chats.stopped
+      ? { stopped: true, recovery: "Restart Pal; saved inputs are reconciled before new ones are admitted." }
+      : { stopped: false },
+    reports: pal.reports.view(),
   };
 }
 
 /** One chat's run state and the outcomes of its inputs, approvals and effects, for support. */
-export async function chatDiagnostics(pal: Pal, chatId: string, conversationId: Parameters<typeof watchEvents>[1]) {
+export async function chatDiagnostics(pal: Pal, chatId: string, conversationId: ConversationId) {
   const database = pal.store.database;
   const workspace = await pal.workspaces.info(chatId);
-  const watch = await watchEvents(pal.harness, conversationId, context);
-  let snapshot;
-  try {
-    snapshot = watch.snapshot as {
-      entries: readonly Entry[];
-      run?: unknown;
-      generation?: { retry?: { error: string } };
-      inbox: readonly unknown[];
-    };
-  } finally {
-    await watch.stop();
-  }
+  const conversation = await pal.harness.conversation(conversationId, context);
+  if (conversation === undefined) throw new Error("This chat's conversation is missing.");
+  const { live, inbox } = liveDocs(await currentView(conversation, context, { min: 1 }));
+  // SAFETY: Pal's narrower view of Pi entries, as the old snapshot was read: every field it names is optional.
+  const entries = (await history(conversation, context)) as unknown as readonly Entry[];
   const finished = new Set(
-    snapshot.entries.flatMap((entry) => (entry.data?.shell?.status === "finished" ? [entry.data.shell.callId] : [])),
+    entries.flatMap((entry) => (entry.data?.shell?.status === "finished" ? [entry.data.shell.callId] : [])),
   );
-  const shells = snapshot.entries.flatMap((entry) =>
+  const shells = entries.flatMap((entry) =>
     entry.kind === "pal.shell" && entry.data?.shell !== undefined ? [{ entry: entry.id, ...entry.data.shell }] : [],
   );
+  const blocked = (await pal.chats.get(chatId))?.blocked ?? null;
   return {
     chat: chatId,
     workspace: workspace === undefined ? null : { mode: workspace.mode, state: workspace.state },
+    // The reason can name an attachment, so only its category; the chat itself shows the owner the full reason.
+    blocked:
+      blocked === null
+        ? null
+        : {
+            requestId: blocked.requestId,
+            cause: blocked.reason === DESTINATION_CHANGED ? "destination-changed" : "attachment-unreadable",
+            recovery: "Retry it with its recorded message, or withdraw it; this chat's later inputs wait behind it.",
+          },
     commandMode: await pal.approvals.mode(chatId),
-    running: snapshot.run !== undefined,
-    retrying: snapshot.generation?.retry === undefined ? null : failureCause(snapshot.generation.retry.error),
-    queued: snapshot.inbox.length,
+    running: live.run !== undefined,
+    retrying: live.generation?.retry === undefined ? null : failureCause(live.generation.retry.error),
+    queued: inbox.items.length,
     inputs: await database.all<{ requestId: string; state: string; submissionId: number | null; createdAt: number }>(
       "SELECT request_id AS requestId, state, submission_id AS submissionId, created_at AS createdAt FROM pal_admissions WHERE chat_id = ? ORDER BY seq DESC LIMIT ?",
       chatId,
@@ -113,7 +144,7 @@ export async function chatDiagnostics(pal: Pal, chatId: string, conversationId: 
         status === "started" && !finished.has(callId) ? [{ entry, callId }] : [],
       )
       .slice(-RECENT),
-    internet: snapshot.entries
+    internet: entries
       .flatMap((entry) =>
         entry.kind === "pal.mcp" && entry.data?.mcp !== undefined
           ? [
@@ -127,7 +158,7 @@ export async function chatDiagnostics(pal: Pal, chatId: string, conversationId: 
           : [],
       )
       .slice(-RECENT),
-    modelFailures: snapshot.entries
+    modelFailures: entries
       .flatMap((entry) => {
         const message = entry.kind === "pi.assistant" ? entry.model?.[0] : undefined;
         return message?.stopReason === "error"

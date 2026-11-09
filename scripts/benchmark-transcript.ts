@@ -66,30 +66,44 @@ async function startFixture(webRoot: string, entries: number, cleanups: Cleanups
   return { base, token, chat, provider };
 }
 
+/** The chat stream API a bundle speaks: Pi 1.5's view changes, or the native events of earlier bundles. */
+type Protocol = "view" | "events";
+/** The path of the live answer's first text block within a conversation view. */
+const LIVE_TEXT = ["docs", "pi.live", "generation", "message", "content", 0, "text"];
+
 /** Sends live text through the page's own chat event stream, timing each update to the next animation frame. */
-async function measureLiveText(page: Page, updates: number) {
+async function measureLiveText(page: Page, updates: number, protocol: Protocol) {
   const client = await page.context().newCDPSession(page);
   await client.send("Performance.enable");
   const metrics = async () =>
     new Map((await client.send("Performance.getMetrics")).metrics.map((metric) => [metric.name, metric.value]));
   const before = await metrics();
-  const live: unknown = fauxAssistantMessage("Live profile");
+  const message = fauxAssistantMessage("Live profile");
+  // The same answer and appends in each API: a view change, or a native event.
+  const [start, update] =
+    protocol === "view"
+      ? [[["s", ["docs", "pi.live"], { generation: { attempt: 1, message } }]], [["a", LIVE_TEXT, "."]]]
+      : [
+          { type: "message_start", message },
+          { type: "message_update", changes: [{ type: "text_delta", contentIndex: 0, delta: "." }] },
+        ];
   const frames = await page.evaluate(
-    async ([message, updates]) => {
+    async ([payloads, updates]) => {
+      const [start, update] = JSON.parse(payloads) as [unknown, unknown];
       const emit = (data: unknown) =>
         dispatchEvent(new CustomEvent("pal-benchmark-event", { detail: JSON.stringify(data) }));
-      emit({ type: "message_start", message });
+      emit(start);
       const frames: number[] = [];
       for (let index = 0; index < updates; index++) {
         const started = performance.now();
-        emit({ type: "message_update", changes: [{ type: "text_delta", contentIndex: 0, delta: "." }] });
+        emit(update);
         await new Promise((resolve) => requestAnimationFrame(resolve));
         frames.push(performance.now() - started);
       }
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       return frames;
     },
-    [live, updates] as const,
+    [JSON.stringify([start, update]), updates] as const,
   );
   const after = await metrics();
   const milliseconds = (name: string) => {
@@ -123,15 +137,55 @@ export async function sampleTranscript(browser: Browser, webRoot: string, entrie
     const page = await view.newPage();
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    // Forwards page-dispatched benchmark events into the chat's event stream, as if the server had sent them.
+    // Forwards page-dispatched benchmark events into the chat's event stream, as if the server had sent them, in the
+    // API the bundle subscribes to. A bundle from before Pi 1.5 gets each snapshot in its own native-event form.
     await page.addInitScript(() => {
       const Native = window.EventSource;
+      const host = window as Window & { palBenchmarkSnapshot?: string; palBenchmarkProtocol?: Protocol };
+      type View = { entries: unknown[]; docs: Record<string, Record<string, unknown> | undefined> };
+      const legacy = ({ view, earlier }: { view: View; earlier: unknown[] }) => {
+        const live = view.docs["pi.live"] ?? {};
+        return {
+          entries: [...earlier, ...view.entries],
+          run: live.run,
+          generation: live.generation,
+          tools: live.tools ?? [],
+          nestedTools: live.nestedTools ?? [],
+          compactions: live.compactions ?? [],
+          compactionFailure: live.compactionFailure,
+          inbox: view.docs["pi.inbox"]?.items ?? [],
+          agent: view.docs["pi.agent"] ?? {},
+          usage: view.docs["pi.usage"] ?? { models: {}, tools: {} },
+        };
+      };
       window.EventSource = class extends Native {
         constructor(url: string | URL, options?: EventSourceInit) {
           super(url, options);
           if (!String(url).includes("/events")) return;
+          const add = this.addEventListener.bind(this) as (type: string, listener: (event: Event) => void) => void;
+          this.addEventListener = ((type: string, listener: (event: MessageEvent<string>) => void) => {
+            if (type === "change") host.palBenchmarkProtocol = "view";
+            else if (type === "event") host.palBenchmarkProtocol ??= "events";
+            add(type, (event) => {
+              const message = event as MessageEvent<string>;
+              listener(
+                type === "snapshot" && host.palBenchmarkProtocol === "events"
+                  ? new MessageEvent("snapshot", { data: JSON.stringify(legacy(JSON.parse(message.data))) })
+                  : message,
+              );
+            });
+          }) as typeof this.addEventListener;
+          // The first snapshot, which the benchmark later sends again as a reconnect would.
+          add("snapshot", (event) => (host.palBenchmarkSnapshot ??= (event as MessageEvent<string>).data));
           addEventListener("pal-benchmark-event", (event) =>
-            this.dispatchEvent(new MessageEvent("event", { data: (event as CustomEvent<string>).detail })),
+            this.dispatchEvent(
+              new MessageEvent(host.palBenchmarkProtocol === "view" ? "change" : "event", {
+                data: (event as CustomEvent<string>).detail,
+              }),
+            ),
+          );
+          addEventListener("pal-benchmark-snapshot", (event) =>
+            this.dispatchEvent(new MessageEvent("snapshot", { data: (event as CustomEvent<string>).detail })),
           );
         }
       };
@@ -144,21 +198,95 @@ export async function sampleTranscript(browser: Browser, webRoot: string, entrie
     const input = page.getByLabel("Message", { exact: true });
     await input.fill("Preserve my draft and focus");
     const scroller = page.locator(".scroller");
-    await scroller.evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
-    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    const scrollBefore = await scroller.evaluate((node) => node.scrollTop);
-    const sample = await measureLiveText(page, updates);
+    const settle = () =>
+      page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    // The scroller is column-reverse: 0 is the newest end and older history lies at negative offsets.
+    await scroller.evaluate((node) => (node.scrollTop = -(node.scrollHeight - node.clientHeight) / 3));
+    await settle();
+    const anchor = await scroller.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const rows = [...node.querySelectorAll(".assistant")];
+      const middle = box.top + box.height / 2;
+      const index = rows.findIndex((row) => {
+        const rect = row.getBoundingClientRect();
+        return rect.top <= middle && rect.bottom >= middle;
+      });
+      return { index, scrollTop: node.scrollTop, text: rows[index]?.querySelector("p")?.textContent };
+    });
+    assert(
+      anchor.scrollTop < 0 &&
+        anchor.index >= 0 &&
+        anchor.index < entries - 3 &&
+        anchor.text === `Profile row ${anchor.index}`,
+      "The benchmark did not reach older history.",
+    );
+    const offset = () =>
+      scroller.evaluate(
+        (node, index) =>
+          (node.querySelectorAll(".assistant")[index]?.getBoundingClientRect().top ?? Number.NaN) -
+          node.getBoundingClientRect().top,
+        anchor.index,
+      );
+    const visible = await offset();
+    const steady = async (step: string) =>
+      assert(Math.abs((await offset()) - visible) <= 1, `The visible history moved during ${step}.`);
+    const protocol = await page.evaluate(
+      () => (window as Window & { palBenchmarkProtocol?: Protocol }).palBenchmarkProtocol,
+    );
+    assert(protocol !== undefined, "The page never subscribed to its chat stream.");
+    const sample = await measureLiveText(page, updates, protocol);
 
     // A fast but wrong transcript is not a measurement.
+    const text = "Live profile" + ".".repeat(updates);
+    const exact = async (step: string) => {
+      assert.equal(
+        await page.locator(".assistant .md").count(),
+        entries + 1,
+        `History was not fully rendered ${step}.`,
+      );
+      assert.equal(
+        await page.locator(".assistant .md").last().locator("p").textContent(),
+        text,
+        `The live text is not exact ${step}.`,
+      );
+    };
+    await steady("live text");
+    await exact("after live text");
+    // The answer commits, then a reconnect replaces the transcript with a snapshot; the reader's place holds.
+    const emit = (name: "event" | "snapshot", data: unknown) =>
+      page.evaluate(([type, detail]) => dispatchEvent(new CustomEvent(type, { detail })), [
+        `pal-benchmark-${name}`,
+        JSON.stringify(data),
+      ] as const);
+    type Entry = { id: number };
+    const snapshot = JSON.parse(
+      await page.evaluate(() => (window as Window & { palBenchmarkSnapshot?: string }).palBenchmarkSnapshot ?? "{}"),
+    ) as { view: { entries: Entry[] }; earlier: Entry[] };
+    const history = [...snapshot.earlier, ...snapshot.view.entries];
+    assert.equal(history.length, entries, "The page did not receive the fixture's snapshot.");
+    const committed = {
+      id: Math.max(...history.map((entry) => entry.id)) + 1,
+      kind: "pi.assistant",
+      model: [fauxAssistantMessage(text)],
+    };
+    await emit(
+      "event",
+      protocol === "view"
+        ? [
+            ["p", ["entries"], snapshot.view.entries.length, 0, [committed]],
+            ["d", ["docs", "pi.live", "generation"]],
+          ]
+        : { type: "message_end", message: committed.model[0], entry: committed },
+    );
+    await settle();
+    await steady("the commit");
+    await exact("after the commit");
+    await emit("snapshot", { ...snapshot, view: { ...snapshot.view, entries: [...snapshot.view.entries, committed] } });
+    await settle();
+    await steady("snapshot replacement");
+    await exact("after snapshot replacement");
     assert.equal(await input.inputValue(), "Preserve my draft and focus", "The draft changed.");
     assert(await input.evaluate((node) => node === document.activeElement), "The composer lost focus.");
-    assert.equal(await scroller.evaluate((node) => node.scrollTop), scrollBefore, "The scroll position moved.");
-    assert.equal(await page.locator(".assistant .md").count(), entries + 1, "History was not fully rendered.");
-    assert.equal(
-      await page.locator(".assistant .md").last().locator("p").textContent(),
-      "Live profile" + ".".repeat(updates),
-      "The live text is not exact.",
-    );
     assert.deepEqual(provider.requests, [], "The benchmark reached a model provider.");
     assert.deepEqual(errors, [], "The page reported errors.");
     return sample;

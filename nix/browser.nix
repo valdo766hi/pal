@@ -25,6 +25,7 @@ stdenv.mkDerivation {
       (root + "/package.json")
       (root + "/pnpm-lock.yaml")
       (root + "/pnpm-workspace.yaml")
+      (root + "/.pnpmfile.cjs")
       (root + "/vitest.feasibility.config.ts")
       (root + "/test/feasibility")
     ];

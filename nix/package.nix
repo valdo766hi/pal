@@ -4,6 +4,7 @@
   nodejs_24,
   pnpm_11,
   fetchPnpmDeps,
+  fetchzip,
   pnpmConfigHook,
   makeWrapper,
   bash,
@@ -27,17 +28,19 @@
 let
   root = sourceRoot;
   nativeLock = import (root + "/nix/release-lock.nix") { inherit stdenv sourceRoot; };
-  # Chromium must match the pinned Playwright client.
-  browsers = playwright-driver.browsers.override {
-    withChromium = false;
-    withChromiumHeadlessShell = true;
-    withFirefox = false;
-    withWebkit = false;
-    withFfmpeg = false;
+  # The browser renders untrusted pages, so it takes Chrome for Testing's current stable headless shell rather than the
+  # older build Playwright bundles; nixpkgs' package of that same archive supplies the libraries. Update the version and
+  # hash at each Chrome security release (https://googlechromelabs.github.io/chrome-for-testing/, Stable, linux64).
+  chromeForTesting = "156.0.8078.80";
+  headlessShell = playwright-driver.components.chromium-headless-shell.overrideAttrs {
+    src = fetchzip {
+      url = "https://storage.googleapis.com/chrome-for-testing-public/${chromeForTesting}/linux64/chrome-headless-shell-linux64.zip";
+      stripRoot = false;
+      hash = "sha256-7taK/N39J9QW6EfHQb5iQrsxhXiIT8LKkKHp8PNcQp4=";
+    };
   };
-  headlessShell = "${browsers}/chromium_headless_shell-${playwright-driver.browsersJSON.chromium-headless-shell.revision}/chrome-headless-shell-linux64/chrome-headless-shell";
   browserEnv = lib.optionalAttrs stdenv.hostPlatform.isLinux {
-    PAL_CHROMIUM = headlessShell;
+    PAL_CHROMIUM = "${headlessShell}/chrome-headless-shell-linux64/chrome-headless-shell";
     PAL_BWRAP = lib.getExe bubblewrap;
     PAL_SOCAT = lib.getExe socat;
     PAL_SYSTEMD_RUN = "${systemd}/bin/systemd-run";
@@ -49,11 +52,13 @@ let
     (root + "/package.json")
     (root + "/pnpm-lock.yaml")
     (root + "/pnpm-workspace.yaml")
+    (root + "/.pnpmfile.cjs")
   ];
   appFiles = manifests ++ [
     (root + "/tsconfig.json")
     (root + "/vite.config.ts")
     (root + "/src")
+    (root + "/plugins")
     (root + "/web")
     (root + "/scripts/release-manifest.ts")
   ];
@@ -115,7 +120,7 @@ stdenv.mkDerivation (finalAttrs: {
     };
     pnpm = pnpm_11;
     fetcherVersion = 4;
-    hash = "sha256-aNRDjTHp4JoJt0015vRuHx5MPR03TFM3IuwJo4jFWEo=";
+    hash = "sha256-Vw1XIEzyKlI54KjG5BKcUJjXU7J9qRUQpkU52gUN8w0=";
   };
 
   nativeBuildInputs = [
@@ -166,6 +171,7 @@ stdenv.mkDerivation (finalAttrs: {
     inherit
       buildNodePty
       browserEnv
+      chromeForTesting
       releaseEnv
       nativeLock
       ;

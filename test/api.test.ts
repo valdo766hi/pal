@@ -6,8 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { watchEvents } from "@earendil-works/pi-durable";
+import { applyImmutable, decoder } from "@earendil-works/chord/delta";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import type { ConversationView } from "@earendil-works/pi-durable";
 import { commentFeedback } from "../src/core/feedback.ts";
 import { afterEach, describe, expect, it } from "vitest";
 import { startMcpFixture } from "./fixtures/mcp-server.ts";
@@ -19,6 +20,7 @@ import { browse, startOpenAIFixture } from "./fixtures/openai-server.ts";
 import { fakeReleaseControl } from "./fixtures/releases.ts";
 import type { ReleaseRpc } from "../src/core/release-rpc.ts";
 import { MIGRATIONS } from "../src/storage/migrations.ts";
+import { history } from "../src/core/transcript.ts";
 
 const cleanups: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
@@ -170,6 +172,15 @@ describe("API", () => {
       await reopened.store.database.get("SELECT value FROM pal_settings WHERE key = 'setup:model-deferred'"),
     ).toEqual({ value: "true" });
     expect(await reopened.settings.defaultModel()).toBeUndefined();
+  });
+
+  it("keeps the owner's command limit between the default and the ceiling", async () => {
+    const { api, pal } = await signedIn();
+    expect(await api("GET", "command-timeout")).toEqual({ status: 200, body: { seconds: 120 } });
+    for (const seconds of [119, 1801, 300.5, "300"])
+      expect((await api("PUT", "command-timeout", { seconds })).status).toBe(400);
+    expect(await api("PUT", "command-timeout", { seconds: 1800 })).toEqual({ status: 200, body: { seconds: 1800 } });
+    expect(await pal.settings.commandTimeout()).toBe(1800);
   });
 
   it("stores an owner-only working goal without choosing a model, starting work or dropping stale edits", async () => {
@@ -364,7 +375,7 @@ describe("API", () => {
     const { api, base, cookie, pal } = await signedIn();
     const project = (await api("POST", "projects", { requestId: "api-memory-project", name: "Context" })).body.project;
     const chat = (await api("POST", "chats", { requestId: "api-memory-chat", projectId: project.id })).body.chat;
-    const path = `projects/${project.id}/memory`;
+    const path = `plugins/memory/projects/${project.id}/items`;
     const input = {
       title: "Journal",
       body: "Keep durable state in SQLite",
@@ -397,10 +408,10 @@ describe("API", () => {
       (await api("PUT", item, { ...correction, revision: 2, source: { kind: "owner", trusted: true } })).status,
     ).toBe(400);
     const other = (await api("POST", "projects", { requestId: "api-foreign-memory", name: "Foreign" })).body.project;
-    expect((await api("GET", `projects/${other.id}/memory/${saved.body.id}/source`)).status).toBe(403);
-    expect((await api("GET", `projects/${other.id}/memory`)).body.items).toEqual([]);
+    expect((await api("GET", `plugins/memory/projects/${other.id}/items/${saved.body.id}/source`)).status).toBe(403);
+    expect((await api("GET", `plugins/memory/projects/${other.id}/items`)).body.items).toEqual([]);
     expect((await api("GET", `${path}?workspace=`)).status).toBe(400);
-    expect((await api("POST", `projects/${project.id}/memory-index`)).status).toBe(200);
+    expect((await api("POST", `plugins/memory/projects/${project.id}/index`)).status).toBe(200);
     expect((await api("DELETE", item, { revision: 1 })).status).toBe(409);
     expect((await api("DELETE", item, { revision: 2 })).status).toBe(200);
     expect((await api("GET", path)).body.items).toEqual([]);
@@ -959,25 +970,22 @@ describe("API", () => {
     expect(fixture.calls.map((call) => call.name)).toEqual(["fetch"]);
     const chat = (await pal.chats.list(b.id))[0];
     if (chat === undefined) throw new Error("missing chat");
-    const events = await watchEvents(pal.harness, chat.conversationId, context);
-    try {
-      const receipts = events.snapshot.entries.filter((entry) => entry.kind === "pal.mcp");
-      expect(receipts).toHaveLength(1);
-      expect(receipts[0]).toMatchObject({
-        data: {
-          mcp: {
-            server: server.id,
-            serverName: "Scoped",
-            tool: "fetch",
-            isError: false,
-            sources: [{ url: "https://fixture.invalid/durable", kind: "requested" }],
-          },
+    const chatConversation = await pal.harness.conversation(chat.conversationId, context);
+    if (chatConversation === undefined) throw new Error("missing conversation");
+    const receipts = (await history(chatConversation, context)).filter((entry) => entry.kind === "pal.mcp");
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({
+      data: {
+        mcp: {
+          server: server.id,
+          serverName: "Scoped",
+          tool: "fetch",
+          isError: false,
+          sources: [{ url: "https://fixture.invalid/durable", kind: "requested" }],
         },
-      });
-      expect(receipts[0]?.model ?? []).toEqual([]);
-    } finally {
-      await events.stop();
-    }
+      },
+    });
+    expect(receipts[0]?.model ?? []).toEqual([]);
   });
 
   it.each(["https://pal.example", "http://100.64.0.10:7337"])(
@@ -1158,21 +1166,37 @@ describe("API", () => {
 
     const events = await fetch(`${base}/api/chats/${chat.id}/events`, { headers: { cookie: cookie() } });
     expect(events.headers.get("content-type")).toMatch(/text\/event-stream/);
-    const reader = events.body?.getReader();
+    const reader = events.body?.pipeThrough(new TextDecoderStream()).getReader();
     if (reader === undefined) throw new Error("no event stream");
-    let text = "";
-    const first = await reader.read();
-    text += new TextDecoder().decode(first.value);
-    expect(text).toMatch(/^event: snapshot/);
+    // The view as the browser rebuilds it: each snapshot replaces it, and each change applies to it.
+    let view: ConversationView | undefined;
+    let codec = decoder();
+    let pending = "";
+    const read = async () => {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("event stream ended early");
+      pending += value;
+      for (let end = pending.indexOf("\n\n"); end >= 0; end = pending.indexOf("\n\n")) {
+        const block = pending.slice(0, end);
+        pending = pending.slice(end + 2);
+        const [, event, data] = /^event: (.*)\ndata: (.*)$/.exec(block) ?? [];
+        if (event === "snapshot") {
+          view = (JSON.parse(data ?? "") as { view: ConversationView }).view;
+          codec = decoder();
+        } else if (event === "change" && view !== undefined) {
+          view = applyImmutable(view, codec.decode(JSON.parse(data ?? "") as unknown[]));
+        }
+      }
+    };
+    await read();
+    expect(view).toMatchObject({ entries: [] });
 
     const admitted = await api("POST", `chats/${chat.id}/inputs`, { requestId: "input-request-1", text: "hi" });
     expect(admitted.status).toBe(200);
-    while (!text.includes('"type":"run_end"')) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("event stream ended early");
-      text += new TextDecoder().decode(value);
-    }
-    expect(text).toContain('"text":"Hello"');
+    const answered = () =>
+      view?.docs["pi.live"]?.run === undefined && JSON.stringify(view?.entries).includes('"text":"Hello"');
+    while (!answered()) await read();
+    expect([view?.entries[0]?.kind, view?.entries.at(-1)?.kind]).toEqual(["pi.user", "pi.assistant"]);
     await reader.cancel();
 
     const projects = (await api("GET", "projects")).body.projects;
@@ -1370,6 +1394,51 @@ describe("API", () => {
     expect(JSON.stringify(request?.body.input)).toContain("The launch is on Tuesday.");
     expect(JSON.stringify(request?.body.input)).toContain('name=\\"plan.txt\\"');
 
+    // A payload lost after its upload blocks only the chat that sends it.
+    const lost = (
+      await api("POST", `projects/${project.id}/uploads`, { name: "lost.txt", size: text.length, type: "text/plain" })
+    ).body.upload;
+    await putBytes(base, cookie(), lost.id, text);
+    await rm(join(pal.store.path, "..", "uploads", project.id, lost.id, "data"));
+    const blocked = (await api("POST", "chats", { requestId: "chat-request-3", projectId: project.id })).body.chat;
+    const refused = await api("POST", `chats/${blocked.id}/inputs`, {
+      requestId: "input-lost",
+      text: "Read it",
+      attachments: [lost.id],
+    });
+    expect([refused.status, refused.body.error]).toEqual([409, "input_blocked"]);
+    const held = await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-held", text: "Then this" });
+    expect([held.status, held.body.error]).toEqual([409, "input_held"]);
+    // A sender that lost its reply can find out what became of a request without sending it again.
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-lost`)).body).toEqual({ state: "admitting" });
+    // Diagnostics say which input holds the chat and how to recover, but not its text or attachment's name.
+    const diagnosed = (await api("GET", `chats/${blocked.id}/diagnostics`)).body;
+    expect(diagnosed.chat.blocked).toEqual({
+      requestId: "input-lost",
+      cause: "attachment-unreadable",
+      recovery: expect.stringContaining("Retry it with its recorded message, or withdraw it"),
+    });
+    expect(JSON.stringify(diagnosed)).not.toMatch(/Read it|lost\.txt/);
+    const never = await api("GET", `chats/${blocked.id}/inputs/input-held`);
+    expect([never.status, never.body.error]).toEqual([404, "input_not_found"]);
+    const listed = (await api("GET", "projects")).body.projects.find((item: { id: string }) => item.id === project.id);
+    expect(listed.chats.find((item: { id: string }) => item.id === blocked.id).blocked).toMatchObject({
+      requestId: "input-lost",
+      text: "Read it",
+    });
+    expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/retry`)).body.error).toBe("input_blocked");
+    expect((await api("POST", `chats/${blocked.id}/inputs/input-lost/withdraw`)).body).toEqual({ withdrawn: true });
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-lost`)).body).toEqual({ state: "withdrawn" });
+    const after = await api("POST", `chats/${blocked.id}/inputs`, { requestId: "input-after", text: "Now this" });
+    expect(after.status).toBe(200);
+    expect((await api("GET", `chats/${blocked.id}/inputs/input-after`)).body).toEqual({
+      state: "admitted",
+      admission: after.body.admission,
+    });
+    expect(
+      (await api("POST", `chats/${chat.id}/inputs`, { requestId: "input-request-2", text: "Still?" })).status,
+    ).toBe(200);
+
     // An upload left unfinished is dropped when Pal next opens.
     const pending = (
       await api("POST", `projects/${project.id}/uploads`, { name: "b.txt", size: 5, type: "text/plain" })
@@ -1435,9 +1504,12 @@ describe("API", () => {
       providers: expect.arrayContaining([{ id: "openrouter", enabled: false, hasKey: true }]),
       chatgpt: { connected: false },
       unfinished: { tasks: 0, approvals: 0 },
+      admission: { stopped: false },
+      reports: { counts: {}, recent: [] },
     });
     expect(body.chat).toMatchObject({
       chat: chat.id,
+      blocked: null,
       workspace: { mode: "local", state: "failed" },
       running: false,
       inputs: [{ requestId: "diagnostics-input", state: "admitted", submissionId: expect.any(Number) }],

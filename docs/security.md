@@ -28,9 +28,12 @@ for sensitive work.
 - **No ambient keys.** Pal never reads model keys from its environment. Credentials are never passed to agent
   commands, terminals or local programs, except a local program's own consented key.
 - **Diagnostics.** The owner-only diagnostics export (Settings, and a chat's problem notices) holds versions,
-  states, counts, request IDs and command exit codes. It omits keys, tokens, server addresses, commands, outputs and
-  chat or file contents. Free-form provider and workspace errors are not exported: model failures use coarse
-  categories, not error bodies. Inspect detailed failures locally; review IDs and other metadata before sharing.
+  states, counts, request IDs and command exit codes. It also says why work is held and how to recover: a chat's
+  blocked input (request ID and cause), stopped admission, Pi's non-fatal reports since start (category, extension,
+  task kind and reason) and plugin components that failed to load in that tab. It omits keys, tokens, server
+  addresses, commands, outputs and chat or file contents, including attachment names. Free-form provider, workspace
+  and Pi errors are not exported: failures use coarse categories, not error bodies. Inspect detailed failures locally;
+  review IDs and other metadata before sharing.
 
 ## What the agent can do
 

@@ -19,19 +19,11 @@ import {
   ToolTask,
   UsageDoc,
 } from "@earendil-works/pi-durable";
-import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { Type } from "typebox";
 import { abortBudgetTask } from "../pi/budget.ts";
 
 export const HELPERS_EXTENSION = "pal.helpers";
-export const AGENTS_NAMESPACE: CodemodeNamespace = {
-  name: "agents",
-  prefix: "agents_",
-  description: "Read-only research helpers.",
-  instructions:
-    "agents_delegate hands one self-contained research question to a helper with this chat's model, its granted folders (read-only) and internet tools, and returns the helper's answer. Helpers cannot write files, run commands, use the browser or start helpers. State the purpose and everything the helper needs; it does not see this chat. An unanswered helper may have left internet-tool calls with unknown outcomes: inspect before repeating them.",
-};
 /** Bounds on one parent run's helpers; every one is enforced from durable state, so restarts keep them. */
 export const HELPER_LIMITS = {
   perRun: 4,
@@ -58,12 +50,15 @@ const HELPER_TOOLS = new Set([
 ]);
 /** Extensions a helper's conversation never selects, whatever its parent has. */
 const EXCLUDED = [HELPERS_EXTENSION, "pal.shell", "pal.browser", "pal.compact"];
+/** Diagnostic codes of the results Pi writes for a tool call it cut off rather than one that finished. */
+const UNCONFIRMED = new Set(["interrupted", "restart_limit", "aborted", "abandoned"]);
 
 type Effect = { task: number; tool: string; state: "started" | "finished" };
 type Outcome = { id: string; status: "answered" | "unanswered"; reason: string; unknown: Effect[] };
 const Helper = defineDoc({
   kind: "pal.helper",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "current",
@@ -85,6 +80,7 @@ const Helper = defineDoc({
 const Allowance = defineDoc({
   kind: "pal.helpers",
   version: 1,
+  checkpointWhen: () => false,
   scope: "conversation",
   history: "latest",
   fork: "current",
@@ -93,6 +89,7 @@ const Allowance = defineDoc({
 const Slots = defineDocFamily({
   kind: "pal.helper-slots",
   version: 1,
+  checkpointWhen: () => false,
   scope: "session",
   family: true,
   initial: () => ({ tasks: [] as number[] }),
@@ -155,20 +152,23 @@ export function helperTools(options: {
   project: (conversation: ConversationId) => Promise<string | undefined>;
   /** Read at each check; tests lower them. */
   limits?: HelperLimits;
+  /** The Harness clock: a helper's deadline runs on it, apart from any script's. */
+  now?: () => number;
 }) {
   const limits = options.limits ?? HELPER_LIMITS;
+  const now = options.now ?? Date.now;
   return defineExtension({
     name: HELPERS_EXTENSION,
     tools: [
       defineTool({
         name: "agents_delegate",
         description:
-          "Ask a read-only research helper one self-contained question and wait for its answer. The helper uses this chat's model and can read granted folders and use granted internet tools, but cannot write, run commands, browse or start helpers.",
+          "Ask a read-only research helper one self-contained question and wait for its answer. The helper uses this chat's model and can read granted folders and use granted internet tools, but cannot write, run commands, browse or start helpers. State the purpose and everything the helper needs; it does not see this chat. An unanswered helper may have left internet-tool calls with unknown outcomes: inspect before repeating them.",
         parameters: Type.Object({
           purpose: Type.String({ minLength: 1, maxLength: 200 }),
           task: Type.String({ minLength: 1, maxLength: 8000 }),
         }),
-        callers: ["tools"],
+        callers: ["model"],
         replay: "safe",
         outputLimits: { maxBytes: 16 * 1024, maxLines: 400 },
         structuredOutputSchema: Type.Object({
@@ -219,7 +219,7 @@ export function helperTools(options: {
             helper.task = api.taskId;
             helper.run = run;
             helper.purpose = args.purpose;
-            helper.deadline = Date.now() + limits.minutes * 60_000;
+            helper.deadline = now() + limits.minutes * 60_000;
             await tx.appendEntry(api.conversationId, {
               kind: "pal.helper",
               data: { helper: { task: api.taskId, conversation: created.id, purpose: args.purpose } },
@@ -250,7 +250,7 @@ export function helperTools(options: {
           let settled;
           try {
             const deadline = new Promise<"deadline">((resolve) => {
-              timer = setTimeout(() => resolve("deadline"), Math.max(0, state.deadline - Date.now()));
+              timer = setTimeout(() => resolve("deadline"), Math.max(0, state.deadline - now()));
             });
             const result = await Promise.race([submission.wait(context), deadline]);
             if (result === "deadline") {
@@ -324,7 +324,7 @@ export function helperTools(options: {
  * Helper budgets and effect journal, composed into the mandatory context extension like the evaluation budget, so a
  * helper's copied extension selection always carries them. Conversations without a helper record are untouched.
  */
-export function helperBudget(harness: () => Harness, limits: HelperLimits = HELPER_LIMITS) {
+export function helperBudget(harness: () => Harness, limits: HelperLimits = HELPER_LIMITS, now = Date.now) {
   const tokens = async (api: HookApi, conversation: ConversationId, context: Context) =>
     Object.values((await api.snapshot(UsageDoc, conversation, context))?.models ?? {}).reduce(
       (sum, usage) => sum + (usage.totalTokens ?? 0),
@@ -338,7 +338,7 @@ export function helperBudget(harness: () => Harness, limits: HelperLimits = HELP
     let spent = 0;
     for (const child of allowance?.run === helper.run ? allowance.children : [api.conversationId])
       spent += await tokens(api, child as ConversationId, context);
-    if (Date.now() >= helper.deadline) return `its ${limits.minutes}-minute limit passed`;
+    if (now() >= helper.deadline) return `its ${limits.minutes}-minute limit passed`;
     if (request && helper.turns >= limits.turns) return `it used its ${limits.turns} model requests`;
     if ((await tokens(api, api.conversationId, context)) >= limits.tokens) return `it used its ${limits.tokens} tokens`;
     if (spent >= limits.runTokens) return `this run's helpers used their ${limits.runTokens} tokens`;
@@ -394,6 +394,9 @@ export function helperBudget(harness: () => Harness, limits: HelperLimits = HELP
           return undefined;
         },
         afterTool: async (_call, result, api, context) => {
+          // Pi also passes the results it writes for a call cut off by a crash or an abort; that call may have
+          // reached its server, so its effect stays unknown.
+          if (result.diagnostics?.some((diagnostic) => UNCONFIRMED.has(diagnostic.code ?? ""))) return result;
           const helper = await api.snapshot(Helper, api.conversationId, context);
           if (helper?.effects.some((effect) => effect.task === api.taskId && effect.state === "started"))
             await harness().commit(async (tx) => {
