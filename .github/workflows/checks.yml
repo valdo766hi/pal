@@ -28,11 +28,11 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b
         with:
           install_url: https://releases.nixos.org/nix/nix-2.34.9/install
           enable_kvm: false
@@ -92,7 +92,7 @@ jobs:
             ".#packages.$SYSTEM.ui-check"
           readlink ui-runner | tee -a identity.txt
           ./ui-runner/bin/pal-ui-check "$PWD/native-ui"
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: 0ac668e4996e56a4bfc1725a37ab9a4a31c6b6f1
           path: benchmark-baseline
@@ -224,11 +224,11 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: cachix/install-nix-action@3c6342b75005b9cc7c7d4069c3e9179247c89012
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b
         with:
           install_url: https://releases.nixos.org/nix/nix-2.34.9/install
           enable_kvm: false
@@ -239,7 +239,7 @@ jobs:
             .#checks.x86_64-linux.package .#checks.x86_64-linux.smoke \
             .#checks.x86_64-linux.tests .#checks.x86_64-linux.browser \
             .#checks.x86_64-linux.e2e
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: 0ac668e4996e56a4bfc1725a37ab9a4a31c6b6f1
           path: benchmark-baseline
