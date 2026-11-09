@@ -8,6 +8,12 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # Pal runs on Node 24, so its types stay on that major.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # Must match the browsers nixpkgs provides (a guard test enforces it), so it moves with nixpkgs.
+      - dependency-name: playwright-core
   - package-ecosystem: github-actions
     directory: /
     schedule:
