@@ -1560,7 +1560,6 @@
     gap: 22px;
   }
   .item {
-    position: relative;
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -1605,16 +1604,10 @@
   }
   /* Times stay in the accessible text; on hover-capable screens they appear with the message they belong to. */
   .at {
-    position: absolute;
-    top: calc(100% + 2px);
     font-size: 11.5px;
-    line-height: 1.2;
     color: var(--tx3);
     font-variant-numeric: tabular-nums;
     transition: opacity var(--fast) var(--ease);
-  }
-  .user .at {
-    right: 0;
   }
   @media (hover: hover) {
     .at {

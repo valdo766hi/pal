@@ -2986,6 +2986,8 @@ describe("Pal in a browser", () => {
       await approval.getByRole("button", { name: "Approve once", exact: true }).click();
       await page.getByText("Hello", { exact: true }).waitFor();
       await expect.poll(() => visited.filter((path) => path === "/clicked").length).toBe(beforeAction + 1);
+      await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+      await openWork();
       await approval.getByText("Browser action approved", { exact: true }).waitFor();
     } finally {
       fixture.behavior.responses = "ok";
