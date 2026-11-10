@@ -292,12 +292,28 @@
     return { text: helpersPending ? "checking status" : "status unavailable", failed: true };
   }
   const items = $derived(historyItems.concat(build([], stream?.partial, [])));
+  /**
+   * Failed model attempts Pi retried: a later attempt answered in the same turn, or the running turn is retrying. Kept
+   * as a string so the history's rows are rebuilt only when this changes, not on every streamed update.
+   */
+  const retriedIds = $derived.by(() => {
+    const ids: string[] = [];
+    items.forEach((item, index) => {
+      if (item.kind !== "assistant" || item.error === undefined || item.live) return;
+      const rest = items.slice(index + 1);
+      const next = rest.findIndex((later) => later.kind === "user");
+      const turn = next < 0 ? rest : rest.slice(0, next);
+      if (turn.some((later) => later.kind === "assistant") || (next < 0 && stream?.running === true)) ids.push(item.id);
+    });
+    return ids.join(" ");
+  });
+  const retried = $derived(new Set(retriedIds.split(" ")));
   const works = (item: Item): item is Work =>
     item.kind === "shell" ||
     item.kind === "mcp" ||
     item.kind === "helper" ||
     (item.kind === "approval" && item.approval.state !== "pending") ||
-    (item.kind === "assistant" && item.steps.length > 0);
+    (item.kind === "assistant" && (item.steps.length > 0 || retried.has(item.id)));
   /** Adds `item` to `rows`: tool activity joins the run's line before it; what the owner reads or answers stands alone. */
   function place(rows: Row[], item: Item): Row[] {
     const last = rows.at(-1);
@@ -306,7 +322,12 @@
     // Named for what precedes it, so the line stays the same one when its first live step commits.
     else rows.push({ kind: "work", id: `work-${last?.id ?? "start"}`, items: [item] });
     // A step's turn that failed or was stopped says so below its line.
-    if (item.kind === "assistant" && item.steps.length > 0 && (item.error !== undefined || item.stopped))
+    if (
+      item.kind === "assistant" &&
+      item.steps.length > 0 &&
+      !retried.has(item.id) &&
+      (item.error !== undefined || item.stopped)
+    )
       rows.push({ ...item, id: `${item.id}-end`, texts: [], steps: [] });
     return rows;
   }
@@ -854,7 +875,9 @@
           : [],
     );
     const line = summarize(calls) || (steps.some((step) => step.result !== undefined) ? "Ran a script" : "");
-    if (active) return line || "Working";
+    const retries = turns.filter((turn) => retried.has(turn.id)).length;
+    if (active) return line || (retries > 0 ? "Retrying" : "Working");
+    const again = retries === 0 ? "" : retries === 1 ? "retried once" : `retried ${retries} times`;
     const failed = steps.filter((step) => step.result?.isError).length;
     const unconfirmed = items.some((item) =>
       item.kind === "assistant"
@@ -864,9 +887,9 @@
           : item.kind === "helper" &&
             (helpers.find((helper) => helper.task === item.task)?.unknownEffects.length ?? 0) > 0,
     );
-    return [line || "Worked", failed > 0 ? `${failed} failed` : "", unconfirmed ? "outcome unconfirmed" : ""]
-      .filter((part) => part !== "")
-      .join(", ");
+    const parts = [line, failed > 0 ? `${failed} failed` : "", unconfirmed ? "outcome unconfirmed" : "", again];
+    const said = parts.filter((part) => part !== "").join(", ");
+    return said === "" ? "Worked" : said.charAt(0).toUpperCase() + said.slice(1);
   }
   function receiptState(receipt: ShellReceipt, running: boolean): string {
     if (receipt.timedOut) return "Timed out";
@@ -1091,6 +1114,13 @@
                     {@const nested = item.items.slice(0, index).findLast((before) => before.kind === "assistant")}
                     {#if part.kind === "assistant"}
                       {#each part.texts as text, at (at)}<li class="say">{text}</li>{/each}
+                      {#if retried.has(part.id)}
+                        <li class="plain">
+                          <span class="verb">Model request failed</span>
+                          <span class="obj">{part.error}</span>
+                          <span class="st">{index === item.items.length - 1 ? "Retrying" : "Retried"}</span>
+                        </li>
+                      {/if}
                       {#each part.steps.filter((step) => !receipted(step, item.items)) as step (step.id)}
                         {@render stepRow(`${part.id}/${step.id}`, step, part.live)}
                       {/each}

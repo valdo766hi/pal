@@ -519,6 +519,29 @@ describe("Pal in a browser", () => {
     await page.getByLabel("Message").waitFor();
   });
 
+  it("folds a model attempt Pal retried into the run line instead of showing it as a failure", async () => {
+    const answers = await page.getByText("Hello", { exact: true }).count();
+    const failures = await page.getByText("The model request failed.").count();
+    fixture.behavior.timeouts = 1;
+    try {
+      await page.getByLabel("Message").fill("answer after a provider timeout");
+      await page.getByRole("button", { name: "Send" }).click();
+      await page.getByText("Hello", { exact: true }).nth(answers).waitFor({ timeout: 20_000 });
+      await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+      expect(await page.getByText("The model request failed.").count()).toBe(failures);
+      const line = page.getByRole("button", { name: "Retried once", exact: true });
+      await line.click();
+      await page
+        .locator(".rows")
+        .last()
+        .getByText(/Request timed out\./)
+        .waitFor();
+      await line.click();
+    } finally {
+      delete fixture.behavior.timeouts;
+    }
+  });
+
   it("explains the usage limit instead of retrying", async () => {
     fixture.behavior.responses = "usage_limit";
     await page.getByLabel("Message").fill("again");

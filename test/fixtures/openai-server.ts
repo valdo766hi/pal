@@ -23,6 +23,8 @@ export type FixtureBehavior = {
   steps?: { say?: string; script?: string; call?: { name: string; arguments: Record<string, unknown> } }[];
   /** The assistant's text answer. */
   reply: string;
+  /** How many of the next responses fail the way ChatGPT reports a run it timed out on its side. */
+  timeouts?: number;
   /** While set, JWKS responses wait for it, which holds ID-token verification mid-sign-in. */
   jwks?: Promise<unknown>;
 };
@@ -174,6 +176,11 @@ export async function startOpenAIFixture() {
       const output = (item: { type?: string }) =>
         item.type === "custom_tool_call_output" || item.type === "function_call_output";
       const answers = input.slice(input.findLastIndex((item) => item.role === "user") + 1).filter(output).length;
+      if ((behavior.timeouts ?? 0) > 0) {
+        behavior.timeouts = (behavior.timeouts ?? 0) - 1;
+        const failed = { id: "resp_1", status: "failed", error: { message: "Request timed out." } };
+        return response.end(sse([created, { type: "response.failed", response: failed }]));
+      }
       const step: NonNullable<FixtureBehavior["steps"]>[number] | undefined =
         behavior.steps !== undefined ? behavior.steps[answers] : output(latest ?? {}) ? undefined : behavior;
       if (behavior.responses === "script" && step !== undefined) {
