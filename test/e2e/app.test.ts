@@ -147,6 +147,21 @@ async function openPanel(name: string, view: Page = page): Promise<void> {
   await view.getByRole("button", { name, exact: true }).click();
 }
 
+/** Opens the latest run's activity line, which lists what the run did. */
+async function openWork(view: Page = page): Promise<void> {
+  const line = view.locator(".activity > button.acth").last();
+  if ((await line.getAttribute("aria-expanded")) !== "true") await line.click();
+}
+
+/** Opens every run's activity line and the internet lookups in them, showing their source receipts. */
+async function openSources(view: Page = page): Promise<void> {
+  await view.locator(".activity > button.acth").first().waitFor();
+  const closed = view.locator(
+    '.activity > button.acth[aria-expanded="false"], .rows .source > button[aria-expanded="false"]',
+  );
+  while ((await closed.count()) > 0) await closed.first().click();
+}
+
 /** The composer's model control opens on reasoning; its model header opens the model list. */
 async function openModelList(): Promise<void> {
   await page.getByRole("button", { name: /^Model and reasoning/ }).click();
@@ -541,9 +556,9 @@ describe("Pal in a browser", () => {
     await page.goto(chatUrl);
     await page.getByLabel("Message").fill("research durable agents");
     await page.getByRole("button", { name: "Send" }).click();
-    await page.getByRole("button", { name: /Ran a script/ }).click();
-    await page.getByText(`${server?.id} · search`).waitFor();
     // The model answers once the script's result is back; the run ends instead of looping.
+    await page.getByRole("button", { name: "Used 1 tool" }).click();
+    await page.getByText(`${server?.id} · search`).waitFor();
     await page.getByText("Hello").last().waitFor();
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     expect(mcp.calls.map((call) => call.name)).toEqual(["search"]);
@@ -835,6 +850,7 @@ describe("Pal in a browser", () => {
 
   it("persists source receipts, keeps links inert until clicked and labels failed retrieval", async () => {
     const card = page.getByRole("region", { name: "Fixture search sources" });
+    await openSources();
     await card.waitFor();
     const received = await card.locator("time").getAttribute("datetime");
     const requests: string[] = [];
@@ -844,6 +860,7 @@ describe("Pal in a browser", () => {
     });
     try {
       await page.reload();
+      await openSources();
       await card.waitFor();
       expect(await card.locator("time").getAttribute("datetime")).toBe(received);
       await card.locator("summary").click();
@@ -876,12 +893,15 @@ describe("Pal in a browser", () => {
     if (server === undefined) throw new Error("missing server");
     fixture.behavior.responses = "script";
     fixture.behavior.script = `return await tools.mcp__${server.id}__fetch({ url: "https://fixture.invalid/missing" });`;
+    const answers = await page.getByText("Hello", { exact: true }).count();
     await page.getByLabel("Message").fill("fetch the missing page");
     await page.getByRole("button", { name: "Send" }).click();
     const failed = page.getByRole("region", { name: "Fixture fetch sources" });
+    await page.getByText("Hello", { exact: true }).nth(answers).waitFor();
+    await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+    await openSources();
     await failed.getByText("Server error", { exact: true }).waitFor();
     expect(await failed.getByRole("link").count()).toBe(0);
-    await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     fixture.behavior.responses = "ok";
   });
 
@@ -922,6 +942,7 @@ describe("Pal in a browser", () => {
         expect((await accepted).status()).toBe(200);
         await view.getByText("Hello", { exact: true }).nth(answer).waitFor();
         await view.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+        await openSources(view);
       };
       const cards = view.getByRole("region", { name: "Exa web_search_exa sources" });
       await submit("lookup a fixture source", 0);
@@ -942,6 +963,8 @@ describe("Pal in a browser", () => {
       expect(cachedText).toContain("Age at lookup:");
       expect(cachedText).toContain("This was not a live lookup.");
       await view.reload();
+      await view.getByText("Hello", { exact: true }).nth(1).waitFor();
+      await openSources(view);
       await cached.waitFor();
       expect(await cached.innerText()).toBe(cachedText);
       expect(
@@ -1202,13 +1225,57 @@ describe("Pal in a browser", () => {
     const sent = fixture.apiRequests.filter((call) => call.path === "/v1/responses");
     expect(JSON.stringify(sent.map((call) => call.body.input))).toContain("The launch is on Tuesday.");
     expect(JSON.stringify(sent.map((call) => call.body.input))).not.toContain("Not for this message.");
-    await page
-      .getByRole("button", { name: /Ran a script/ })
-      .last()
-      .click();
+    await openWork();
+    await page.getByRole("button", { name: "Listed files" }).last().click();
     await page.getByText("files_list", { exact: true }).waitFor();
     await shoot("chat-upload-1440");
     fixture.behavior.responses = "ok";
+  });
+
+  it("folds a run's steps into one line that opens to its rows and each row's details", async () => {
+    const project = (await pal.projects.list())[0];
+    if (project === undefined) throw new Error("missing project");
+    await writeFile(join(project.root, "one.md"), "first\n");
+    await writeFile(join(project.root, "two.md"), "second\n");
+    const lines = page.locator(".activity > button.acth");
+    const before = await lines.count();
+    fixture.behavior.responses = "script";
+    fixture.behavior.steps = [
+      { say: "Looking at the folder first.", script: "return await tools.files_list({});" },
+      { script: 'return await tools.files_read({ path: "one.md" });' },
+      { script: 'return await tools.files_read({ path: "two.md" });' },
+    ];
+    try {
+      await page.getByLabel("Message").fill("read both notes");
+      await page.getByRole("button", { name: "Send" }).click();
+      await page.getByRole("status").filter({ hasText: "Running" }).waitFor();
+      await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+      // Three model turns, three scripts: one line, closed until asked for.
+      expect(await lines.count()).toBe(before + 1);
+      const line = page.getByRole("button", { name: "Listed files, read 2 files", exact: true });
+      expect(await line.getAttribute("aria-expanded")).toBe("false");
+      expect(await page.getByText("Looking at the folder first.").count()).toBe(0);
+      await line.click();
+      const rows = page.locator(".rows").last().locator("> li");
+      expect(await rows.allInnerTexts()).toEqual([
+        "Looking at the folder first.",
+        "Listed files\nDone",
+        "Read\none.md\nDone",
+        "Read\ntwo.md\nDone",
+      ]);
+      // A row opens to the script that ran and what it returned.
+      const read = rows.nth(3).getByRole("button");
+      await read.click();
+      await rows.nth(3).getByText('return await tools.files_read({ path: "two.md" });', { exact: true }).waitFor();
+      await rows.nth(3).locator("pre.out").filter({ hasText: "second" }).waitFor();
+      await shoot("run-activity-1440");
+      await read.click();
+      await line.click();
+      expect(await page.locator(".activity").last().locator(".rows").count()).toBe(0);
+    } finally {
+      delete fixture.behavior.steps;
+      fixture.behavior.responses = "ok";
+    }
   });
 
   it("writes a project file and shows a real host command receipt through Code Mode", async () => {
@@ -1248,9 +1315,13 @@ describe("Pal in a browser", () => {
     await expect.poll(() => pet.getAttribute("data-pose")).toBe("work");
     await shoot("approval-pending-1440");
     await request.getByRole("button", { name: "Approve once" }).click();
+    // Once answered, the request and the command's receipt are rows of the run's one activity line.
+    await request.waitFor({ state: "detached" });
+    await openWork();
     await page.getByText("Exit 0", { exact: true }).waitFor();
     await request.getByText(/Approved once by you at/).waitFor();
-    await page.locator("summary").filter({ hasText: "Host command" }).click();
+    await page.getByRole("button", { name: /host-output/ }).click();
+    await page.getByText("Host command, not sandboxed", { exact: false }).waitFor();
     await page.getByText("host-output", { exact: true }).waitFor();
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     await expect.poll(() => pet.getAttribute("data-pose")).toBe("sit");
@@ -1294,10 +1365,10 @@ describe("Pal in a browser", () => {
     const request = page.getByRole("group", { name: "Approval request" }).filter({ hasText: "-e release" });
     await request.getByText("timeout 300 s", { exact: false }).waitFor();
     await request.getByRole("button", { name: "Approve once" }).click();
-    const receipt = page.locator("details.activity").filter({ hasText: "-e release" });
-    await receipt.locator("summary").filter({ hasText: "Running" }).click();
+    await page.getByRole("button", { name: "Working" }).click();
+    const receipt = page.locator(".rows li").filter({ hasText: "-e release" });
+    await receipt.getByRole("button").filter({ hasText: "Running" }).click();
     await receipt.getByText("started", { exact: true }).waitFor();
-    await page.getByRole("button", { name: "1 command, running" }).waitFor();
     await shoot("long-command-1440");
     await writeFile(join(project.root, "release"), "");
     await receipt.getByText("Exit 0", { exact: true }).waitFor();
@@ -1305,7 +1376,7 @@ describe("Pal in a browser", () => {
       .locator("pre.out")
       .filter({ hasText: /started\s+finished/ })
       .waitFor();
-    await page.getByRole("button", { name: "Ran 1 command" }).waitFor();
+    await page.getByRole("button", { name: "Ran 1 command", exact: true }).waitFor();
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     delete fixture.behavior.call;
     fixture.behavior.responses = "ok";
@@ -1339,6 +1410,8 @@ describe("Pal in a browser", () => {
     await page.getByRole("button", { name: "Send" }).click();
     const denied = page.getByRole("group", { name: "Approval request" }).filter({ hasText: "denied.txt" });
     await denied.getByRole("button", { name: "Deny" }).click();
+    await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
+    await openWork();
     await denied.getByText(/Denied by you at .*Nothing was run/).waitFor();
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });
     await expect(readFile(join(project.root, "denied.txt"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -1357,6 +1430,8 @@ describe("Pal in a browser", () => {
     await page.reload();
     const reloaded = page.getByRole("group", { name: "Approval request" }).filter({ hasText: "reload.txt" });
     await reloaded.getByRole("button", { name: "Approve once" }).click();
+    await reloaded.getByRole("button", { name: "Approve once" }).waitFor({ state: "detached" });
+    await openWork();
     await reloaded.getByText(/Approved once by you at/).waitFor();
     await expect.poll(() => readFile(join(project.root, "reload.txt"), "utf8").catch(() => "")).toBe("reload");
     await page.getByRole("status").filter({ hasText: "Running" }).waitFor({ state: "detached" });

@@ -1787,12 +1787,14 @@ describe("durable tool activity", () => {
       await conversation.submit({ type: "write", entry: { kind: "pi.assistant", model: [message(code)] } }, context);
     const stream = await bridgeChatEvents(page);
     await page.goto(`${base}/#/chat/${saved.id}`);
-    const activities = page.locator(".activity");
+    // Both calls belong to one run, so they are two rows of its one activity line.
+    await page.locator(".activity > .acth").click();
+    const activities = page.locator(".rows > li");
     await expect.poll(() => activities.count()).toBe(2);
     const older = activities.nth(0),
       latest = activities.nth(1);
     for (const activity of [older, latest]) {
-      await activity.locator(".acth").click();
+      await activity.getByRole("button").click();
       await activity.getByText("Outcome unconfirmed", { exact: true }).waitFor({ timeout: 5000 });
       await activity.getByText("Call reused-call", { exact: true }).waitFor();
       expect(await activity.locator(".spin").count()).toBe(0);
@@ -1916,9 +1918,10 @@ describe("chat connection and Stop failures", () => {
       );
     await bridgeChatEvents(page);
     await page.goto(`${base}/#/chat/${saved.id}`);
-    const uncertain = page.locator("details.activity").filter({ hasText: command });
+    await page.getByRole("button", { name: "Ran 1 command, outcome unconfirmed" }).click();
+    const uncertain = page.locator(".rows > li").filter({ hasText: command });
     await uncertain.getByText("Outcome unconfirmed", { exact: true }).waitFor({ timeout: 5000 });
-    await uncertain.locator("summary").click();
+    await uncertain.getByRole("button").click();
     await uncertain.getByText("Call unconfirmed-call", { exact: true }).waitFor();
     await uncertain.getByText("No completion receipt yet.", { exact: false }).waitFor();
     const input = page.getByLabel("Message", { exact: true });
@@ -1930,11 +1933,7 @@ describe("chat connection and Stop failures", () => {
     await uncertain.getByText("Outcome unconfirmed", { exact: true }).waitFor();
     expect(await page.getByRole("status").filter({ hasText: "Running" }).count()).toBe(0);
     expect(
-      await page
-        .locator("details.activity")
-        .filter({ hasText: "printf done" })
-        .getByText("Exit 0", { exact: true })
-        .count(),
+      await page.locator(".rows > li").filter({ hasText: "printf done" }).getByText("Exit 0", { exact: true }).count(),
     ).toBe(1);
     expect(await uncertain.getByRole("button", { name: /retry|repeat|run again/i }).count()).toBe(0);
     expect(await input.inputValue()).toBe("Keep this across restart");
@@ -2279,7 +2278,8 @@ describe("research helper status", () => {
       await page.goto(`${base}/#/chat/${saved.id}`);
       const alert = page.getByRole("alert").filter({ hasText: "Couldn't load helper status" });
       await alert.waitFor({ timeout: 5000 });
-      const note = page.locator(".note.helper");
+      await page.locator(".activity > .acth").click();
+      const note = page.locator(".rows .helper");
       expect(await note.innerText()).not.toContain("working");
       await alert.getByRole("button", { name: "Retry helper status" }).click();
       await pending.promise;
