@@ -34,6 +34,7 @@
   import { drafts, type PendingInput } from "../lib/drafts.svelte.ts";
   import { MAX_INPUT_ATTACHMENTS, MAX_INPUT_CHARS } from "../../../src/protocol/limits.ts";
   import type { ReviewFeedback } from "../../../src/core/feedback.ts";
+  import { type Call, describe, summarize, toolLabel } from "../lib/activity.ts";
   import { codeCopy, copyText } from "../lib/copy.ts";
   import { renderMarkdown } from "../lib/markdown.ts";
   import { rise } from "../lib/motion.ts";
@@ -93,9 +94,14 @@
     id: string;
     name: string;
     code: string | undefined;
+    /** A direct call's arguments, as a script's calls record theirs. */
+    args: string | undefined;
     latest: boolean;
-    result: { text: string; isError: boolean; calls: NestedCall[] } | undefined;
+    result: { text: string; isError: boolean; calls: NestedCall[]; task: number | undefined } | undefined;
   };
+  type Work = Extract<Item, { kind: "assistant" | "shell" | "mcp" | "helper" | "approval" }>;
+  /** A run's tool activity between two things the owner reads, shown as one line until opened. */
+  type Row = Item | { kind: "work"; id: string; items: Work[] };
   type Item =
     | { kind: "user"; id: string; text: string; at: number | undefined; attachments: Attachment[] }
     | {
@@ -286,6 +292,54 @@
     return { text: helpersPending ? "checking status" : "status unavailable", failed: true };
   }
   const items = $derived(historyItems.concat(build([], stream?.partial, [])));
+  /**
+   * Failed model attempts Pi retried: a later attempt answered in the same turn, or the running turn is retrying. Kept
+   * as a string so the history's rows are rebuilt only when this changes, not on every streamed update.
+   */
+  const retriedIds = $derived.by(() => {
+    const ids: string[] = [];
+    items.forEach((item, index) => {
+      if (item.kind !== "assistant" || item.error === undefined || item.live) return;
+      const rest = items.slice(index + 1);
+      const next = rest.findIndex((later) => later.kind === "user");
+      const turn = next < 0 ? rest : rest.slice(0, next);
+      if (turn.some((later) => later.kind === "assistant") || (next < 0 && stream?.running === true)) ids.push(item.id);
+    });
+    return ids.join(" ");
+  });
+  const retried = $derived(new Set(retriedIds.split(" ")));
+  const works = (item: Item): item is Work =>
+    item.kind === "shell" ||
+    item.kind === "mcp" ||
+    item.kind === "helper" ||
+    (item.kind === "approval" && item.approval.state !== "pending") ||
+    (item.kind === "assistant" && (item.steps.length > 0 || retried.has(item.id)));
+  /** Adds `item` to `rows`: tool activity joins the run's line before it; what the owner reads or answers stands alone. */
+  function place(rows: Row[], item: Item): Row[] {
+    const last = rows.at(-1);
+    if (!works(item)) rows.push(item);
+    else if (last?.kind === "work") rows[rows.length - 1] = { ...last, items: [...last.items, item] };
+    // Named for what precedes it, so the line stays the same one when its first live step commits.
+    else rows.push({ kind: "work", id: `work-${last?.id ?? "start"}`, items: [item] });
+    // A step's turn that failed or was stopped says so below its line.
+    if (
+      item.kind === "assistant" &&
+      item.steps.length > 0 &&
+      !retried.has(item.id) &&
+      (item.error !== undefined || item.stopped)
+    )
+      rows.push({ ...item, id: `${item.id}-end`, texts: [], steps: [] });
+    return rows;
+  }
+  const historyRows = $derived(historyItems.reduce(place, []));
+  // Only the last line changes while a turn streams; the rows before it keep their identity.
+  const rows = $derived(build([], stream?.partial, []).reduce(place, [...historyRows]));
+  /** The line the current run is adding to: the last one, unless the answer has begun after it. */
+  const activeWork = $derived.by(() => {
+    if (!stream?.running) return undefined;
+    const last = rows.findLast((row) => row.kind !== "approval");
+    return last?.kind === "work" ? last.id : undefined;
+  });
   const awaiting = $derived((stream?.approvals ?? []).some((approval) => approval.state === "pending"));
   const connected = $derived(app.chatgpt?.account != null);
   const effective = $derived.by(() => {
@@ -364,7 +418,7 @@
     approvals: readonly CommandApproval[],
   ): Item[] {
     // A result belongs to the call of that ID in the latest assistant message before it; IDs may repeat across turns.
-    const results: Record<string, { text: string; isError: boolean; calls: NestedCall[] }> = {};
+    const results: Record<string, NonNullable<Step["result"]>> = {};
     const caller: Record<string, number> = {};
     for (const entry of entries) {
       const message = entry.model?.[0];
@@ -375,6 +429,7 @@
           text: textOf(message),
           isError: message.isError === true,
           calls: message.details?.calls ?? [],
+          task: entry.byTaskId,
         };
       }
     }
@@ -392,6 +447,7 @@
                   id: block.id,
                   name: block.name,
                   code: typeof block.arguments.code === "string" ? block.arguments.code : undefined,
+                  args: block.name === "codemode" ? undefined : JSON.stringify(block.arguments),
                   latest: caller[block.id] === id,
                   result: results[`${id}/${block.id}`],
                 },
@@ -765,12 +821,6 @@
     }
   }
 
-  /** `mcp__exa__web_search_exa` reads as "exa · web_search_exa". */
-  function toolLabel(name: string): string {
-    const [, server, tool] = /^mcp__(.+?)__(.+)$/.exec(name) ?? [];
-    return server === undefined || tool === undefined ? name : `${server} · ${tool}`;
-  }
-
   function activeTool(step: Step) {
     return step.latest ? stream?.tools.find((tool) => tool.callId === step.id) : undefined;
   }
@@ -790,39 +840,62 @@
     );
   }
 
-  /** One quiet line for an assistant turn's tool calls: its scripts and the calls that came back, or direct calls. */
-  function summary(steps: Step[], live: boolean): string {
-    const scripts = steps.filter((step) => step.name === "codemode").length;
-    // A direct call counts like a call a script made.
-    const calls = [
-      ...steps.filter((step) => step.name !== "codemode"),
-      ...steps.flatMap((step) => step.result?.calls ?? []),
-    ];
-    const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
-    const commands = calls.filter((call) => call.name === "shell_run").length;
-    const edits = calls.filter((call) => call.name === "files_write" || call.name === "files_edit").length;
-    const tools = calls.length - commands - edits;
-    const did = [
-      commands > 0 ? count(commands, "command") : "",
-      edits > 0 ? count(edits, "file edit") : "",
-      tools > 0 ? `used ${count(tools, "tool")}` : "",
-    ].filter((part) => part !== "");
-    if (steps.some((step) => step.result?.isError)) did.push("with errors");
-    const unresolved = steps.map((step) => phase(step, live)).find((state) => state !== "Done" && state !== "Failed");
-    if (unresolved !== undefined) did.push(unresolved.toLowerCase());
-    if (scripts === 0) {
-      const line = did.join(", ");
-      return unresolved === undefined && commands > 0 ? `Ran ${line}` : line.charAt(0).toUpperCase() + line.slice(1);
-    }
-    const ran =
-      unresolved === undefined
-        ? scripts === 1
-          ? "Ran a script"
-          : `Ran ${scripts} scripts`
-        : scripts === 1
-          ? "Script"
-          : `${scripts} scripts`;
-    return did.length > 0 ? `${ran} · ${did.join(", ")}` : ran;
+  /** What a step did: a direct call, or the calls its script made, including those still running. */
+  function callsOf(step: Step): Call[] {
+    if (step.name !== "codemode") return [{ name: step.name, args: step.args }];
+    if (step.result !== undefined) return step.result.calls;
+    const task = activeTool(step)?.taskId;
+    return task === undefined ? [] : (stream?.nested ?? []).filter((call) => call.parentTaskId === task);
+  }
+  function stepLabel(step: Step) {
+    // A script's commands are listed under it by their receipts.
+    const calls = callsOf(step);
+    const label = describe(step.name === "codemode" ? calls.filter((call) => call.name !== "shell_run") : calls);
+    return label.verb === "" ? { verb: step.name === "codemode" ? "Ran a script" : toolLabel(step.name) } : label;
+  }
+  /** A direct command whose receipt, in the same line, already shows it. */
+  function receipted(step: Step, items: Work[]): boolean {
+    const task = step.result?.task ?? activeTool(step)?.taskId;
+    return (
+      step.name === "shell_run" &&
+      task !== undefined &&
+      items.some((item) => item.kind === "shell" && item.receipt.callId === String(task))
+    );
+  }
+  /** One quiet line for a run's tool activity: what it read, ran and changed, and whether anything went wrong. */
+  function headline(items: Work[], active: boolean): string {
+    const turns = items.filter((item) => item.kind === "assistant");
+    const steps = turns.flatMap((turn) => turn.steps);
+    // Commands count by their finished receipts: one that was denied or is still going has not run.
+    const calls = items.flatMap((item): Call[] =>
+      item.kind === "assistant"
+        ? item.steps.flatMap(callsOf).filter((call) => call.name !== "shell_run")
+        : item.kind === "shell" && item.receipt.status === "finished"
+          ? [{ name: "shell_run" }]
+          : [],
+    );
+    const line = summarize(calls) || (steps.some((step) => step.result !== undefined) ? "Ran a script" : "");
+    const retries = turns.filter((turn) => retried.has(turn.id)).length;
+    if (active) return line || (retries > 0 ? "Retrying" : "Working");
+    const again = retries === 0 ? "" : retries === 1 ? "retried once" : `retried ${retries} times`;
+    const failed = steps.filter((step) => step.result?.isError).length;
+    const unconfirmed = items.some((item) =>
+      item.kind === "assistant"
+        ? item.steps.some((step) => phase(step, item.live) === "Outcome unconfirmed")
+        : item.kind === "shell"
+          ? item.receipt.status !== "finished"
+          : item.kind === "helper" &&
+            (helpers.find((helper) => helper.task === item.task)?.unknownEffects.length ?? 0) > 0,
+    );
+    const parts = [line, failed > 0 ? `${failed} failed` : "", unconfirmed ? "outcome unconfirmed" : "", again];
+    const said = parts.filter((part) => part !== "").join(", ");
+    return said === "" ? "Worked" : said.charAt(0).toUpperCase() + said.slice(1);
+  }
+  function receiptState(receipt: ShellReceipt, running: boolean): string {
+    if (receipt.timedOut) return "Timed out";
+    if (receipt.exitCode !== undefined) return `Exit ${receipt.exitCode}`;
+    if (running) return stream?.connected ? "Running" : "Last observed running";
+    return "Outcome unconfirmed";
   }
 
   function time(at: number | undefined): string {
@@ -870,6 +943,101 @@
   </div>
 {/snippet}
 
+{#snippet stepRow(key: string, step: Step, live: boolean)}
+  {@const state = phase(step, live)}
+  {@const tool = activeTool(step)}
+  {@const label = stepLabel(step)}
+  {@const open = openSteps[key] === true}
+  <li>
+    <button class="row" aria-expanded={open} onclick={() => (openSteps[key] = !open)}>
+      {#if state === "Preparing" || state === "Running"}<span class="ring spin" aria-hidden="true"></span>{/if}
+      <span class="verb">{label.verb}</span>
+      {#if label.object !== undefined}<span class="obj">{label.object}</span>{/if}
+      {#if state === "Done"}<span class="sr">Done</span>
+      {:else}<span class={["st", state === "Failed" && "er"]}>{state}</span>{/if}
+      <Icon name={open ? "chevD" : "chevR"} size={13} />
+    </button>
+    {#if open}
+      <div class="detail">
+        {#if step.result === undefined}
+          <div class="dim small">
+            <span>Call {step.id}</span>{#if tool?.taskId !== undefined}
+              · <span>Task {tool.taskId}</span>{/if}
+          </div>
+          {#if state === "Outcome unconfirmed"}<p class="dim small">
+              No result was recorded. Inspect the workspace before repeating an action.
+            </p>{/if}
+          {#if tool?.taskId !== undefined}
+            {#each stream?.nested.filter((call) => call.parentTaskId === tool.taskId) ?? [] as call (call.callId)}
+              <div class="steprow">
+                {#if call.status !== "done"}<span class="ring spin" aria-hidden="true"></span><span class="sr"
+                    >Running</span
+                  >
+                {:else if call.summary?.isError !== false}<span class="tick er" aria-hidden="true">✕</span><span
+                    class="sr">Failed</span
+                  >
+                {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span>{/if}
+                <span>{toolLabel(call.name)}</span>
+              </div>
+            {/each}
+          {/if}
+        {/if}
+        {#if step.code !== undefined}<pre class="out">{step.code}</pre>{/if}
+        {#each step.result?.calls ?? [] as call (call.id)}
+          <div class="steprow">
+            {#if call.status === "ok"}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span>
+            {:else}<span class="tick" class:er={call.status !== "running"} aria-hidden="true"
+                >{call.status === "running" ? "–" : "✕"}</span
+              >{/if}
+            <span>{toolLabel(call.name)}</span>
+            <span class="args">{call.args}</span>
+            {#if call.status !== "ok"}<span class="state"
+                >{call.status === "running"
+                  ? "Interrupted"
+                  : call.status === "cancelled"
+                    ? "Cancelled"
+                    : "Failed"}</span
+              >{/if}
+          </div>
+          {#if call.error}<div class="dim small">{call.error}</div>{/if}
+        {/each}
+        {#if step.result !== undefined}<pre class="out">{step.result.text}</pre>{/if}
+      </div>
+    {/if}
+  </li>
+{/snippet}
+
+{#snippet shellRow(key: string, receipt: ShellReceipt, sub: boolean)}
+  {@const running = receipt.status === "finished" ? undefined : runningCommand(receipt)}
+  {@const open = openSteps[key] === true}
+  <li class:under={sub}>
+    <button class="row" aria-expanded={open} onclick={() => (openSteps[key] = !open)}>
+      {#if running !== undefined}<span class="ring spin" aria-hidden="true"></span>{/if}
+      <span class="obj mono">{receipt.command}</span>
+      <span class={["st", (receipt.timedOut || (receipt.exitCode ?? 0) !== 0) && "er"]}
+        >{receiptState(receipt, running !== undefined)}</span
+      >
+      <Icon name={open ? "chevD" : "chevR"} size={13} />
+    </button>
+    {#if open}
+      <div class="detail">
+        <div class="small dim">Host command, not sandboxed · <span>Call {receipt.callId}</span></div>
+        <div class="small dim mono ellipsis" title={receipt.cwd}>{receipt.cwd}</div>
+        <pre class="out">{receipt.command}</pre>
+        {#if receipt.executed !== undefined}<p class="small dim">
+            Ran as <code>{receipt.executed}</code>; output condensed by rtk.
+          </p>{/if}
+        {#if receipt.output !== undefined}<pre class="out">{receipt.output}</pre>{/if}
+        {#if running?.output !== undefined}<pre class="out">{running.output}</pre>{/if}
+        {#if receipt.truncated}<p class="small dim">Output truncated to the last 64 KiB.</p>{/if}
+        {#if receipt.status !== "finished" && running === undefined}<p class="small dim">
+            No completion receipt yet. If interrupted, inspect the workspace before retrying.
+          </p>{/if}
+      </div>
+    {/if}
+  </li>
+{/snippet}
+
 <section aria-label="Chat" class:phone>
   <div class="scroller">
     <div
@@ -899,7 +1067,7 @@
             </p>{/if}
         </div>
       {/if}
-      {#each items as item (item.id)}
+      {#each rows as item (item.id)}
         <div class="item" in:rise={{ enabled: settled && (item.kind !== "assistant" || item.live) }}>
           {#if item.kind === "user"}
             <div class="user">
@@ -931,178 +1099,105 @@
                   Couldn't show {piece.name}'s result: {String(failure)}
                 </p>{/await}
             {/if}
-          {:else if item.kind === "mcp"}
-            <InternetSources receipt={item.receipt} />
-          {:else if item.kind === "helper"}
-            {@const view = helpers.find((helper) => helper.task === item.task)}
-            {@const status = helperStatus(item.status, view)}
-            <div class="note helper">
-              <Icon name="search" />
-              <span
-                >Research helper · {item.purpose} · <span class={{ er: status.failed }}>{status.text}</span>
-                {#if view !== undefined && view.unknownEffects.length > 0}
-                  <span class="er"
-                    >Outcome unknown for {view.unknownEffects.map((effect) => effect.tool).join(", ")}; check before
-                    repeating.</span
-                  >
-                {/if}
-              </span>
+          {:else if item.kind === "work"}
+            {@const open = openSteps[item.id] === true}
+            {@const active = item.id === activeWork}
+            <div class="activity">
+              <button class="acth" aria-expanded={open} onclick={() => (openSteps[item.id] = !open)}>
+                {#if active}<span class="ring spin" aria-hidden="true"></span>{/if}
+                <span>{headline(item.items, active)}</span>
+                <Icon name={open ? "chevD" : "chevR"} size={13} />
+              </button>
+              {#if open}
+                <ul class="rows">
+                  {#each item.items as part, index (part.id)}
+                    {@const nested = item.items.slice(0, index).findLast((before) => before.kind === "assistant")}
+                    {#if part.kind === "assistant"}
+                      {#each part.texts as text, at (at)}<li class="say">{text}</li>{/each}
+                      {#if retried.has(part.id)}
+                        <li class="plain">
+                          <span class="verb">Model request failed</span>
+                          <span class="obj">{part.error}</span>
+                          <span class="st">{index === item.items.length - 1 ? "Retrying" : "Retried"}</span>
+                        </li>
+                      {/if}
+                      {#each part.steps.filter((step) => !receipted(step, item.items)) as step (step.id)}
+                        {@render stepRow(`${part.id}/${step.id}`, step, part.live)}
+                      {/each}
+                    {:else if part.kind === "shell"}
+                      {@render shellRow(
+                        part.id,
+                        part.receipt,
+                        nested?.steps.some((step) => step.name === "codemode") === true,
+                      )}
+                    {:else if part.kind === "mcp"}
+                      {@const shown = openSteps[part.id] === true}
+                      <li class="under source">
+                        <button class="row" aria-expanded={shown} onclick={() => (openSteps[part.id] = !shown)}>
+                          <span class="verb">{part.receipt.serverName}</span>
+                          <span class="obj">{part.receipt.query || part.receipt.tool}</span>
+                          {#if part.receipt.isError}<span class="st er">Server error</span>{/if}
+                          <Icon name={shown ? "chevD" : "chevR"} size={13} />
+                        </button>
+                        {#if shown}<div class="detail"><InternetSources receipt={part.receipt} /></div>{/if}
+                      </li>
+                    {:else if part.kind === "helper"}
+                      {@const view = helpers.find((helper) => helper.task === part.task)}
+                      {@const status = helperStatus(part.status, view)}
+                      <li class="under plain helper">
+                        <span class="verb">Research helper</span>
+                        <span class="obj">{part.purpose}</span>
+                        <span class={["st", status.failed && "er"]}>{status.text}</span>
+                        {#if view !== undefined && view.unknownEffects.length > 0}
+                          <span class="st er wide"
+                            >Outcome unknown for {view.unknownEffects.map((effect) => effect.tool).join(", ")}; check
+                            before repeating.</span
+                          >
+                        {/if}
+                      </li>
+                    {:else}
+                      {@const approval = part.approval}
+                      <li class="plain" role="group" aria-label="Approval request">
+                        <span class="verb"
+                          >{(approval.tool === "browser_act" ? browserHeads : heads)[approval.state]}</span
+                        >
+                        <code class="obj mono">{approval.command}</code>
+                        <span class="st wide">{outcome(approval)}</span>
+                      </li>
+                    {/if}
+                  {/each}
+                </ul>
+              {/if}
             </div>
           {:else if item.kind === "approval"}
             {@const approval = item.approval}
             {@const browser = approval.tool === "browser_act"}
-            {#if approval.state === "pending"}
-              <div class="appr" role="group" aria-label="Approval request">
-                <div class="apph">
-                  <span class="dot" aria-hidden="true"></span>
-                  <span class="grow">{(browser ? browserHeads : heads).pending}</span>
-                  <span class="meta"
-                    >{browser ? "project browser" : "not sandboxed"} · timeout {approval.timeout} s</span
-                  >
-                </div>
-                <code class="mono cmd">{approval.command}</code>
-                <p class="why">
-                  {#if browser}
-                    Browser page <span class="mono">{approval.cwd}</span> · exact action in the sandboxed project browser.
-                    Inspect after any interruption.
-                  {:else}
-                    In <span class="mono">{approval.cwd}</span>, as the Pal host user.
-                  {/if}
-                  Waits until {time(approval.expiresAt)} at most; Stop ends it. Nothing runs until you approve.
-                </p>
-                <div class="acts">
-                  <button class="b p" disabled={deciding !== undefined} onclick={() => decide(approval, "approve")}
-                    >Approve once</button
-                  >
-                  <button class="b" disabled={deciding !== undefined} onclick={() => decide(approval, "deny")}
-                    >Deny</button
-                  >
-                </div>
+            <div class="appr" role="group" aria-label="Approval request">
+              <div class="apph">
+                <span class="dot" aria-hidden="true"></span>
+                <span class="grow">{(browser ? browserHeads : heads).pending}</span>
+                <span class="meta">{browser ? "project browser" : "not sandboxed"} · timeout {approval.timeout} s</span>
               </div>
-            {:else}
-              <div class="appr settled" role="group" aria-label="Approval request">
-                <span
-                  class="dot"
-                  class:ok={approval.state === "approved"}
-                  class:er={approval.state === "denied"}
-                  aria-hidden="true"
-                ></span>
-                <span>{(browser ? browserHeads : heads)[approval.state]}</span>
-                <code class="mono cmd">{approval.command}</code>
-                <span>{outcome(approval)}</span>
-              </div>
-            {/if}
-          {:else if item.kind === "shell"}
-            {@const running = item.receipt.status === "finished" ? undefined : runningCommand(item.receipt)}
-            <details class="activity">
-              <summary class="acth"
-                >Host command · not sandboxed ·
-                <span class:er={item.receipt.timedOut || (item.receipt.exitCode ?? 0) !== 0}>
-                  {item.receipt.timedOut
-                    ? "Timed out"
-                    : item.receipt.exitCode !== undefined
-                      ? `Exit ${item.receipt.exitCode}`
-                      : running !== undefined
-                        ? stream?.connected
-                          ? "Running"
-                          : "Last observed running"
-                        : "Outcome unconfirmed"}
-                </span><Icon name="chevR" size={13} />
-              </summary>
-              <div class="small dim mono ellipsis" title={item.receipt.callId}>Call {item.receipt.callId}</div>
-              <div class="small dim mono ellipsis" title={item.receipt.cwd}>{item.receipt.cwd}</div>
-              <pre class="out">{item.receipt.command}</pre>
-              {#if item.receipt.executed !== undefined}<p class="small dim">
-                  Ran as <code>{item.receipt.executed}</code>; output condensed by rtk.
-                </p>{/if}
-              {#if item.receipt.output !== undefined}<pre class="out">{item.receipt.output}</pre>{/if}
-              {#if running?.output !== undefined}<pre class="out">{running.output}</pre>{/if}
-              {#if item.receipt.truncated}<p class="small dim">Output truncated to the last 64 KiB.</p>{/if}
-              {#if item.receipt.status !== "finished" && running === undefined}<p class="small dim">
-                  No completion receipt yet. If interrupted, inspect the workspace before retrying.
-                </p>{/if}
-            </details>
-          {:else}
-            {#if item.steps.length > 0}
-              {@const open = openSteps[item.id] === true}
-              <div class="activity">
-                <button class="acth" aria-expanded={open} onclick={() => (openSteps[item.id] = !open)}>
-                  {#if item.steps.some((step) => ["Preparing", "Running"].includes(phase(step, item.live)))}
-                    <span class="ring spin" aria-hidden="true"></span>
-                  {/if}
-                  <span>{summary(item.steps, item.live)}</span>
-                  <Icon name={open ? "chevD" : "chevR"} size={13} />
-                </button>
-                {#if open}
-                  <ol>
-                    {#each item.steps as step (step.id)}
-                      {@const state = phase(step, item.live)}
-                      {@const tool = activeTool(step)}
-                      <li>
-                        <div class="steprow">
-                          {#if step.result === undefined}<span
-                              class="ring"
-                              class:spin={state === "Preparing" || state === "Running"}
-                              aria-hidden="true"
-                            ></span><span class="dim">{state}</span>
-                          {:else if step.result.isError}<span class="tick er" aria-hidden="true">✕</span><span
-                              class="sr">Failed</span
-                            >
-                          {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span>{/if}
-                          <span>{step.name}</span>
-                        </div>
-                        {#if step.result === undefined}
-                          <div class="dim small">
-                            <span>Call {step.id}</span>{#if tool?.taskId !== undefined}
-                              · <span>Task {tool.taskId}</span>{/if}
-                          </div>
-                          {#if state === "Outcome unconfirmed"}<p class="dim small">
-                              No result was recorded. Inspect the workspace before repeating an action.
-                            </p>{/if}
-                          {#if tool?.taskId !== undefined}
-                            {#each stream?.nested.filter((call) => call.parentTaskId === tool.taskId) ?? [] as call (call.callId)}
-                              <div class="steprow call">
-                                {#if call.status !== "done"}<span class="ring spin" aria-hidden="true"></span><span
-                                    class="sr">Running</span
-                                  >
-                                {:else if call.summary?.isError !== false}<span class="tick er" aria-hidden="true"
-                                    >✕</span
-                                  ><span class="sr">Failed</span>
-                                {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span
-                                  >{/if}
-                                <span>{toolLabel(call.name)}</span>
-                              </div>
-                            {/each}
-                          {/if}
-                        {/if}
-                        {#if step.code !== undefined}<pre class="out">{step.code}</pre>{/if}
-                        {#each step.result?.calls ?? [] as call (call.id)}
-                          <div class="steprow call">
-                            {#if call.status === "ok"}<span class="tick ok" aria-hidden="true">✓</span><span class="sr"
-                                >Done</span
-                              >
-                            {:else}<span class="tick" class:er={call.status !== "running"} aria-hidden="true"
-                                >{call.status === "running" ? "–" : "✕"}</span
-                              >{/if}
-                            <span>{toolLabel(call.name)}</span>
-                            <span class="args">{call.args}</span>
-                            {#if call.status !== "ok"}<span class="state"
-                                >{call.status === "running"
-                                  ? "Interrupted"
-                                  : call.status === "cancelled"
-                                    ? "Cancelled"
-                                    : "Failed"}</span
-                              >{/if}
-                          </div>
-                          {#if call.error}<div class="dim small call">{call.error}</div>{/if}
-                        {/each}
-                        {#if step.result !== undefined}<pre class="out">{step.result.text}</pre>{/if}
-                      </li>
-                    {/each}
-                  </ol>
+              <code class="mono cmd">{approval.command}</code>
+              <p class="why">
+                {#if browser}
+                  Browser page <span class="mono">{approval.cwd}</span> · exact action in the sandboxed project browser. Inspect
+                  after any interruption.
+                {:else}
+                  In <span class="mono">{approval.cwd}</span>, as the Pal host user.
                 {/if}
+                Waits until {time(approval.expiresAt)} at most; Stop ends it. Nothing runs until you approve.
+              </p>
+              <div class="acts">
+                <button class="b p" disabled={deciding !== undefined} onclick={() => decide(approval, "approve")}
+                  >Approve once</button
+                >
+                <button class="b" disabled={deciding !== undefined} onclick={() => decide(approval, "deny")}
+                  >Deny</button
+                >
               </div>
-            {/if}
+            </div>
+          {:else if item.kind === "assistant"}
             {#if item.texts.length > 0 || item.error !== undefined || item.stopped || item.live}
               <div class="assistant">
                 {#each item.texts as text, index (index)}
@@ -1217,7 +1312,10 @@
       {/if}
       {#if stream?.running}
         <div class="running" role="status">
-          <span class="ring spin" aria-hidden="true"></span>
+          <!-- One spinner at a time: the transcript's last line or streaming answer already shows the run moving. -->
+          {#if awaiting}<span class="dot" aria-hidden="true"></span>
+          {:else if activeWork === undefined && stream.partial === undefined}<span class="ring spin" aria-hidden="true"
+            ></span>{/if}
           <span class="grow ellipsis"
             >{awaiting ? "Waiting for your approval" : "Running"}
             <span class="dim"
@@ -1461,38 +1559,6 @@
     color: var(--tx3);
     overflow-wrap: anywhere;
   }
-  /* An answered request is one quiet line: what it was, the command and the outcome. */
-  .appr.settled {
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px 8px;
-    padding: 0;
-    border: 0;
-    background: transparent;
-    font-size: 13px;
-    color: var(--tx3);
-  }
-  .settled .dot {
-    width: 6px;
-    height: 6px;
-    background: var(--tx3);
-  }
-  .settled .dot.ok {
-    background: var(--ok);
-  }
-  .settled .dot.er {
-    background: var(--er);
-  }
-  .settled .cmd {
-    flex: 0 1 auto;
-    min-width: 0;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--tx2);
-  }
   .acts {
     display: flex;
     gap: 8px;
@@ -1597,23 +1663,111 @@
   details.activity[open] .acth :global(svg) {
     transform: rotate(90deg);
   }
-  .acth .er {
-    color: var(--er);
-  }
-  .activity ol {
+  /* An opened line lists what the run did, one row each; a row opens to its code, output and receipts. */
+  .rows {
     list-style: none;
     margin: 0;
     padding: 0;
+    border: 1px solid var(--line2);
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    color: var(--tx3);
+    overflow: hidden;
+  }
+  .rows li + li {
+    border-top: 1px solid var(--line);
+  }
+  .row,
+  .plain,
+  .say {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    min-height: 36px;
+    padding: 8px 12px;
+    box-sizing: border-box;
+  }
+  .row {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color var(--fast) var(--ease);
+  }
+  .row:hover,
+  .row[aria-expanded="true"] {
+    background: var(--bg2);
+  }
+  .row :global(svg),
+  .row .ring {
+    flex: none;
+    align-self: center;
+  }
+  .plain {
+    flex-wrap: wrap;
+  }
+  .say {
+    color: var(--tx2);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  /* A script's commands and lookups sit under the step that made them. */
+  .under > .row,
+  .under.plain {
+    padding-left: 28px;
+  }
+  .verb {
+    flex: none;
+  }
+  .obj {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--tx) 90%, transparent);
+  }
+  .obj.mono {
+    font-size: 12.5px;
+  }
+  .st {
+    flex: none;
+    margin-left: auto;
+    font-size: 12px;
+  }
+  .st.wide {
+    flex: 1 1 100%;
+    margin: 0;
+  }
+  .st.er {
+    color: var(--er);
+  }
+  .row > :global(svg:last-child) {
+    margin-left: auto;
+  }
+  .st + :global(svg:last-child) {
+    margin-left: 0;
+  }
+  .detail {
     display: flex;
     flex-direction: column;
     gap: 6px;
+    padding: 4px 12px 12px;
+    background: var(--bg2);
     font: 12.5px/1.6 var(--mono);
     color: var(--tx2);
+    min-width: 0;
   }
-  .activity li {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+  .detail .out {
+    margin: 0;
+    max-height: 320px;
+    overflow: auto;
+  }
+  .detail p {
+    margin: 0;
+    font-family: var(--sans);
   }
   .steprow {
     display: flex;
@@ -1636,9 +1790,6 @@
   .tick.er,
   .state {
     color: var(--er);
-  }
-  .call {
-    margin-left: 20px;
   }
   .args {
     color: var(--tx3);
@@ -1972,6 +2123,9 @@
   }
   .phone .appr .acts .p {
     order: 2;
+  }
+  .phone :is(.row, .plain, .say) {
+    min-height: 44px;
   }
   .phone .running {
     min-height: 32px;
