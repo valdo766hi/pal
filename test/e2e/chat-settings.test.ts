@@ -1401,9 +1401,10 @@ describe("compiled capability composition", () => {
     await page.goto(`${base}/#/settings/extensions`);
     const row = page.locator(".extension").filter({ has: page.getByText("Example echo", { exact: true }) });
     await row.getByRole("switch", { name: "Enable Example echo for new chats", exact: true }).waitFor();
+    expect(await row.innerText()).toContain("Adds Example, Chat results");
+    await row.getByText("Technical details", { exact: true }).click();
     expect(await row.innerText()).toContain("Core API 2–2");
     expect(await row.innerText()).toContain("example_echo · safe · project.read");
-    expect(await row.innerText()).toContain("Contributes: Example, Chat results");
     const item = (await pal.extensions.view()).catalog.find((item) => item.id === "example");
     if (item === undefined) throw new Error("missing compiled template");
     expect(await row.innerText()).toContain(item.implementation);

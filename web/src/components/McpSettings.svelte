@@ -457,7 +457,8 @@
           <span>{server.name}</span>
           <span class="cmeta">{connectionLabel(server)} · {authLabel(server)}</span>
         </button>
-        <span class="pill {status.cls}">{status.label}</span>
+        <!-- The switch already says a server is off. -->
+        {#if server.state !== "disabled"}<span class="pill {status.cls}">{status.label}</span>{/if}
         <label class="switch">
           <input
             class="swi"
