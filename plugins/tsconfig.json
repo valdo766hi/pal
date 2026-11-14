@@ -1,0 +1,5 @@
+// For editors only: plugin server code belongs to the root project, plugin UI to the web project.
+{
+  "files": [],
+  "references": [{ "path": "../tsconfig.json" }, { "path": "../web/tsconfig.json" }]
+}
