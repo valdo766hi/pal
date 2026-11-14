@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
 import { startServer } from "../../src/core/server.ts";
+import { installFakeClaude } from "../fixtures/claude.ts";
 
 let browser: Browser;
 const cleanups: (() => Promise<unknown>)[] = [];
@@ -36,8 +37,7 @@ describe("Claude subscription plugin in the browser", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     await mkdir(join(root, "bin"));
     const claude = join(root, "bin", "claude");
-    await copyFile(join(import.meta.dirname, "../fixtures/fake-claude.mjs"), claude);
-    await chmod(claude, 0o755);
+    await installFakeClaude(claude);
     await writeFile(join(root, "bin", "fake-claude.json"), "{}");
     const pal = await openPal({ dataRoot: join(root, "data"), installRoot: "/nonexistent" }, context);
     cleanups.push(() => pal.close());

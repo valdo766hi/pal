@@ -1,10 +1,11 @@
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
+import { installFakeClaude } from "./fixtures/claude.ts";
 
 const SECRET = "planted-pal-secret-value";
 const cleanups: (() => unknown)[] = [];
@@ -21,8 +22,7 @@ async function setup(config: Record<string, unknown> = {}) {
   const claude = join(root, "bin", "claude");
 
   await mkdir(join(root, "bin"));
-  await copyFile(join(import.meta.dirname, "fixtures/fake-claude.mjs"), claude);
-  await chmod(claude, 0o755);
+  await installFakeClaude(claude);
   const configure = (next: Record<string, unknown>) =>
     writeFile(join(root, "bin", "fake-claude.json"), JSON.stringify({ secret: SECRET, ...next }));
   await configure(config);
