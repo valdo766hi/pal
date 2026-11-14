@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
-import type { CredentialStore } from "@earendil-works/pi-ai";
+import type { CredentialStore, Provider } from "@earendil-works/pi-ai";
 import {
   defineExtension,
   type ConversationId,
@@ -41,6 +41,22 @@ const Manifest = Type.Object(
      * settings tabs and owner requests but no tools, namespace or chat pieces, and never selected per chat.
      */
     scope: Type.Optional(Type.Enum(["browser", "installation"])),
+    /**
+     * Model providers it offers (installation plugins only): listed in Settings → Models, off until the owner enables
+     * one, and never chosen or substituted automatically.
+     */
+    providers: Type.Optional(
+      Type.Array(
+        Type.Object(
+          {
+            id: Type.String({ pattern: "^[a-z][a-z0-9-]{0,39}$" }),
+            name: Type.String({ minLength: 1, maxLength: 80 }),
+          },
+          { additionalProperties: false },
+        ),
+        { minItems: 1, maxItems: 4 },
+      ),
+    ),
     /** A decision model the kernel may consult before an agent command in Auto mode; installation plugins only. */
     advisor: Type.Optional(
       Type.Object({ label: Type.String({ minLength: 1, maxLength: 40 }) }, { additionalProperties: false }),
@@ -228,6 +244,15 @@ export type CapabilityAdvisor = {
   /** Judge one command; throw when no answer can be given. The kernel bounds the wait and never retries. */
   advise(request: AdviceRequest, signal: AbortSignal): Promise<Advice>;
 };
+/** A model provider a plugin offers; the kernel registers `provider` only while the owner keeps it enabled. */
+export type CapabilityProvider = {
+  readonly id: string;
+  /** What using it costs the owner, as Settings → Models shows it. */
+  readonly billing: string;
+  readonly provider: Provider;
+  /** Whether it can take requests now, and why not; asked only by the owner or while it is enabled. */
+  status(): Promise<{ ready: boolean; detail: string }>;
+};
 /** One owner request under `/api/plugins/<id>/`; `path` is what follows the plugin's ID. */
 export type CapabilityRequest = {
   readonly method: string;
@@ -243,6 +268,8 @@ export type CapabilityRuntime = {
   service?: unknown;
   /** The decision model its manifest's `advisor` declares. */
   advisor?: CapabilityAdvisor;
+  /** The model providers its manifest's `providers` declares, in that order. */
+  providers?: readonly CapabilityProvider[];
   /** Called after durable work stops; release ephemeral resources, never mutate durable state here. */
   dispose?(): void | Promise<void>;
 };
@@ -323,8 +350,8 @@ export function capabilityManifest(input: unknown): CapabilityManifest {
       manifest.ui?.slots !== undefined)
   )
     throw new Error(`Capability ${manifest.id} serves the installation: no tools, namespace or chat pieces.`);
-  if (manifest.advisor !== undefined && manifest.scope !== "installation")
-    throw new Error(`Capability ${manifest.id} must serve the installation to advise.`);
+  if ((manifest.advisor !== undefined || manifest.providers !== undefined) && manifest.scope !== "installation")
+    throw new Error(`Capability ${manifest.id} must serve the installation to advise or offer providers.`);
   if (namespace !== undefined && (namespace.name !== manifest.id || namespace.prefix !== `${own}_`))
     throw new Error(`Capability ${manifest.id} has an invalid Code Mode namespace.`);
   if (new Set(tools.map((tool) => tool.name)).size !== tools.length)
@@ -464,6 +491,8 @@ export class CompiledCapabilities {
       names = new Set<string>();
     if (prepared.filter(({ manifest }) => manifest.advisor !== undefined).length > 1)
       throw new Error("A Pal build has at most one advisor.");
+    const offered = prepared.flatMap(({ manifest }) => (manifest.providers ?? []).map(({ id }) => id));
+    if (new Set(offered).size !== offered.length) throw new Error("Duplicate plugin provider.");
     for (const { manifest } of prepared) {
       if (manifest.scope === "browser")
         throw new Error(`Capability ${manifest.id} is browser-only and has no server part.`);
@@ -490,6 +519,11 @@ export class CompiledCapabilities {
         opened.#opened.push(record);
         if ((manifest.advisor === undefined) !== (runtime.advisor === undefined))
           throw new Error(`Capability ${manifest.id} advisor declaration differs.`);
+        if (
+          JSON.stringify((manifest.providers ?? []).map(({ id }) => id)) !==
+          JSON.stringify((runtime.providers ?? []).map(({ id }) => id))
+        )
+          throw new Error(`Capability ${manifest.id} provider declarations differ.`);
         const declarations = manifest.tools ?? [];
         if ((runtime.tools ?? []).length !== declarations.length)
           throw new Error(`Capability ${manifest.id} tool declarations differ.`);
@@ -553,6 +587,20 @@ export class CompiledCapabilities {
       if (manifest.advisor !== undefined && runtime.advisor !== undefined)
         return { label: manifest.advisor.label, status: runtime.advisor.status, advise: runtime.advisor.advise };
     return undefined;
+  }
+  /** The providers plugins offer while open, each named as its manifest declares it. */
+  get providers(): readonly (CapabilityProvider & { name: string; plugin: string })[] {
+    if (this.#closing !== undefined) return [];
+    return this.#opened.flatMap(({ manifest, runtime }) =>
+      (runtime.providers ?? []).map((offered) => ({
+        id: offered.id,
+        billing: offered.billing,
+        provider: offered.provider,
+        status: () => offered.status(),
+        name: manifest.providers?.find(({ id }) => id === offered.id)?.name ?? offered.id,
+        plugin: manifest.id,
+      })),
+    );
   }
   service<T>(id: string): T | undefined {
     return this.#opened.find(({ manifest }) => manifest.id === id)?.runtime.service as T | undefined;

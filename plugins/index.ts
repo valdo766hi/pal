@@ -2,3 +2,4 @@
 export { default as memory } from "./memory/server.ts";
 export { default as helpers } from "./helpers/server.ts";
 export { default as jev } from "./jev/server.ts";
+export { default as claudeCode } from "./claude-code/server.ts";

@@ -147,6 +147,21 @@ Settings → **Models**:
     DeepSeek also report your usage or balance.
   - An OpenAI-compatible endpoint takes a name, base URL, model IDs, context window and output limit. The URL may
     point at a private network address, because you chose it.
+- **Claude subscription (Claude Code) · Experimental**, from the `claude-code` plugin, uses your own Claude Pro or Max
+  subscription through the official Claude Code CLI. It is off until you enable it and never chosen automatically.
+  - **Requirements:** Claude Code installed for the account Pal runs as and logged in with a subscription. Pal never
+    installs or updates it and never offers a Claude login: open Terminal and run `claude auth login`. Settings →
+    Claude Code sets the command (or its absolute path) and an optional config directory, and **Check status** runs
+    `claude auth status` once.
+  - **How it runs:** Pal keeps the history, approvals and tools. Each request starts or reuses (at most two, for five
+    minutes) a Claude Code process that only talks to the model: Claude Code's own tools are off, and a tool it asks
+    for comes back to Pal to run. The process gets a fixed list of host variables (`PATH`, `HOME`, locale and similar)
+    plus its settings, never Pal's environment, and an empty working folder. Pal never reads or stores Claude Code's
+    credentials; its authenticated requests pass through a loopback relay in memory only.
+  - **Limits:** usage counts against your plan's limits. A reply Anthropic charges to usage credits stops the run
+    with a "Claude Code billing" error and is not retried, unless you turn on **Allow usage credits**. Anthropic's
+    [legal and compliance terms](https://code.claude.com/docs/en/legal-and-compliance) say subscription logins are for
+    ordinary use of Claude Code; Anthropic may treat these requests as third-party use. Read them before enabling it.
 
 The model picker in each chat lists ChatGPT once you sign in and every enabled provider, with search. Choosing a
 model from another provider sends that chat's history to it with your next message. Model and reasoning changes

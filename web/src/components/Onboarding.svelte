@@ -38,13 +38,16 @@
       billing: "Counts against your ChatGPT plan's usage limits.",
       status: app.chatgpt?.account != null ? "Connected" : undefined,
     },
-    ...(app.providers?.providers ?? []).map((provider) => ({
-      id: provider.id,
-      name: provider.id === "compatible" ? "OpenAI-compatible endpoint" : provider.name,
-      method: provider.id === "compatible" ? "Custom endpoint" : "API key",
-      billing: provider.billing,
-      status: provider.enabled ? "Enabled" : providerReady(provider) ? "Ready · off" : undefined,
-    })),
+    // Plugin providers are set up in Settings, where their requirements and terms are shown.
+    ...(app.providers?.providers ?? [])
+      .filter((provider) => provider.plugin === undefined)
+      .map((provider) => ({
+        id: provider.id,
+        name: provider.id === "compatible" ? "OpenAI-compatible endpoint" : provider.name,
+        method: provider.id === "compatible" ? "Custom endpoint" : "API key",
+        billing: provider.billing,
+        status: provider.enabled ? "Enabled" : providerReady(provider) ? "Ready · off" : undefined,
+      })),
   ]);
   const option = $derived(options.find((entry) => entry.id === chosen));
   const view = $derived(app.providers?.providers.find((entry) => entry.id === chosen));

@@ -19,7 +19,7 @@ import {
   listChatGPTModels,
 } from "../pi/chatgpt.ts";
 import { McpConfigError } from "../pi/mcp.ts";
-import { CompatibleBody, isApiProvider, ProviderConfigError } from "../pi/providers.ts";
+import { CompatibleBody, ProviderConfigError } from "../pi/providers.ts";
 import { StdioConfigError, StdioServerBody } from "../pi/mcp-stdio.ts";
 import type { Pal } from "./app.ts";
 import { ApprovalDecision, CommandModeBody } from "./approvals.ts";
@@ -255,7 +255,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
 
   /** A model a chat may switch to now: ChatGPT's, or one of an enabled API-key provider. Never a substitute. */
   async function chosenModel(provider: string, modelId: string) {
-    if (provider !== CHATGPT_PROVIDER && !(isApiProvider(provider) && (await pal.providers.usable(provider)))) {
+    if (provider !== CHATGPT_PROVIDER && !(pal.providers.known(provider) && (await pal.providers.usable(provider)))) {
       throw new HttpError(409, "provider_unavailable", "that provider isn't enabled in Settings → Models");
     }
     const known = pal.models.getModel(provider, modelId);
@@ -486,7 +486,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
 
     if (resource === "providers") {
       if (path.length === 1 && method === "GET") return send(200, await providersView());
-      if (id !== undefined && isApiProvider(id) && path.length === 3) {
+      if (id !== undefined && pal.providers.known(id) && path.length === 3) {
         if (action === "key" && method === "PUT") {
           await pal.providers.setKey(id, validate(KeyBody, await readJson(request)).key);
           return send(200, await providersView());

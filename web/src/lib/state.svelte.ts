@@ -94,6 +94,8 @@ export async function refreshProviders(): Promise<void> {
 
 /** Whether an API-key provider has what it needs to be enabled: a saved key, or a described keyless endpoint. */
 export function providerReady(provider: ProviderView): boolean {
+  // A plugin's provider needs no key in Pal; enabling it asks the plugin whether it is ready.
+  if (provider.plugin !== undefined) return true;
   if (provider.id !== "compatible") return provider.hasKey;
   return provider.config != null && (provider.config.keyless || provider.hasKey);
 }

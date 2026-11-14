@@ -229,8 +229,9 @@ string supplied by a skill or manifest.
   own unfinished acquisitions. Opened plugins are disposed in reverse order, once, including after a partial-startup
   failure.
 
-`plugins/index.ts` is the build-time selection, one line per plugin with a server part: memory and research helpers
-today. Add a reviewed plugin's line and rebuild; no runtime directory scan or package install occurs. Removing a line
+`plugins/index.ts` is the build-time selection, one line per plugin with a server part: memory and research helpers,
+plus the installation plugins Jev (Auto mode's decision model) and Claude Code (a model provider), which chats never
+select or pin. Add a reviewed plugin's line and rebuild; no runtime directory scan or package install occurs. Removing a line
 removes the plugin's service, native tools, namespace and interface, not its saved data or core Context/guidance
 inspection. Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins.
 

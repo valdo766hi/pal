@@ -294,6 +294,7 @@ export async function openPal(
       ...(options.helperLimits === undefined ? {} : { options: { helpers: options.helperLimits } }),
     });
     capabilities = openedCapabilities;
+    await providers.attach(openedCapabilities.providers);
     const guidanceFiles = new GuidanceFiles({
       deny: [options.dataRoot, options.installRoot, "/nix/store"],
       privateFiles,

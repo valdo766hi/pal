@@ -11,7 +11,9 @@
   let busy = $state(false);
   let error: string | undefined = $state();
   const custom = $derived(provider.id === "compatible");
-  const keyless = $derived(provider.config?.keyless === true);
+  const plugin = $derived(provider.plugin !== undefined);
+  const keyless = $derived(provider.config?.keyless === true || plugin);
+  const checkLabel = $derived(plugin ? "Check status" : keyless ? "Check endpoint" : "Check key");
   const ready = $derived(providerReady(provider));
 
   async function act(work: () => Promise<ProvidersState>): Promise<boolean> {
@@ -46,7 +48,9 @@
 
 <div class="fold" role="group" aria-label={custom ? "OpenAI-compatible endpoint" : provider.name}>
   <div class="line">
-    <strong>{provider.name}</strong><span class="pill">{custom ? "Custom endpoint" : "API key"}</span>
+    <strong>{provider.name}</strong><span class="pill"
+      >{custom ? "Custom endpoint" : plugin ? "Plugin" : "API key"}</span
+    >
     {#if provider.enabled}<span class="pill ok">Enabled</span>
     {:else if ready}<span class="pill">Ready · off</span>
     {:else}<span class="pill wa">Not set up</span>{/if}
@@ -80,13 +84,13 @@
       >
     {/if}
     {#if provider.checkable && ready}
-      <button class="b q" disabled={busy} onclick={verify}>{keyless ? "Check endpoint" : "Check key"}</button>
+      <button class="b q" disabled={busy} onclick={verify}>{checkLabel}</button>
     {/if}
     {#if provider.keys !== null}<a class="b q" href={provider.keys} target="_blank" rel="noopener noreferrer"
         >Get a key</a
       >{/if}
   </div>
-  {#if ready && check === undefined}
+  {#if ready && check === undefined && !plugin}
     <div class="setd">
       {keyless ? "Endpoint saved, not checked." : "Key saved, not checked."}
       {provider.checkable

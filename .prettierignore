@@ -7,3 +7,4 @@ flake.lock
 .claude/
 skills-lock.json
 .design/
+plugins/*/vendor/
