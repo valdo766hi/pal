@@ -6,7 +6,7 @@ import { LiveDoc } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { cachedClaudeProcessCount } from "../plugins/claude-code/vendor/claude-cli.ts";
-import { installFakeClaude } from "./fixtures/claude.ts";
+import { installFakeClaude, startFakeAnthropic } from "./fixtures/claude.ts";
 
 const SECRET = "planted-pal-secret-value";
 const cleanups: (() => unknown)[] = [];
@@ -15,12 +15,28 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-type Seen = { pid: number; mode: string; request: boolean; cwd: string; env: string[]; leaked: boolean };
+type Logged = {
+  pid: number;
+  mode?: string;
+  request?: boolean;
+  cwd?: string;
+  env?: string[];
+  leaked?: boolean;
+  mcp?: string;
+  tools?: string[];
+  attempts?: { status: number; body: string }[];
+  toolCall?: string;
+  denied?: boolean;
+  text?: string;
+};
+const INERT_INVENTORY = join(import.meta.dirname, "../plugins/claude-code/vendor/inert-mcp.mjs");
 
 async function setup(config: Record<string, unknown> = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "pal-claude-code-")));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   const claude = join(root, "bin", "claude");
+  const anthropic = await startFakeAnthropic();
+  cleanups.push(() => anthropic.close());
 
   await mkdir(join(root, "bin"));
   await installFakeClaude(claude);
@@ -30,7 +46,10 @@ async function setup(config: Record<string, unknown> = {}) {
   // Planted where a careless child environment would carry them along.
   vi.stubEnv("PAL_TEST_SECRET", SECRET);
   vi.stubEnv("ANTHROPIC_API_KEY", SECRET);
-  const pal = await openPal({ dataRoot: join(root, "data"), installRoot: "/nonexistent-install" }, context);
+  const pal = await openPal(
+    { dataRoot: join(root, "data"), installRoot: "/nonexistent-install", providerOrigin: anthropic.origin },
+    context,
+  );
   cleanups.push(() => pal.close());
   const plugin = (method: string, path: string, body?: unknown) =>
     pal.capabilities.request(
@@ -39,11 +58,13 @@ async function setup(config: Record<string, unknown> = {}) {
       context,
     ) as Promise<Record<string, unknown>>;
   await plugin("PUT", "settings", { command: claude, configDir: null, allowUsageCredits: false });
-  const seen = async (): Promise<Seen[]> =>
+  const logged = async (): Promise<Logged[]> =>
     (await readFile(join(root, "bin", "fake-claude.log"), "utf8").catch(() => ""))
       .split("\n")
       .filter((line) => line !== "")
-      .map((line) => JSON.parse(line) as Seen);
+      .map((line) => JSON.parse(line) as Logged);
+  // One entry per Claude Code process start.
+  const seen = async () => (await logged()).filter(({ mode }) => mode !== undefined);
   const project = await pal.projects.create("claude-project", { name: "Claude" });
   const chat = await pal.chats.createChat("claude-chat", { projectId: project.id }, context);
   const conversation = await pal.harness.conversation(chat.conversationId, context);
@@ -54,7 +75,7 @@ async function setup(config: Record<string, unknown> = {}) {
     await conversation.waitForIdle(context);
     return (await conversation.context(context)).messages;
   };
-  return { pal, root, claude, configure, plugin, seen, chat, conversation, send };
+  return { pal, root, claude, anthropic, configure, plugin, logged, seen, chat, conversation, send };
 }
 
 describe("Claude subscription provider plugin", () => {
@@ -114,11 +135,34 @@ describe("Claude subscription provider plugin", () => {
         expect.objectContaining({ type: "text", text: "Hello from Claude Code" }),
       ]),
     );
+    // Claude Code reached Anthropic once, through Pal's relay, with its own login, Pal's history and Pal's tools.
+    expect(
+      reply?.role === "assistant" && reply.diagnostics?.find(({ type }) => type === "claude-code.turn-relay"),
+    ).toMatchObject({ details: { upstreamRequests: 1, blockedRequests: 0 } });
+    expect(f.anthropic.requests).toHaveLength(1);
+    const [request] = f.anthropic.requests;
+    expect(request?.headers.authorization).toBe("Bearer fake-claude-code-login");
+    expect(JSON.stringify(request?.body.messages)).toContain("hello");
+    expect(JSON.stringify(request?.body.messages)).not.toContain("fixture reminder");
+    const inventory = (await f.logged()).find(({ tools }) => tools !== undefined);
+    expect(inventory?.mcp).toBe(INERT_INVENTORY);
+    expect(inventory?.tools).toContain("codemode");
+    expect(request?.body.tools?.map(({ name }) => name)).toEqual(
+      expect.arrayContaining((inventory?.tools ?? []).map((name) => `mcp__pi__${name}`)),
+    );
 
     const second = await f.send("call-tool");
     const result = second.find((message) => message.role === "toolResult" && message.toolName === "codemode");
     expect(JSON.stringify(result)).toContain("tool ran");
     expect(second.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+    // Claude Code's own call reached only the inert inventory; Pal's real result went upstream with the next request.
+    expect((await f.logged()).find(({ toolCall }) => toolCall !== undefined)).toMatchObject({
+      toolCall: "mcp__pi__codemode",
+      denied: true,
+      text: expect.stringContaining("inert"),
+    });
+    expect(f.anthropic.requests).toHaveLength(3);
+    expect(JSON.stringify(f.anthropic.requests.at(-1)?.body.messages.at(-1))).toContain("tool ran");
 
     await f.configure({ overage: true });
     const before = (await f.seen()).filter(({ mode }) => mode === "stream").length;
@@ -177,5 +221,33 @@ describe("Claude subscription provider plugin", () => {
     await f.pal.providers.setEnabled("claude-code", false);
     expect(cachedClaudeProcessCount()).toBe(0);
     expect(() => process.kill(warm, 0), "the warm process outlived disabling").toThrow();
+  }, 60_000);
+
+  it("lets each Claude Code request reach Anthropic once and cuts it on Stop", async () => {
+    const f = await setup();
+    await f.pal.providers.setEnabled("claude-code", true);
+    const [model] = (await f.pal.providers.list()).find((provider) => provider.id === "claude-code")?.models ?? [];
+    if (model === undefined) throw new Error("no Claude Code model listed");
+    await f.conversation.configure({ model: { provider: "claude-code", modelId: model.id } }, context);
+
+    await f.send("overloaded-once");
+    const attempts = (await f.logged()).flatMap(({ attempts }) => (attempts === undefined ? [] : [attempts]));
+    // The relay refuses Claude Code's own retry after the 529, so each request reaches Anthropic at most once.
+    expect(attempts[0]).toEqual([
+      { status: 529, body: "" },
+      { status: 400, body: expect.stringContaining("PI_CLAUDE_CODE_TURN_RELAY_CONSUMED") },
+    ]);
+    expect(f.anthropic.requests).toHaveLength(attempts.length);
+
+    const before = f.anthropic.requests.length;
+    await f.pal.chats.submit(f.chat.id, "claude-input-hold", { text: "hold" }, context);
+    await vi.waitFor(() => expect(f.anthropic.requests).toHaveLength(before + 1), { timeout: 20_000 });
+    const held = (await f.seen()).filter(({ request }) => request).at(-1)?.pid;
+    if (held === undefined) throw new Error("no Claude Code request process");
+    await f.conversation.abort(context);
+    await f.conversation.waitForIdle(context);
+    await vi.waitFor(() => expect(f.anthropic.requests.at(-1)?.cut).toBe(true));
+    expect(cachedClaudeProcessCount()).toBe(0);
+    expect(() => process.kill(held, 0), "the stopped Claude Code process lived on").toThrow();
   }, 60_000);
 });

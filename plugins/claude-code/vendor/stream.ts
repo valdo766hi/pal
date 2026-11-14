@@ -385,6 +385,8 @@ export function streamClaudeCode(
         // Pal: a neutral folder the provider names, never Pal's own working directory; the chat's workspace is in
         // Pal's prompt, and Claude Code runs no tools.
         cwd: options?.env?.PI_CLAUDE_CODE_CWD ?? process.cwd(),
+        // Pal: the relay's upstream comes from the provider, so tests can point it at a loopback fixture.
+        upstreamUrl: options?.env?.PI_CLAUDE_CODE_UPSTREAM,
         frames,
         systemPrompt,
         manifest: preparedTools.manifest,

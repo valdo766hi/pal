@@ -14,7 +14,8 @@ Pal's changes, all marked or type-only:
   wherever upstream read `process.env`.
 - `claude-cli.ts`: a new process needs a subscription login, not just any login, and `forgetClaudeReadiness()`
   drops the cached check.
-- `stream.ts`: the working directory comes from the provider (`PI_CLAUDE_CODE_CWD`, an empty folder), not Pal's own.
+- `stream.ts`: the working directory comes from the provider (`PI_CLAUDE_CODE_CWD`, an empty folder), not Pal's own,
+  and so does the relay's upstream (`PI_CLAUDE_CODE_UPSTREAM`, Anthropic's API unless a test points it elsewhere).
 - Pal compiles with `exactOptionalPropertyTypes` and `erasableSyntaxOnly`: optional fields accept `undefined`,
   constructor parameter properties are plain fields, and optional Pi message fields are set or removed explicitly.
 

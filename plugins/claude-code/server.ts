@@ -60,6 +60,7 @@ export default {
       return {
         PI_CLAUDE_CODE_COMMAND: current.command,
         PI_CLAUDE_CODE_CWD: await folder,
+        PI_CLAUDE_CODE_UPSTREAM: host.endpoint("https://api.anthropic.com"),
         ...(current.configDir === null ? {} : { PI_CLAUDE_CODE_CONFIG_DIR: current.configDir }),
         ...(current.allowUsageCredits ? { [ALLOW_USAGE_CREDITS_ENV]: "1" } : {}),
       };
