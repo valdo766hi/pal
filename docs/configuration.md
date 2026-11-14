@@ -147,6 +147,22 @@ Settings → **Models**:
     DeepSeek also report your usage or balance.
   - An OpenAI-compatible endpoint takes a name, base URL, model IDs, context window and output limit. The URL may
     point at a private network address, because you chose it.
+- **Claude subscription (Claude Code) · Experimental**, from the `claude-code` plugin, uses your own Claude Pro or Max
+  subscription through the official Claude Code CLI. It is off until you enable it and never chosen automatically.
+  - **Requirements:** Claude Code installed for the account Pal runs as and logged in with a subscription; a new process
+    refuses another login, such as an API key. Pal never installs or updates it and never offers a Claude login: open
+    Terminal and run `claude auth login`. Settings → Claude Code sets the command (or its absolute path) and an optional
+    config directory, and **Check status** runs `claude auth status` once.
+  - **How it runs:** Pal keeps the history, approvals and tools. Each request starts or reuses (at most two, for five
+    minutes; disabling the provider or saving its settings ends them) a Claude Code process that only talks to the
+    model: Claude Code's own tools are off, and a tool it asks for comes back to Pal to run. The process gets a fixed
+    list of host variables (`PATH`, `HOME`, locale and similar) plus its settings, never Pal's environment, and an empty
+    working folder. Pal never reads or stores Claude Code's credentials; its authenticated requests pass through a
+    loopback relay in memory only.
+  - **Limits:** usage counts against your plan's limits. A reply Anthropic charges to usage credits stops the run
+    with a "Claude Code billing" error and is not retried, unless you turn on **Allow usage credits**. Anthropic's
+    [legal and compliance terms](https://code.claude.com/docs/en/legal-and-compliance) say subscription logins are for
+    ordinary use of Claude Code; Anthropic may treat these requests as third-party use. Read them before enabling it.
 
 The model picker in each chat lists ChatGPT once you sign in and every enabled provider, with search. Choosing a
 model from another provider sends that chat's history to it with your next message. Model and reasoning changes
@@ -170,8 +186,21 @@ Settings → **MCP servers**:
 
 ## Agent permissions
 
-- **Command approval** is set per chat with the composer's **Ask** / **Full access** pill. Ask is the default for
-  every chat.
+- **Command approval** is set per chat with the composer's **Ask** / **Auto** / **Full access** pill. Ask is the
+  default for every chat.
+  - **Auto** needs a decision model: the Jev plugin (Settings → Jev). Each agent shell command, its folder, timeout and
+    folder access (nothing else) go to Jev through the connection you choose, **TypeSafe** (the default) or
+    **OpenRouter**, each billed to its own account with its own key. A confident "routine" answer, at or above your
+    threshold (90% by default), runs the command without a card. Anything else is not run on its own: if the agent
+    marked the command as one the task can do without, it goes on with other work and asks you in its reply to run it
+    (the run line shows it as skipped); otherwise the normal approval card appears with the reason. Commands that change
+    privileges, push with Git, publish, delete recursively outside the folder (or after a `cd`, or through a variable),
+    pipe a download into a shell, touch SSH keys, credentials or Pal's data, or change the system always need you, with
+    no Jev request. A failed, slow (over 5 seconds) or unclear answer counts as not safe: Auto never denies and never
+    tries the other connection. Browser actions always ask. Without a ready decision model, Auto isn't offered, and a
+    chat left in Auto asks like Ask. This is a guard against routine prompts, not a sandbox.
+  - Jev keys are entered in Settings → Jev, stored sealed and never shown again. Pal never uses the OpenRouter key
+    saved under Models for Jev. **Check key** is free for OpenRouter; for TypeSafe it is one billed classification.
 - **Longest agent command** (Settings → General) bounds one command the model runs directly: 2 minutes by default,
   at most 30. Commands from its scripts stay within 2 minutes. Stop ends a command and its process group. A command
   cut off by a restart is reported as interrupted and never rerun; GNU `timeout` still ends it at its deadline.

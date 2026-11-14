@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
 import { contentText, type Message, type Models } from "@earendil-works/pi-ai";
-import { estimateContextTokens, estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
   DEFAULT_COMPACTION_POLICY,
   defineDoc,
@@ -16,6 +16,7 @@ import {
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { type Static, Type } from "typebox";
 import type { Chat } from "./chats.ts";
+import { type ContextBreakdown, contextBreakdown, type Owner } from "./context-usage.ts";
 import { HttpError } from "./http.ts";
 import { MAX_UPLOAD_BYTES } from "./uploads.ts";
 import { MAX_INPUT_ATTACHMENTS } from "../protocol/limits.ts";
@@ -75,6 +76,16 @@ const PreparedContext = defineDoc({
   fork: "initial",
   initial: () => ({ latest: null as Prepared | null }),
 });
+/** The latest request's breakdown: labels and estimated counts only, current state with no history. */
+const ContextUsage = defineDoc({
+  kind: "pal.contextUsage",
+  version: 1,
+  checkpointWhen: () => true,
+  scope: "conversation",
+  history: "latest",
+  fork: "initial",
+  initial: () => ({ latest: null as (ContextBreakdown & { task: number }) | null }),
+});
 const Lookup = Type.Object(
   {
     query: Type.String({ maxLength: 200 }),
@@ -111,7 +122,13 @@ export class ChatContext {
   readonly #storage: Storage;
   #readers = 0;
 
-  constructor(database: SqliteDatabase, harness: () => Harness, models: Models, storage: Storage) {
+  constructor(
+    database: SqliteDatabase,
+    harness: () => Harness,
+    models: Models,
+    storage: Storage,
+    owner: (extension: string) => Owner,
+  ) {
     this.#database = database;
     this.#harness = harness;
     this.#storage = storage;
@@ -134,6 +151,12 @@ export class ChatContext {
             if (task?.state.status !== "running") return;
             const phase = validate(RequestPhase, task.state.checkpoint);
             const model = models.getModel(phase.model.provider, phase.model.modelId);
+            const agent = await (await harness.conversation(api.conversationId, context))?.agent(context);
+            const usage = contextBreakdown(
+              request.messages,
+              agent ?? { extensions: [], tools: [], callable: [], deferred: [] },
+              owner,
+            );
             const prepared: Prepared = {
               task: api.taskId,
               cutoff: phase.cutoff,
@@ -143,13 +166,15 @@ export class ChatContext {
               thinkingLevel: phase.thinkingLevel,
               digest: digest(request.messages),
               messages: request.messages.length,
-              estimatedTokens: estimateContextTokens(request.messages).tokens,
+              estimatedTokens: usage.usedTokens,
               contextWindow: model?.contextWindow ?? null,
               reserveTokens: DEFAULT_COMPACTION_POLICY.reserveTokens,
             };
             await harness.commit(async (tx) => {
               const doc = await tx.doc(PreparedContext, api.conversationId);
-              if (doc.latest === null || doc.latest.task <= prepared.task) doc.latest = prepared;
+              if (doc.latest !== null && doc.latest.task > prepared.task) return;
+              doc.latest = prepared;
+              (await tx.doc(ContextUsage, api.conversationId)).latest = { ...usage, task: prepared.task };
             }, context);
           },
         }),
@@ -214,6 +239,29 @@ export class ChatContext {
       prepared: prepared?.latest ?? null,
       attachments: [...attachments.values()],
       budgets: BUDGETS,
+    };
+  }
+
+  /** Where the last prepared request's tokens went, from what the hook stored: no prompt text and no model call. */
+  async usage(chat: Chat, context: Context) {
+    await this.#ready(chat);
+    const harness = this.#harness();
+    const [prepared, usage] = await Promise.all([
+      harness.snapshot(PreparedContext, chat.conversationId, context),
+      harness.snapshot(ContextUsage, chat.conversationId, context),
+    ]);
+    await this.#ready(chat);
+    const latest = prepared?.latest ?? null;
+    const breakdown = usage?.latest?.task === latest?.task ? usage?.latest : undefined;
+    return {
+      model: latest?.model ?? null,
+      contextWindow: latest?.contextWindow || null,
+      reserveTokens: latest?.reserveTokens ?? DEFAULT_COMPACTION_POLICY.reserveTokens,
+      usedTokens: latest?.estimatedTokens ?? null,
+      ...(breakdown?.reported === undefined ? {} : { reported: breakdown.reported }),
+      categories: breakdown?.categories ?? [],
+      unloaded: breakdown?.unloaded ?? [],
+      preparedAt: latest?.at ?? null,
     };
   }
 
@@ -338,3 +386,4 @@ function digest(messages: readonly Message[]) {
 }
 export type ContextInfo = Awaited<ReturnType<ChatContext["inspect"]>>;
 export type PromptInfo = Awaited<ReturnType<ChatContext["prompt"]>>;
+export type ContextUsageInfo = Awaited<ReturnType<ChatContext["usage"]>>;

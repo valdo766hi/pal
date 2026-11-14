@@ -596,29 +596,48 @@ in a browser. See [extension architecture](architecture.md#extensions-and-releas
 2. **Describe it in `manifest.ts`.** It is plain data, which the web build also reads.
    - `id`, `version` and `native`, which must be `pal.<id>`. Chats pin the version, and a chat whose version a build
      lacks waits for its retained Pal release, so raise it only for an incompatible change.
-   - `core: { min: 2, max: 2 }`, the capability API it was written for; `name`, `description` and `order`, its place
-     in Settings → Extensions; `optIn: true` leaves it off until the owner enables it for new chats.
+   - `core: { min, max }`, the capability API versions it works with (3 is current); `name`, `description` and
+     `order`, its place in Settings → Extensions; `optIn: true` leaves it off until the owner enables it for new chats.
    - `namespace` and `tools`. Each tool name starts with the namespace prefix and declares `callers: ["tools"]` (Code
      Mode), its `replay` (`safe` only if repeating it has no external effect), `maxOutputBytes` and, if it reads the
      chat's granted folders, `permissions: ["project.read"]`. Only tools already on the kernel's direct list may add
      `"model"`.
-   - `ui`: Settings tabs, workspace `panels`, chat `slots` (`context` or `composer`) and `renderers` for its own
-     `pal.<id>` entries, each naming a component in `ui/`. Icons come from `web/src/lib/icons.ts`. Kernel panel and
-     tab names are refused.
+   - `ui`: Settings tabs, workspace `panels`, chat `slots` and `renderers` for its own `pal.<id>` entries, each
+     naming a component in `ui/`. Slots: `context` (a Context panel section), `composer` (above the message box) and
+     `composer-tools` (in its tool row, given `{ chat, running, revision, onPanel }`; `revision` changes when the chat
+     commits history). Icons come from `web/src/lib/icons.ts`. Kernel panel and tab names are refused.
+   - `scope`: omitted for a plugin chats select. `"browser"` for interface pieces only (no server part), switched in
+     the browser. `"installation"` for a server part that serves the whole installation, such as a decision model:
+     settings tabs and owner requests, no tools, namespace or chat pieces, and never selected or pinned per chat.
+   - `advisor: { label }` (installation plugins only, at most one per build): the plugin's `advisor` judges agent
+     shell commands in Auto mode. `status()` says whether it is ready and what it sends where; `advise(request,
+     signal)` answers `{ verdict: "run" | "ask", confidence, threshold, … }` for exactly the command, folder, timeout
+     and folder access it is given. The kernel applies its own rules: a fixed list always asks first, the answer is
+     validated, only `run` at or above `threshold` skips the card, and anything else (an error, a timeout after 5
+     seconds, an unexpected answer) asks the owner. It is never retried.
+   - `providers: [{ id, name }]` (installation plugins only): model providers the plugin's runtime returns as
+     `providers` (`{ id, billing, provider, status(), stop?() }`, `provider` a Pi `Provider`). Settings → Models
+     lists each one; the kernel registers it only while the owner keeps it enabled, asks `status()` before enabling
+     it, calls `stop()` when the owner disables it, and never selects or substitutes it. A provider that starts
+     processes must start none while disabled and end them in `stop` and `dispose`.
 3. **Add a tool in `server.ts`.** `open(host)` returns the tools the manifest declares, with the same names, replay
    and callers. Record what the owner should see with
    `api.commit((tx) => tx.appendEntry(api.conversationId, { kind: "pal.<id>", data }), context)`. The `host` offers
    narrow services: `settings`, `now()`, folder leases through `authorize`, the chat's `project` and SQL limited to
    tables the manifest declares. Pal doesn't create tables for plugins, so keep state in settings or entries.
 4. **Add a setting.** `host.settings.get(name)` and `set(name, value)` keep JSON values of at most 16 KiB for this
-   plugin only. `api(request)` answers the owner's requests to `/api/plugins/<id>/…`: validate the body and throw
-   `HttpError` to refuse. The Settings tab calls it with `api.plugin("<id>", method, path, body)` from
+   plugin only. Keys and other secrets go in `host.secrets` (`has`, `get`, `set`, `clear`) instead: sealed in Pal's
+   credential store under the plugin's name, never in settings. Set them only from owner requests and return only
+   whether one is set. `host.endpoint(url)` gives a provider URL as this installation reaches it, so tests can point it
+   at a loopback fixture. `api(request)` answers the owner's requests to `/api/plugins/<id>/…`: validate the body and
+   throw `HttpError` to refuse. The Settings tab calls it with `api.plugin("<id>", method, path, body)` from
    `web/src/lib/api.ts`.
 5. **Add a panel.** A Svelte 5 component in `ui/` that receives `{ project, chat, workspace }`. It appears after the
    kernel's panels in chats that selected the plugin; a component that fails to load says so in its place. A
    renderer receives `{ entry }`.
 6. **List it.** Add one line to `plugins/index.ts`: `export { default as <id> } from "./<id>/server.ts";`. A plugin
-   with `scope: "browser"`, such as `pets`, has only interface pieces, no `server.ts` and no line.
+   with `scope: "browser"`, such as `pets`, has only interface pieces, no `server.ts` and no line. An installation
+   plugin, such as `jev`, has both but no new-chat switch in Settings → Extensions.
 7. **Build, drain and restart.** Run `pnpm check` and `pnpm build`, let running chats finish, then restart Pal on the
    new build. A changed plugin changes Pal's implementation identity, so the new build refuses to start while work is
    unfinished; finish it on the previous build first. An installed Pal takes the new build through

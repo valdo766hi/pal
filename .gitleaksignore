@@ -1,3 +1,6 @@
 # Synthetic credentials in the historical diagnostics-redaction test.
 a39475c773a23550b53187e4d2618a597a87fbb2:test/api.test.ts:generic-api-key:1197
 a39475c773a23550b53187e4d2618a597a87fbb2:test/api.test.ts:generic-api-key:1207
+# Synthetic Jev connection keys in the advisor plugin test's first commit.
+0a548f8049d11595b399f63b93bc9f2bd533ef75:test/jev.test.ts:generic-api-key:10
+0a548f8049d11595b399f63b93bc9f2bd533ef75:test/jev.test.ts:generic-api-key:11

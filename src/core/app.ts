@@ -286,11 +286,15 @@ export async function openPal(
         return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
       },
       authorize: (api, ctx) => folders.forTool(api, ctx),
+      credentials,
+      endpoint: (url) =>
+        options.providerOrigin === undefined ? url : url.replace(/^https:\/\/[^/]+/, options.providerOrigin),
       now,
       // The helpers plugin's tool and the kernel's helper budget hooks share these bounds.
       ...(options.helperLimits === undefined ? {} : { options: { helpers: options.helperLimits } }),
     });
     capabilities = openedCapabilities;
+    await providers.attach(openedCapabilities.providers);
     const guidanceFiles = new GuidanceFiles({
       deny: [options.dataRoot, options.installRoot, "/nix/store"],
       privateFiles,
@@ -448,6 +452,8 @@ export async function openPal(
       root: (conversation) => workspaceRoot(conversation, true),
       task: async (id, ctx) => harness?.getTask(id, ctx),
       browser: async (conversation, args) => browsers?.approval(conversation, args),
+      advisor: () => openedCapabilities.advisor,
+      privatePaths: [options.dataRoot],
       ...(options.approvalTtlMs === undefined ? {} : { ttlMs: options.approvalTtlMs }),
     });
     approvals = commandApprovals;
@@ -474,6 +480,9 @@ export async function openPal(
         ]),
     });
     mcp = connections;
+    const plugins = new Map(
+      definitions.map(({ manifest }) => [manifest.native, { id: manifest.id, label: manifest.name }]),
+    );
     const chatContext = new ChatContext(
       database,
       () => {
@@ -482,6 +491,13 @@ export async function openPal(
       },
       models,
       store.storage,
+      (extension) =>
+        plugins.get(extension) ??
+        (extension === "codemode"
+          ? { id: "codemode", label: "Code Mode" }
+          : extension === "pal.mcp"
+            ? { id: "mcp", label: "MCP" }
+            : { id: "pal", label: "Pal" }),
     );
     const currentHarness = () => {
       if (harness === undefined) throw new Error("the harness is not open");

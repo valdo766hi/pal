@@ -21,7 +21,9 @@ import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import type { CapabilityProvider } from "../capabilities/contract.ts";
 import type { SqliteCredentialStore } from "../storage/credentials.ts";
+import { CHATGPT_PROVIDER } from "./chatgpt.ts";
 
 const bearer = (key: string) => ({ authorization: `Bearer ${key}` });
 
@@ -118,7 +120,9 @@ export type ProviderModel = {
   readonly images: boolean;
 };
 export type ProviderView = {
-  readonly id: ApiProviderId;
+  readonly id: string;
+  /** The plugin that offers this provider; absent for Pal's own. */
+  readonly plugin?: string;
   readonly name: string;
   readonly billing: string;
   readonly keys: string | null;
@@ -136,7 +140,7 @@ export type KeyCheck = { readonly ok: true; readonly detail: string } | { readon
 export class ProviderConfigError extends Error {}
 
 const KEY = /^[\x21-\x7e]{8,4096}$/;
-const SETTING = (id: ApiProviderId) => `provider:${id}`;
+const SETTING = (id: string) => `provider:${id}`;
 const CONFIG = `provider:${COMPATIBLE}:config`;
 const CHECK_TIMEOUT_MS = 10_000;
 /** The fields Pal shows from OpenRouter's `GET /api/v1/key`; `limit` is null for an unlimited key. */
@@ -272,8 +276,15 @@ export function compatibleConfig(body: CompatibleConfig): CompatibleConfig {
   return { ...body, name: body.name.trim(), baseUrl: url.href.replace(/\/+$/, ""), models };
 }
 
-/** The owner's API-key providers: encrypted keys, explicit enablement and the Pi registration that follows it. */
+/** A provider a plugin offers, as the kernel lists it. */
+export type PluginProvider = CapabilityProvider & { readonly name: string; readonly plugin: string };
+
+/**
+ * The owner's API-key providers and plugin providers: encrypted keys, explicit enablement and the Pi registration
+ * that follows it.
+ */
 export class ModelProviders {
+  #plugins: readonly PluginProvider[] = [];
   readonly #database: SqliteDatabase;
   readonly #credentials: SqliteCredentialStore;
   readonly #models: MutableModels;
@@ -304,8 +315,46 @@ export class ModelProviders {
     return providers;
   }
 
+  /**
+   * Add plugin providers once plugins are open, registering those the owner left enabled. Their readiness is not
+   * probed here: that is the owner's to ask for, and a request to one that isn't ready fails with its reason.
+   */
+  async attach(plugins: readonly PluginProvider[]): Promise<void> {
+    for (const plugin of plugins)
+      if (isApiProvider(plugin.id) || plugin.id === CHATGPT_PROVIDER)
+        throw new Error(`Plugin ${plugin.plugin} cannot replace the ${plugin.id} provider.`);
+    this.#plugins = plugins;
+    for (const plugin of plugins) {
+      if (!(await this.#enabled(plugin.id))) continue;
+      this.#models.setProvider(plugin.provider);
+      // Its account's models replace the built-in list once discovered; until then chats keep their choice.
+      void this.#models.refresh({ providers: [plugin.id], allowNetwork: true }).catch(() => {});
+    }
+  }
+
+  /** Whether `id` names a provider the owner can configure: Pal's own or a plugin's. */
+  known(id: string): boolean {
+    return isApiProvider(id) || this.#plugin(id) !== undefined;
+  }
+
   async list(): Promise<ProviderView[]> {
-    return Promise.all(
+    const plugins = await Promise.all(
+      this.#plugins.map(async (plugin): Promise<ProviderView> => {
+        const enabled = await this.#enabled(plugin.id);
+        return {
+          id: plugin.id,
+          plugin: plugin.plugin,
+          name: plugin.name,
+          billing: plugin.billing,
+          keys: null,
+          hasKey: false,
+          enabled,
+          checkable: true,
+          models: enabled ? this.#catalog(plugin.id) : [],
+        };
+      }),
+    );
+    const own = await Promise.all(
       API_PROVIDER_IDS.map(async (id): Promise<ProviderView> => {
         const hasKey = await this.#hasKey(id);
         const enabled = await this.usable(id);
@@ -328,20 +377,22 @@ export class ModelProviders {
         return { id, name, billing, keys, hasKey, enabled, checkable: "check" in CATALOG[id], models };
       }),
     );
+    return [...own, ...plugins];
   }
 
   /** Whether chats may send to this provider now: ready (key, or a keyless endpoint) and enabled by the owner. */
-  async usable(id: ApiProviderId): Promise<boolean> {
+  async usable(id: string): Promise<boolean> {
+    if (!isApiProvider(id)) return this.#plugin(id) !== undefined && (await this.#enabled(id));
     return (await this.#ready(id)) && (await this.#enabled(id));
   }
 
   /** Why a chat's chosen model can't be sent to now, if it can't; never a reason to send it elsewhere instead. */
   async problem(model: { provider: string; modelId: string }): Promise<{ code: string; message: string } | undefined> {
-    if (!isApiProvider(model.provider)) return undefined;
+    if (!this.known(model.provider)) return undefined;
     if (!(await this.usable(model.provider)))
       return {
         code: "provider_unavailable",
-        message: `${API_PROVIDERS[model.provider].name} isn't enabled. Enable it in Settings → Models or choose another model.`,
+        message: `${isApiProvider(model.provider) ? API_PROVIDERS[model.provider].name : (this.#plugin(model.provider)?.name ?? model.provider)} isn't enabled. Enable it in Settings → Models or choose another model.`,
       };
     if (this.#models.getModel(model.provider, model.modelId) === undefined)
       return { code: "model_unavailable", message: `${model.modelId} is no longer offered; choose another model.` };
@@ -349,7 +400,8 @@ export class ModelProviders {
   }
 
   /** Save or replace a key (the next request uses it), or remove it, which also disables a provider that needs it. */
-  async setKey(id: ApiProviderId, key: string | null): Promise<void> {
+  async setKey(id: string, key: string | null): Promise<void> {
+    if (!isApiProvider(id)) throw new ProviderConfigError("this provider uses no key in Pal");
     if (key === null) {
       await this.#credentials.forget(id);
       if (!(await this.#ready(id))) await this.setEnabled(id, false);
@@ -379,7 +431,24 @@ export class ModelProviders {
     }
   }
 
-  async setEnabled(id: ApiProviderId, enabled: boolean): Promise<void> {
+  async setEnabled(id: string, enabled: boolean): Promise<void> {
+    const plugin = this.#plugin(id);
+    if (plugin !== undefined) {
+      if (enabled) {
+        const status = await plugin.status();
+        if (!status.ready) throw new ProviderConfigError(status.detail);
+      }
+      await this.#save(SETTING(id), enabled ? "enabled" : "disabled");
+      if (!enabled) {
+        this.#models.deleteProvider(id);
+        await plugin.stop?.();
+        return;
+      }
+      this.#models.setProvider(plugin.provider);
+      await this.#models.refresh({ providers: [id], allowNetwork: true, force: true });
+      return;
+    }
+    if (!isApiProvider(id)) throw new ProviderConfigError("no such provider");
     if (enabled && !(await this.#ready(id))) {
       throw new ProviderConfigError(
         id === COMPATIBLE
@@ -393,7 +462,13 @@ export class ModelProviders {
   }
 
   /** Ask the provider about the saved key without a model request, where it documents a free way to. */
-  async check(id: ApiProviderId): Promise<KeyCheck> {
+  async check(id: string): Promise<KeyCheck> {
+    const plugin = this.#plugin(id);
+    if (plugin !== undefined) {
+      const status = await plugin.status();
+      return { ok: status.ready, detail: status.detail };
+    }
+    if (!isApiProvider(id)) throw new ProviderConfigError("no such provider");
     const probe = await this.#probe(id);
     if ("detail" in probe) return probe;
     const { name, url, headers } = probe;
@@ -452,7 +527,11 @@ export class ModelProviders {
     return (await this.#credentials.read(id))?.type === "api_key";
   }
 
-  async #enabled(id: ApiProviderId): Promise<boolean> {
+  #plugin(id: string): PluginProvider | undefined {
+    return this.#plugins.find((plugin) => plugin.id === id);
+  }
+
+  async #enabled(id: string): Promise<boolean> {
     return (await this.#setting(SETTING(id))) === "enabled";
   }
 
@@ -482,8 +561,10 @@ export class ModelProviders {
     );
   }
 
-  #catalog(id: ApiProviderId): ProviderModel[] {
-    return this.#models.getModels(id).map((model: Model<Api>) => ({
+  #catalog(id: string): ProviderModel[] {
+    const models = this.#models.getModels(id);
+    const listed = this.#plugin(id)?.provider.filterModels?.(models, undefined) ?? models;
+    return listed.map((model: Model<Api>) => ({
       id: model.id,
       name: model.name,
       efforts: getSupportedThinkingLevels(model),

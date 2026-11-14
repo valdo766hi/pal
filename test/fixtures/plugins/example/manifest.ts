@@ -6,7 +6,7 @@ export default {
   native: "pal.example",
   name: "Example echo",
   description: "Echo a bounded string through native Code Mode. No shell, network or credential access is requested.",
-  core: { min: 2, max: 2 },
+  core: { min: 2, max: 3 },
   order: 70,
   namespace: { name: "example", prefix: "example_", description: "A bounded capability template." },
   optIn: true,

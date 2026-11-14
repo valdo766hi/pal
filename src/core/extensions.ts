@@ -91,7 +91,10 @@ export type Contribution = Pick<
   capability?: CapabilityManifest;
 };
 function catalogFor(definitions: readonly CompiledCapability[]) {
-  const capabilities = definitions.map(({ manifest }) => capabilityManifest(manifest));
+  // Installation plugins serve every chat at once, so chats never select or pin them.
+  const capabilities = definitions
+    .map(({ manifest }) => capabilityManifest(manifest))
+    .filter((manifest) => manifest.scope !== "installation");
   const catalog = [...KERNEL_BUILTINS, ...capabilities].sort((a, b) => a.order - b.order);
   if (
     new Set(catalog.map((item) => item.id)).size !== catalog.length ||

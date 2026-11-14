@@ -4,7 +4,13 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+  InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
 import { createRegistry, defineExtension } from "@earendil-works/pi-durable";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
@@ -26,6 +32,7 @@ import { BuiltinExtensions } from "../src/core/extensions.ts";
 import { FileAccessError } from "../src/core/files.ts";
 import { PrivateFiles } from "../src/core/file-policy.ts";
 import * as inventory from "../plugins/index.ts";
+import { fakeAdvisor, withAdvisor } from "./fixtures/advisor.ts";
 import { ICONS } from "../web/src/lib/icons.ts";
 import memoryCapability, { projectMemory } from "../plugins/memory/server.ts";
 
@@ -99,6 +106,8 @@ function host(pal: Pal): KernelServices {
       return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
     },
     authorize: (api, ctx) => pal.folders.forTool(api, ctx),
+    credentials: new InMemoryCredentialStore(),
+    endpoint: (url) => url,
     now: Date.now,
   };
 }
@@ -144,8 +153,17 @@ describe("compiled capability contract", () => {
     }
     const { id, version, native, name, description, core, order } = exampleCapability.manifest;
     const bare = { id, version, native, name, description, core, order, scope: "browser" };
-    for (const extra of [{ tools: exampleCapability.manifest.tools }, { ui: exampleCapability.manifest.ui }])
+    for (const extra of [
+      { tools: exampleCapability.manifest.tools },
+      { ui: exampleCapability.manifest.ui },
+      { ui: { slots: [{ slot: "context", component: "Section", order: 1 }] } },
+    ])
       expect(() => capabilityManifest({ ...bare, ...extra })).toThrow("browser-only");
+    const pieces = { slots: [{ slot: "composer-tools", component: "Gauge", order: 1 }] };
+    expect(capabilityManifest({ ...bare, core: { min: 3, max: 3 }, ui: pieces }).ui).toEqual(pieces);
+    expect(() =>
+      capabilityManifest({ ...bare, ui: { slots: [{ slot: "toolbar", component: "Gauge", order: 1 }] } }),
+    ).toThrow();
     const f = await fixture([]);
     await expect(
       CompiledCapabilities.open([{ manifest: capabilityManifest(bare), open: () => ({}) }], host(f.pal)),
@@ -179,7 +197,7 @@ describe("compiled capability contract", () => {
     expect(item).toMatchObject({
       available: true,
       capability: {
-        core: { min: 2, max: 2 },
+        core: { min: 2, max: 3 },
         order: 70,
         tools: [{ name: "example_echo", replay: "safe", callers: ["tools"], permissions: ["project.read"] }],
       },
@@ -501,12 +519,45 @@ describe("compiled capability contract", () => {
       expect(pin.implementations).toEqual([{ id: "example", version: 2, digest: current?.implementation }]);
   });
 
+  it("keeps installation plugins out of chats and allows one advisor that declares itself", async () => {
+    const advisor = fakeAdvisor();
+    const { manifest } = advisor.capability;
+    for (const extra of [
+      { tools: exampleCapability.manifest.tools },
+      { namespace: exampleCapability.manifest.namespace },
+      { ui: { slots: [{ slot: "composer-tools", component: "Gauge", order: 1 }] } },
+      { ui: { panels: [{ id: "Advice", icon: "layers", component: "Panel", order: 1 }] } },
+    ])
+      expect(() => capabilityManifest({ ...manifest, ...extra })).toThrow("serves the installation");
+    expect(() => capabilityManifest({ ...manifest, scope: undefined })).toThrow("must serve the installation");
+    expect(() => capabilityManifest({ ...manifest, scope: "browser" })).toThrow("browser-only");
+    const f = await fixture([]);
+    const second = { ...advisor.capability, manifest: { ...manifest, id: "other", native: "pal.other" } };
+    await expect(CompiledCapabilities.open([advisor.capability, second], host(f.pal))).rejects.toThrow(
+      "at most one advisor",
+    );
+    await expect(CompiledCapabilities.open([{ manifest, open: () => ({}) }], host(f.pal))).rejects.toThrow(
+      "advisor declaration differs",
+    );
+    const opened = await CompiledCapabilities.open([advisor.capability], host(f.pal));
+    expect(opened.advisor?.label).toBe("Fixture");
+    await opened.close();
+    expect(opened.advisor).toBeUndefined();
+    const installed = await fixture(withAdvisor(advisor.capability));
+    const view = await installed.pal.extensions.view();
+    expect(view.catalog.map((item) => item.id)).not.toContain("fixture-advisor");
+    await expect(
+      installed.pal.extensions.select({ selected: [{ id: "fixture-advisor", version: 1 }], digest: view.digest }),
+    ).rejects.toThrow();
+  });
+
   it("validates compatibility, names, permissions and collisions before opening code", async () => {
     const f = await fixture([]);
     const open = vi.fn(exampleCapability.open);
     const manifest = exampleCapability.manifest;
     for (const invalid of [
-      { ...manifest, core: { min: 3, max: 3 } },
+      { ...manifest, core: { min: 4, max: 4 } },
+      { ...manifest, core: { min: 1, max: 2 } },
       { ...manifest, native: "pal.policy" },
       { ...manifest, namespace: { ...manifest.namespace, prefix: "shell_" } },
       { ...manifest, tools: manifest.tools.map((tool) => ({ ...tool, name: "shell_run" })) },

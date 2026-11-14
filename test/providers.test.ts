@@ -123,6 +123,8 @@ describe("API-key model providers", () => {
       "anthropic",
       "deepseek",
       "compatible",
+      // A plugin's provider follows Pal's own.
+      "claude-code",
     ]);
     expect(
       view.body.providers.every((entry: { enabled: boolean; hasKey: boolean }) => !entry.enabled && !entry.hasKey),
@@ -332,11 +334,9 @@ describe("API-key model providers", () => {
       models: ["local-a", "local-b"],
     });
     const enabled = await api("PUT", "providers/compatible/enabled", { enabled: true });
-    expect(enabled.body.providers.at(-1)).toMatchObject({ name: "Local models", enabled: true });
-    expect(enabled.body.providers.at(-1).models.map((model: { id: string }) => model.id)).toEqual([
-      "local-a",
-      "local-b",
-    ]);
+    const local = enabled.body.providers.find((entry: { id: string }) => entry.id === "compatible");
+    expect(local).toMatchObject({ name: "Local models", enabled: true });
+    expect(local.models.map((model: { id: string }) => model.id)).toEqual(["local-a", "local-b"]);
     expect((await api("POST", "providers/compatible/check")).body.check).toMatchObject({ ok: true });
     const chatId = await fixture.chat("compatible-chat");
     expect((await api("PUT", `chats/${chatId}/model`, { provider: "compatible", model: "local-a" })).status).toBe(200);
@@ -345,7 +345,10 @@ describe("API-key model providers", () => {
 
     // Requiring a key without one saved disables the endpoint until a key arrives.
     const keyed = await api("PUT", "providers/compatible/config", { ...endpoint, keyless: false });
-    expect(keyed.body.providers.at(-1)).toMatchObject({ enabled: false, hasKey: false });
+    expect(keyed.body.providers.find((entry: { id: string }) => entry.id === "compatible")).toMatchObject({
+      enabled: false,
+      hasKey: false,
+    });
     expect(await send(chatId)).toMatchObject({ status: 409, error: "provider_unavailable" });
     await api("PUT", "providers/compatible/key", { key: GOOD });
     await api("PUT", "providers/compatible/enabled", { enabled: true });
@@ -360,7 +363,10 @@ describe("API-key model providers", () => {
       "UPDATE pal_settings SET value = '{not json' WHERE key = 'provider:compatible:config'",
     );
     const reopened = await fixture.reopen();
-    expect((await reopened.providers.list()).at(-1)).toMatchObject({ enabled: false, config: null });
+    expect((await reopened.providers.list()).find(({ id }) => id === "compatible")).toMatchObject({
+      enabled: false,
+      config: null,
+    });
     expect(await send(chatId)).toMatchObject({ status: 409, error: "provider_unavailable" });
   });
 

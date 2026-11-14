@@ -5,6 +5,7 @@
     ApiError,
     type ChatSummary,
     type ContextInfo,
+    type ContextUsageInfo,
     type PromptInfo,
     type Project,
     type GrantedFolder,
@@ -13,11 +14,13 @@
   import Icon from "../lib/Icon.svelte";
   import { slots } from "../lib/plugins.ts";
   import InstructionSources from "./InstructionSources.svelte";
+  import ContextUsage from "./ContextUsage.svelte";
   import SkillSources from "./SkillSources.svelte";
   import WorkingGoal from "./WorkingGoal.svelte";
 
   let { project, chat, workspace }: { project: Project; chat: ChatSummary; workspace?: Workspace | null } = $props();
   let info: ContextInfo | undefined = $state.raw();
+  let usage: ContextUsageInfo | undefined = $state.raw();
   let extensions: Awaited<ReturnType<typeof api.chatExtensions>> | undefined = $state.raw();
   let pinDraft: { revision: number; text: string } | undefined = $state();
   let pinStale = $state(false);
@@ -34,14 +37,16 @@
 
   async function load() {
     const current = ++generation;
-    const [context, pins, catalog] = await Promise.all([
+    const [context, breakdown, pins, catalog] = await Promise.all([
       api.context(chat.id),
+      api.contextUsage(chat.id),
       api.chatExtensions(chat.id),
       api.extensions(),
     ]);
     const grants = await api.projectFolders(project.id, workspace?.id);
     if (current !== generation) return;
     info = context;
+    usage = breakdown;
     extensions = pins;
     missingCapabilities = pins.selected
       .filter(
@@ -255,7 +260,13 @@
         of transmission. This does not predict the next request. Image and reasoning bodies/signatures are omitted; text
         previews are bounded. Inspection makes no model call.
       </p>
-      {#if info.prepared === null}<p class="sub">No model request has been prepared yet.</p>{/if}
+      {#if info.prepared === null}<p class="sub">No model request has been prepared yet.</p>
+      {:else if usage?.usedTokens != null}<ContextUsage {usage} />
+        <p class="sub">
+          Estimated from the last prepared request{usage.reported === undefined
+            ? ""
+            : `; ${usage.reported.provider} reported ${usage.reported.tokens.toLocaleString()} tokens after the last reply`}.
+        </p>{/if}
       {#if prompt !== undefined}
         <div class="lookup">
           <strong>{prompt.request.model.modelId} · {prompt.request.thinkingLevel}</strong><time

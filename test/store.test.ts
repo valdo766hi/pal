@@ -293,7 +293,9 @@ describe("store", () => {
     const upgraded = await openDatabase(path);
     cleanups.push(() => upgraded.close());
     const migrated = await snapshot(upgraded);
-    expect(await upgraded.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({ n: 25 });
+    expect(await upgraded.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({
+      n: MIGRATIONS.at(-1)?.version,
+    });
     await expect(migrate(upgraded, MIGRATIONS.slice(0, 24))).rejects.toThrow(
       /migration 25 'pi_durable_1_5_documents'.*does not know/,
     );
@@ -318,6 +320,60 @@ describe("store", () => {
       /CHECK constraint/,
     );
     await database.run("UPDATE pal_admissions SET state = 'withdrawn', blocked = NULL WHERE seq = 9");
+    expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
+  });
+
+  it("keeps every chat, mode and approval through the schema 26 rebuild, and older builds refuse it unchanged", async () => {
+    const database = await openDatabase(join(await tempDir(), "pal.sqlite"));
+    cleanups.push(() => database.close());
+    await migrate(database, MIGRATIONS.slice(0, 25));
+    const chat =
+      "INSERT INTO pal_chats (id, request_id, digest, intent, state, conversation_id, created_at, project_id, title, deleted_at, command_mode) VALUES (?, ?, 'digest', '{}', 'ready', ?, 100, 'project', ?, ?, ?)";
+    await database.run(chat, "chat-ask", "request-ask", 1, "Asks", null, "ask");
+    await database.run(chat, "chat-full", "request-full", 2, null, 200, "full");
+    const approval =
+      "INSERT INTO pal_command_approvals (id, chat_id, task_id, call_id, command, cwd, timeout, digest, state, created_at, expires_at, decided_at) VALUES (?, 'chat-ask', ?, 'call', 'ls', '/srv/project', 10, 'digest', ?, 100, 200, ?)";
+    for (const [index, state] of ["pending", "approved", "denied", "expired"].entries())
+      await database.run(approval, `approval-${state}`, index + 1, state, state === "pending" ? null : 150);
+    const chats = await database.all("SELECT * FROM pal_chats ORDER BY id");
+    const approvals = await database.all("SELECT * FROM pal_command_approvals ORDER BY task_id");
+    await migrate(database);
+    expect(await database.all("SELECT * FROM pal_chats ORDER BY id")).toEqual(chats);
+    expect(await database.all("SELECT * FROM pal_command_approvals ORDER BY task_id")).toEqual(
+      approvals.map((row) => {
+        const { state } = row as { state: string };
+        return { ...row, decided_by: state === "approved" || state === "denied" ? "owner" : null, advice: null };
+      }),
+    );
+    await database.run("UPDATE pal_chats SET command_mode = 'auto' WHERE id = 'chat-ask'");
+    await expect(database.run("UPDATE pal_chats SET command_mode = 'yolo' WHERE id = 'chat-ask'")).rejects.toThrow(
+      /CHECK constraint/,
+    );
+    await expect(
+      database.run("UPDATE pal_command_approvals SET decided_by = 'model' WHERE id = 'approval-approved'"),
+    ).rejects.toThrow(/CHECK constraint/);
+    await expect(
+      database.run(
+        "INSERT INTO pal_chats (id, request_id, digest, intent, state, created_at) VALUES ('x', 'request-ask', 'd', '{}', 'provisioning', 1)",
+      ),
+    ).rejects.toThrow(/UNIQUE constraint/);
+    const migrated = await Promise.all([
+      database.all("SELECT type, name, sql FROM sqlite_master ORDER BY type, name"),
+      database.all("SELECT * FROM pal_chats ORDER BY id"),
+      database.all("SELECT * FROM pal_command_approvals ORDER BY task_id"),
+      database.all("SELECT version, name, applied_at FROM pal_migrations ORDER BY version"),
+    ]);
+    await expect(migrate(database, MIGRATIONS.slice(0, 25))).rejects.toThrow(
+      /migration 26 'auto_command_mode'.*does not know/,
+    );
+    expect(
+      await Promise.all([
+        database.all("SELECT type, name, sql FROM sqlite_master ORDER BY type, name"),
+        database.all("SELECT * FROM pal_chats ORDER BY id"),
+        database.all("SELECT * FROM pal_command_approvals ORDER BY task_id"),
+        database.all("SELECT version, name, applied_at FROM pal_migrations ORDER BY version"),
+      ]),
+    ).toEqual(migrated);
     expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
   });
 

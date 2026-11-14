@@ -37,8 +37,9 @@ available yet. See [adding capabilities](docs/development.md#adding-capabilities
 
 - **Models.** Use the provider you have: a ChatGPT subscription (sign-in, no API key), an API key for OpenRouter,
   OpenCode Zen or Go, the OpenAI API, the Anthropic API or the DeepSeek API, or any OpenAI-compatible endpoint such as
-  a local Ollama server. You choose the model and reasoning level per chat. Pal never switches provider or falls back
-  to another one on its own.
+  a local Ollama server. Experimental: your own Claude subscription through the Claude Code CLI installed on the
+  server. You choose the model and reasoning level per chat. Pal never switches provider or falls back to another one
+  on its own.
 - **Projects and workspaces.** A project is either a Pal-managed folder or an existing folder on the server, plus
   read-only reference folders and uploads from your device, chosen or pasted into the message box. Each chat runs in
   **Local** (the folder itself), **Worktree** (a separate Git worktree from `HEAD`) or **Read-only** mode.
@@ -46,7 +47,8 @@ available yet. See [adding capabilities](docs/development.md#adding-capabilities
   (list, read, find, search, write, edit, attachments), shell commands, project memory, internet tools and the
   browser. Each tool call is a durable task with its own receipt.
 - **Command approval.** Per chat, **Ask** (the default) shows each shell command, its folder and timeout, and waits
-  for **Approve once** or **Deny**. **Full access** runs commands without asking.
+  for **Approve once** or **Deny**. **Auto** lets a decision model (Jev, through TypeSafe or OpenRouter with your
+  key) run clearly routine commands and asks about everything else. **Full access** runs commands without asking.
 - **Internet tools (MCP).** Exa search/fetch and Context7 documentation presets, custom Streamable HTTP servers and
   owner-approved local programs. Grants are per project, lookups are cached with explicit freshness, and results
   render as source cards.
@@ -59,7 +61,8 @@ available yet. See [adding capabilities](docs/development.md#adding-capabilities
   control.
 - **Context.** Source-linked memory, pinned chat instructions and scoped AGENTS.md guidance. Global/project
   `SKILL.md` procedures load lazily through Code Mode or explicit selection, with source controls, provenance and
-  inspection of the latest retained prepared context.
+  inspection of the latest retained prepared context. A ring beside the message box shows how full the model's
+  context is; click it for an estimated breakdown by prompt, tools, skills, instructions, attachments and messages.
 - **Browser** (Linux). A per-project Chromium with its own profile, running in a network-less sandbox whose only
   egress is a broker that admits public addresses. You drive it from the panel. The agent may use it only after
   you hand it control.

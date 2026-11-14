@@ -18,6 +18,8 @@ export type SlotProps = {
   };
   /** `onSpace` reports the room the piece needs above the transcript's end, in pixels. */
   composer: { running: boolean; active: boolean; onSpace: (pixels: number) => void };
+  /** In the composer's tool row. `revision` changes when the chat commits history; `onPanel` opens a workspace panel. */
+  "composer-tools": { chat: ChatSummary; running: boolean; revision: number; onPanel: (id: string) => void };
 };
 export type PanelProps = { project: Project; chat: ChatSummary; workspace?: Workspace | null };
 /** A transcript entry a plugin wrote, as its renderer receives it. */

@@ -1403,7 +1403,7 @@ describe("compiled capability composition", () => {
     await row.getByRole("switch", { name: "Enable Example echo for new chats", exact: true }).waitFor();
     expect(await row.innerText()).toContain("Adds Example, Chat results");
     await row.getByText("Technical details", { exact: true }).click();
-    expect(await row.innerText()).toContain("Core API 2–2");
+    expect(await row.innerText()).toContain("Core API 2–3");
     expect(await row.innerText()).toContain("example_echo · safe · project.read");
     const item = (await pal.extensions.view()).catalog.find((item) => item.id === "example");
     if (item === undefined) throw new Error("missing compiled template");
@@ -2103,9 +2103,12 @@ describe("long transcript updates", () => {
       createdAt: Date.now(),
       expiresAt: Date.now() + 60_000,
       decidedAt: null,
+      decidedBy: null,
+      advice: null,
     });
     await stream.emit("approvals", {
       mode: "ask",
+      auto: { ready: false, label: null, note: "No decision model is part of this Pal build." },
       approvals: [pending("turn", entries[40]?.id ?? null, "echo turn"), pending("loose", null, "echo loose")],
     });
     const input = page.getByLabel("Message", { exact: true });

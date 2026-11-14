@@ -23,14 +23,20 @@ export type { RemovedWorkspace } from "../../../src/core/workspace-purge.ts";
 export type { ProjectMcp, ProjectMcpServer } from "../../../src/core/mcp-grants.ts";
 export type { GrantedFolder } from "../../../src/core/folders.ts";
 export type { Workspace, WorkspaceMode } from "../../../src/core/workspaces.ts";
-export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
+export type { ContextInfo, ContextUsageInfo, PromptInfo } from "../../../src/core/context.ts";
 import type { WorkingState } from "../../../src/core/working-state.ts";
 export type WorkingStateInfo = Awaited<ReturnType<WorkingState["inspect"]>>;
 import type { InstructionInfo, InstructionSettings } from "../../../src/core/instructions.ts";
 export type { InstructionInfo, InstructionSettings };
 import type { SkillInfo, SkillSettings } from "../../../src/core/skills.ts";
 export type { SkillInfo, SkillSettings };
-export type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
+export type {
+  AdviceRecord,
+  ApprovalView,
+  AutoStatus,
+  CommandApproval,
+  CommandMode,
+} from "../../../src/core/approvals.ts";
 export type { CompatibleConfig, KeyCheck, ProviderModel, ProviderView } from "../../../src/pi/providers.ts";
 export type ModelRef = { provider: string; modelId: string };
 export type ProvidersState = {
@@ -215,6 +221,8 @@ export const api = {
   ) => call<WorkingStateInfo>("PUT", `chats/${id}/context/working-allowance`, value),
   pinInstructions: (id: string, revision: number, text: string) =>
     call<{ saved: boolean }>("PUT", `chats/${id}/context/instructions`, { revision, text }),
+  contextUsage: (id: string) =>
+    call<import("../../../src/core/context.ts").ContextUsageInfo>("GET", `chats/${id}/context/usage`),
   contextPrompt: (id: string, offset = 0, request?: string) =>
     call<import("../../../src/core/context.ts").PromptInfo>(
       "GET",
@@ -410,6 +418,8 @@ export const api = {
     call<{ chat: ChatSummary }>("PUT", `chats/${id}/title`, { title, expectedTitle }),
   setCommandMode: (id: string, mode: import("../../../src/core/approvals.ts").CommandMode) =>
     call<{ chat: ChatSummary }>("PUT", `chats/${id}/command-mode`, { mode }),
+  approvals: (id: string) =>
+    call<import("../../../src/core/approvals.ts").ApprovalView>("GET", `chats/${id}/approvals`),
   decideCommand: (id: string, approval: string, decision: "approve" | "deny", digest: string) =>
     call<import("../../../src/core/approvals.ts").ApprovalView>("POST", `chats/${id}/approvals/${approval}`, {
       decision,
