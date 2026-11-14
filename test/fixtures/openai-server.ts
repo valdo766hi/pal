@@ -19,8 +19,12 @@ export type FixtureBehavior = {
   script: string;
   /** In `script` mode, a direct call the first response makes instead of the script. */
   call?: { name: string; arguments: Record<string, unknown> };
+  /** In `script` mode, the responses' calls in turn, each with any text said before it; the answer follows the last. */
+  steps?: { say?: string; script?: string; call?: { name: string; arguments: Record<string, unknown> } }[];
   /** The assistant's text answer. */
   reply: string;
+  /** How many of the next responses fail the way ChatGPT reports a run it timed out on its side. */
+  timeouts?: number;
   /** While set, JWKS responses wait for it, which holds ID-token verification mid-sign-in. */
   jwks?: Promise<unknown>;
 };
@@ -167,34 +171,66 @@ export async function startOpenAIFixture() {
       const usage = { input_tokens: 3, output_tokens: 1, total_tokens: 4 };
       const events: object[] = [created];
       // Dynamic prompt updates may follow the tool result without starting a new user turn.
-      const latest = (apiRequests.at(-1)?.body.input as { type?: string; role?: string }[] | undefined)?.findLast(
-        (item) => item.role !== "developer" && item.role !== "system",
-      );
-      const answered = latest?.type === "custom_tool_call_output" || latest?.type === "function_call_output";
-      if (behavior.responses === "script" && !answered) {
+      const input = (apiRequests.at(-1)?.body.input as { type?: string; role?: string }[] | undefined) ?? [];
+      const latest = input.findLast((item) => item.role !== "developer" && item.role !== "system");
+      const output = (item: { type?: string }) =>
+        item.type === "custom_tool_call_output" || item.type === "function_call_output";
+      const answers = input.slice(input.findLastIndex((item) => item.role === "user") + 1).filter(output).length;
+      if ((behavior.timeouts ?? 0) > 0) {
+        behavior.timeouts = (behavior.timeouts ?? 0) - 1;
+        const failed = { id: "resp_1", status: "failed", error: { message: "Request timed out." } };
+        return response.end(sse([created, { type: "response.failed", response: failed }]));
+      }
+      const step: NonNullable<FixtureBehavior["steps"]>[number] | undefined =
+        behavior.steps !== undefined ? behavior.steps[answers] : output(latest ?? {}) ? undefined : behavior;
+      if (behavior.responses === "script" && step !== undefined) {
         const call = {
           id: `fc_${counter}`,
           type: "function_call",
           call_id: `call_script_${++counter}`,
-          name: behavior.call?.name ?? "codemode",
-          arguments: JSON.stringify(behavior.call?.arguments ?? { code: behavior.script }),
+          name: step.call?.name ?? "codemode",
+          arguments: JSON.stringify(step.call?.arguments ?? { code: step.script }),
           status: "completed",
         };
+        const said =
+          step.say !== undefined
+            ? { ...done, id: `msg_${counter}`, content: [{ type: "output_text", text: step.say, annotations: [] }] }
+            : undefined;
+        if (said !== undefined)
+          events.push(
+            {
+              type: "response.output_item.added",
+              output_index: 0,
+              item: { ...said, status: "in_progress", content: [] },
+            },
+            {
+              type: "response.output_text.delta",
+              output_index: 0,
+              content_index: 0,
+              item_id: said.id,
+              delta: step.say,
+            },
+            { type: "response.output_item.done", output_index: 0, item: said },
+          );
+        const at = said === undefined ? 0 : 1;
         events.push(
           {
             type: "response.output_item.added",
-            output_index: 0,
+            output_index: at,
             item: { ...call, arguments: "", status: "in_progress" },
           },
-          { type: "response.function_call_arguments.delta", output_index: 0, item_id: call.id, delta: call.arguments },
+          { type: "response.function_call_arguments.delta", output_index: at, item_id: call.id, delta: call.arguments },
           {
             type: "response.function_call_arguments.done",
-            output_index: 0,
+            output_index: at,
             item_id: call.id,
             arguments: call.arguments,
           },
-          { type: "response.output_item.done", output_index: 0, item: call },
-          { type: "response.completed", response: { id: "resp_1", status: "completed", output: [call], usage } },
+          { type: "response.output_item.done", output_index: at, item: call },
+          {
+            type: "response.completed",
+            response: { id: "resp_1", status: "completed", output: said === undefined ? [call] : [said, call], usage },
+          },
         );
       } else if (behavior.responses === "usage_limit") {
         events.push({

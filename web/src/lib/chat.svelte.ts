@@ -67,6 +67,8 @@ export type ShellReceipt = {
 export type Entry = {
   id: number;
   kind: string;
+  /** The task that wrote it; a tool result's is the call's own task. */
+  byTaskId?: number;
   model?: Message[];
   data?: {
     attachments?: Attachment[];

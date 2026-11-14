@@ -71,19 +71,20 @@
         {#if pinned !== undefined && pinned.version !== item.version}<p class="callout wa">
             Default pins v{pinned.version}, unavailable in this build. Turn it off before explicitly choosing v{item.version}.
           </p>{/if}
-        {#if item.capability}
-          <p class="fine">Core API {item.capability.core.min}–{item.capability.core.max}</p>
-          {#each item.capability.tools as tool (tool.name)}<p class="fine mono">
-              {[tool.name, tool.replay, ...tool.permissions].join(" · ")}
-            </p>{/each}
-        {/if}
-        {#if item.implementation}<p class="fine hash">
-            Implementation: <span class="mono">{item.implementation}</span>
-          </p>{/if}
-        <div class="fine">
-          {#if contributes.length > 0}Contributes: {contributes.join(", ")} ·
-          {/if}<span class="mono">{item.native}</span>
-        </div>
+        {#if contributes.length > 0}<p class="fine">Adds {contributes.join(", ")}</p>{/if}
+        <details class="tech">
+          <summary>Technical details</summary>
+          {#if item.capability}
+            <p class="fine">Core API {item.capability.core.min}–{item.capability.core.max}</p>
+            {#each item.capability.tools as tool (tool.name)}<p class="fine mono">
+                {[tool.name, tool.replay, ...tool.permissions].join(" · ")}
+              </p>{/each}
+          {/if}
+          {#if item.implementation}<p class="fine hash">
+              Implementation: <span class="mono">{item.implementation}</span>
+            </p>{/if}
+          <p class="fine mono">{item.native}</p>
+        </details>
       </div>
       <label class="choice">
         <span>New chats</span>
@@ -108,6 +109,17 @@
 <ReleaseSettings />
 
 <style>
+  .tech {
+    font-size: 12.5px;
+    color: var(--tx3);
+  }
+  .tech summary {
+    width: fit-content;
+    cursor: pointer;
+  }
+  .tech p {
+    margin: 6px 0 0;
+  }
   .extension {
     display: flex;
     gap: 16px;

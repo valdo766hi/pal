@@ -430,7 +430,7 @@
         </p>{/if}
     {/if}
   {/if}
-  {#if file || onFeedback}
+  {#if file || (onFeedback && (pending.length > 0 || copied))}
     <div class="foot">
       {#if file}
         <button
