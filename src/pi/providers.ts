@@ -441,6 +441,7 @@ export class ModelProviders {
       await this.#save(SETTING(id), enabled ? "enabled" : "disabled");
       if (!enabled) {
         this.#models.deleteProvider(id);
+        await plugin.stop?.();
         return;
       }
       this.#models.setProvider(plugin.provider);

@@ -8,7 +8,13 @@ import { HttpError } from "../../src/core/http.ts";
 import { validate } from "../../src/core/requests.ts";
 import manifest from "./manifest.ts";
 import { ALLOW_USAGE_CREDITS_ENV } from "./vendor/billing.ts";
-import { captureProcess, closeClaudeProcesses, discoverClaudeModels, getClaudeStatus } from "./vendor/claude-cli.ts";
+import {
+  captureProcess,
+  closeClaudeProcesses,
+  discoverClaudeModels,
+  forgetClaudeReadiness,
+  getClaudeStatus,
+} from "./vendor/claude-cli.ts";
 import { hostEnvironment } from "./vendor/env.ts";
 import { CLAUDE_CODE_MODELS, modelFromDiscovery, PROVIDER_ID } from "./vendor/model-catalog.ts";
 import { streamClaudeCode } from "./vendor/stream.ts";
@@ -90,6 +96,11 @@ export default {
       };
     };
 
+    // Settings changes and disabling end the warm processes, so none keeps an old command, account or credit choice.
+    const release = async () => {
+      forgetClaudeReadiness();
+      await closeClaudeProcesses();
+    };
     let discovered: Set<string> | undefined;
     const provider = createProvider({
       id: PROVIDER_ID,
@@ -126,6 +137,7 @@ export default {
             const { ready, detail } = await status(AbortSignal.timeout(30_000));
             return { ready, detail };
           },
+          stop: release,
         },
       ],
       // settings and status: owner requests. Only status starts Claude Code, and only when the owner asks.
@@ -134,6 +146,7 @@ export default {
         if (resource === "settings" && path.length === 1 && method === "GET") return settings();
         if (resource === "settings" && path.length === 1 && method === "PUT") {
           await host.settings.set("settings", checked(validate(Settings, body)));
+          await release();
           return settings();
         }
         if (resource === "status" && path.length === 1 && method === "POST") return status(AbortSignal.timeout(30_000));

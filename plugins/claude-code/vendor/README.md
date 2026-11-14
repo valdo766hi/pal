@@ -12,6 +12,8 @@ Pal's changes, all marked or type-only:
 
 - `env.ts`: `hostEnvironment()`, the only host variables a Claude Code process inherits; `claude-cli.ts` uses it
   wherever upstream read `process.env`.
+- `claude-cli.ts`: a new process needs a subscription login, not just any login, and `forgetClaudeReadiness()`
+  drops the cached check.
 - `stream.ts`: the working directory comes from the provider (`PI_CLAUDE_CODE_CWD`, an empty folder), not Pal's own.
 - Pal compiles with `exactOptionalPropertyTypes` and `erasableSyntaxOnly`: optional fields accept `undefined`,
   constructor parameter properties are plain fields, and optional Pi message fields are set or removed explicitly.

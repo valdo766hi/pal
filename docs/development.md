@@ -616,10 +616,10 @@ in a browser. See [extension architecture](architecture.md#extensions-and-releas
      validated, only `run` at or above `threshold` skips the card, and anything else (an error, a timeout after 5
      seconds, an unexpected answer) asks the owner. It is never retried.
    - `providers: [{ id, name }]` (installation plugins only): model providers the plugin's runtime returns as
-     `providers` (`{ id, billing, provider, status() }`, `provider` a Pi `Provider`). Settings → Models lists each
-     one; the kernel registers it only while the owner keeps it enabled, asks `status()` before enabling it, and
-     never selects or substitutes it. A provider that starts processes must start none while disabled and end them
-     in `dispose`.
+     `providers` (`{ id, billing, provider, status(), stop?() }`, `provider` a Pi `Provider`). Settings → Models
+     lists each one; the kernel registers it only while the owner keeps it enabled, asks `status()` before enabling
+     it, calls `stop()` when the owner disables it, and never selects or substitutes it. A provider that starts
+     processes must start none while disabled and end them in `stop` and `dispose`.
 3. **Add a tool in `server.ts`.** `open(host)` returns the tools the manifest declares, with the same names, replay
    and callers. Record what the owner should see with
    `api.commit((tx) => tx.appendEntry(api.conversationId, { kind: "pal.<id>", data }), context)`. The `host` offers

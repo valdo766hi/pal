@@ -252,6 +252,8 @@ export type CapabilityProvider = {
   readonly provider: Provider;
   /** Whether it can take requests now, and why not; asked only by the owner or while it is enabled. */
   status(): Promise<{ ready: boolean; detail: string }>;
+  /** Called when the owner disables it: end its processes, connections and timers. */
+  stop?(): Promise<void>;
 };
 /** One owner request under `/api/plugins/<id>/`; `path` is what follows the plugin's ID. */
 export type CapabilityRequest = {
@@ -597,6 +599,7 @@ export class CompiledCapabilities {
         billing: offered.billing,
         provider: offered.provider,
         status: () => offered.status(),
+        stop: async () => await offered.stop?.(),
         name: manifest.providers?.find(({ id }) => id === offered.id)?.name ?? offered.id,
         plugin: manifest.id,
       })),

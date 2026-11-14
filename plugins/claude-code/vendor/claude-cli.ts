@@ -299,8 +299,20 @@ async function readyClaudeCommand(
     readyStatusCache.delete(key);
     throw new Error(status.detail ?? LOGIN_HINT);
   }
+  // Pal: requests need a Claude subscription login, not only a login; an API-key account would bill separately.
+  if (!status.subscription) {
+    readyStatusCache.delete(key);
+    throw new Error(
+      `Claude Code is logged in with ${status.authMethod ?? "an API key"}, not a Claude subscription. Run \`claude auth login\` with your Claude account.`,
+    );
+  }
   readyStatusCache.set(key, { command: status.command, expires: Date.now() + READY_STATUS_TTL_MS });
   return status.command;
+}
+
+/** Pal: forget cached readiness, so the next new process checks the login again. */
+export function forgetClaudeReadiness(): void {
+  readyStatusCache.clear();
 }
 
 function isDiscoveredModel(value: unknown): value is DiscoveredClaudeModel {

@@ -5,6 +5,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal } from "../src/core/app.ts";
+import { cachedClaudeProcessCount } from "../plugins/claude-code/vendor/claude-cli.ts";
 import { installFakeClaude } from "./fixtures/claude.ts";
 
 const SECRET = "planted-pal-secret-value";
@@ -142,5 +143,39 @@ describe("Claude subscription provider plugin", () => {
     await f.pal.close();
     for (const { pid } of await f.seen())
       expect(() => process.kill(pid, 0), `Claude Code process ${pid} outlived Pal`).toThrow();
+  }, 60_000);
+
+  it("refuses an account that is no longer a subscription and ends its process when disabled", async () => {
+    const f = await setup();
+    await f.pal.providers.setEnabled("claude-code", true);
+    const [model] = (await f.pal.providers.list()).find((provider) => provider.id === "claude-code")?.models ?? [];
+    if (model === undefined) throw new Error("no Claude Code model listed");
+    await f.conversation.configure({ model: { provider: "claude-code", modelId: model.id } }, context);
+    expect((await f.send("hello")).at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+    expect(cachedClaudeProcessCount()).toBe(1);
+
+    // The owner points the enabled provider at another config directory, whose login is an API key.
+    await f.configure({ auth: { loggedIn: true, authMethod: "api_key" } });
+    await f.plugin("PUT", "settings", {
+      command: f.claude,
+      configDir: join(f.root, "api-account"),
+      allowUsageCredits: false,
+    });
+    expect(cachedClaudeProcessCount()).toBe(0);
+    const before = (await f.seen()).filter(({ request }) => request).length;
+    expect((await f.send("after the switch")).at(-1)).toMatchObject({ role: "user" });
+    const live = await f.pal.harness.snapshot(LiveDoc, f.chat.conversationId, context);
+    expect(live?.runFailure?.detail).toMatch(/not a Claude subscription/);
+    expect((await f.seen()).filter(({ request }) => request).length).toBe(before);
+
+    await f.configure({});
+    await f.plugin("PUT", "settings", { command: f.claude, configDir: null, allowUsageCredits: false });
+    expect((await f.send("back on the plan")).at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+    const warm = (await f.seen()).filter(({ request }) => request).at(-1)?.pid;
+    if (warm === undefined) throw new Error("no Claude Code request process");
+    expect(cachedClaudeProcessCount()).toBe(1);
+    await f.pal.providers.setEnabled("claude-code", false);
+    expect(cachedClaudeProcessCount()).toBe(0);
+    expect(() => process.kill(warm, 0), "the warm process outlived disabling").toThrow();
   }, 60_000);
 });
