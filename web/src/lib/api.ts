@@ -23,7 +23,7 @@ export type { RemovedWorkspace } from "../../../src/core/workspace-purge.ts";
 export type { ProjectMcp, ProjectMcpServer } from "../../../src/core/mcp-grants.ts";
 export type { GrantedFolder } from "../../../src/core/folders.ts";
 export type { Workspace, WorkspaceMode } from "../../../src/core/workspaces.ts";
-export type { ContextInfo, PromptInfo } from "../../../src/core/context.ts";
+export type { ContextInfo, ContextUsageInfo, PromptInfo } from "../../../src/core/context.ts";
 import type { WorkingState } from "../../../src/core/working-state.ts";
 export type WorkingStateInfo = Awaited<ReturnType<WorkingState["inspect"]>>;
 import type { InstructionInfo, InstructionSettings } from "../../../src/core/instructions.ts";
@@ -215,6 +215,8 @@ export const api = {
   ) => call<WorkingStateInfo>("PUT", `chats/${id}/context/working-allowance`, value),
   pinInstructions: (id: string, revision: number, text: string) =>
     call<{ saved: boolean }>("PUT", `chats/${id}/context/instructions`, { revision, text }),
+  contextUsage: (id: string) =>
+    call<import("../../../src/core/context.ts").ContextUsageInfo>("GET", `chats/${id}/context/usage`),
   contextPrompt: (id: string, offset = 0, request?: string) =>
     call<import("../../../src/core/context.ts").PromptInfo>(
       "GET",

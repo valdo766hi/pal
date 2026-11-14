@@ -596,14 +596,16 @@ in a browser. See [extension architecture](architecture.md#extensions-and-releas
 2. **Describe it in `manifest.ts`.** It is plain data, which the web build also reads.
    - `id`, `version` and `native`, which must be `pal.<id>`. Chats pin the version, and a chat whose version a build
      lacks waits for its retained Pal release, so raise it only for an incompatible change.
-   - `core: { min: 2, max: 2 }`, the capability API it was written for; `name`, `description` and `order`, its place
-     in Settings → Extensions; `optIn: true` leaves it off until the owner enables it for new chats.
+   - `core: { min, max }`, the capability API versions it works with (3 is current); `name`, `description` and
+     `order`, its place in Settings → Extensions; `optIn: true` leaves it off until the owner enables it for new chats.
    - `namespace` and `tools`. Each tool name starts with the namespace prefix and declares `callers: ["tools"]` (Code
      Mode), its `replay` (`safe` only if repeating it has no external effect), `maxOutputBytes` and, if it reads the
      chat's granted folders, `permissions: ["project.read"]`. Only tools already on the kernel's direct list may add
      `"model"`.
-   - `ui`: Settings tabs, workspace `panels`, chat `slots` (`context` or `composer`) and `renderers` for its own
-     `pal.<id>` entries, each naming a component in `ui/`. Icons come from `web/src/lib/icons.ts`. Kernel panel and
+   - `ui`: Settings tabs, workspace `panels`, chat `slots` and `renderers` for its own `pal.<id>` entries, each
+     naming a component in `ui/`. Slots: `context` (a Context panel section), `composer` (above the message box) and
+     `composer-tools` (in its tool row, given `{ chat, running, revision, onPanel }`; `revision` changes when the chat
+     commits history). Icons come from `web/src/lib/icons.ts`. Kernel panel and
      tab names are refused.
 3. **Add a tool in `server.ts`.** `open(host)` returns the tools the manifest declares, with the same names, replay
    and callers. Record what the owner should see with

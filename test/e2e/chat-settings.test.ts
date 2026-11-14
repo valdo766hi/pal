@@ -1403,7 +1403,7 @@ describe("compiled capability composition", () => {
     await row.getByRole("switch", { name: "Enable Example echo for new chats", exact: true }).waitFor();
     expect(await row.innerText()).toContain("Adds Example, Chat results");
     await row.getByText("Technical details", { exact: true }).click();
-    expect(await row.innerText()).toContain("Core API 2–2");
+    expect(await row.innerText()).toContain("Core API 2–3");
     expect(await row.innerText()).toContain("example_echo · safe · project.read");
     const item = (await pal.extensions.view()).catalog.find((item) => item.id === "example");
     if (item === undefined) throw new Error("missing compiled template");

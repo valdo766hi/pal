@@ -59,7 +59,8 @@ available yet. See [adding capabilities](docs/development.md#adding-capabilities
   control.
 - **Context.** Source-linked memory, pinned chat instructions and scoped AGENTS.md guidance. Global/project
   `SKILL.md` procedures load lazily through Code Mode or explicit selection, with source controls, provenance and
-  inspection of the latest retained prepared context.
+  inspection of the latest retained prepared context. A ring beside the message box shows how full the model's
+  context is; click it for an estimated breakdown by prompt, tools, skills, instructions, attachments and messages.
 - **Browser** (Linux). A per-project Chromium with its own profile, running in a network-less sandbox whose only
   egress is a broker that admits public addresses. You drive it from the panel. The agent may use it only after
   you hand it control.

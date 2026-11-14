@@ -61,6 +61,7 @@
   } = $props();
   const workspace = $derived(chat.workspace);
   const composerPieces = $derived(slots("composer", chat.extensions));
+  const toolPieces = $derived(slots("composer-tools", chat.extensions));
   /**
    * This build's contributions as `id@version`, once known: entries of a plugin a chat pinned at a version this build
    * lacks get a plain note.
@@ -920,6 +921,15 @@
   />
 {/snippet}
 
+{#snippet composerTools()}
+  {#each toolPieces as piece (piece.key)}
+    <!-- A piece that fails to load is left out; the composer works without it. -->
+    {#await piece.load() then { default: Piece }}
+      <Piece {chat} running={stream?.running ?? false} revision={stream?.entries.length ?? 0} {onPanel} />
+    {/await}
+  {/each}
+{/snippet}
+
 {#snippet diagnosticsButton()}
   <button class="b sm" disabled={diagnostics === "copying"} onclick={copyDiagnostics}
     >{diagnostics === "copied" ? "Copied" : "Copy diagnostics"}</button
@@ -1430,10 +1440,12 @@
               onFiles={upload}
               onSchedule={() => (scheduling = true)}
             />{/if}
+          {#if phone}{@render composerTools()}{/if}
           {#if !phone}
             {#if workspace?.mode !== "read-only"}<CommandMode mode={stream?.mode} onChoose={chooseMode} />{/if}
             <WorkspaceMode {workspace} {onNewChat} />
             <span class="grow"></span>
+            {@render composerTools()}
             {@render modelControl()}
             {#if stream?.running}{@render busySwitch()}{/if}
           {/if}

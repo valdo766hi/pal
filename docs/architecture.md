@@ -238,8 +238,8 @@ Interface components are bundled from `plugins/<id>/ui/` at build time, never do
 every plugin in the build; Context sections, workspace panels after the kernel's, composer pieces and renderers for
 the plugin's own `pal.<id>` entries appear only in chats that selected it. In a build without a plugin a chat used,
 those entries show as a short note, and a component that fails to load says so in its place. A browser plugin such as
-pets has no server part or inventory line: only Settings tabs and composer pieces that every chat shows, switched in
-the browser.
+pets or the context ring has no server part or inventory line: only Settings tabs and composer pieces that every chat
+shows, switched in the browser.
 
 Unavailable saved defaults remain visible for explicit removal. Existing chats never silently adopt another capability
 version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid

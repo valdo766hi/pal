@@ -371,6 +371,38 @@ describe("API", () => {
     expect((await api("PUT", `${path}/instructions`, { revision: 1, text: "" })).status).toBe(404);
   });
 
+  it("reads the stored context breakdown for its owner only, without prompt text or a model call", async () => {
+    const { api, base, pal } = await signedIn();
+    const project = await pal.projects.create("api-usage-project", { name: "Usage fixture" });
+    const chat = await pal.chats.createChat("api-usage-chat", { projectId: project.id }, context);
+    const path = `chats/${chat.id}/context/usage`;
+    expect((await fetch(`${base}/api/${path}`)).status).toBe(401);
+    expect((await api("GET", path)).body).toMatchObject({ usedTokens: null, categories: [], preparedAt: null });
+    const faux = fauxProvider();
+    (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage("ok")]);
+    const model = faux.getModel();
+    await pal.chats.configure(
+      chat.id,
+      { model: { provider: model.provider, modelId: model.id }, thinkingLevel: "off" },
+      context,
+    );
+    await pal.context.pin(chat, { revision: 0, text: "Pinned secret-usage-marker" }, context);
+    await pal.chats.submit(chat.id, "api-usage-input", { text: "Message secret-usage-marker" }, context);
+    await (await pal.harness.conversation(chat.conversationId, context))?.waitForIdle(context);
+    expect(faux.state.callCount).toBe(1);
+    const usage = await api("GET", path);
+    expect(usage.status).toBe(200);
+    expect(usage.body.usedTokens).toBeGreaterThan(0);
+    expect(usage.body.categories.map((category: { id: string }) => category.id)).toEqual(
+      expect.arrayContaining(["system", "section:pinned", "messages", "tools:codemode"]),
+    );
+    expect(JSON.stringify(usage.body)).not.toContain("secret-usage-marker");
+    expect(faux.state.callCount).toBe(1);
+    await pal.projects.remove(project.id);
+    expect((await api("GET", path)).status).toBe(404);
+  });
+
   it("manages source-linked memory and a bounded Context inspector with owner/origin/revision checks", async () => {
     const { api, base, cookie, pal } = await signedIn();
     const project = (await api("POST", "projects", { requestId: "api-memory-project", name: "Context" })).body.project;

@@ -6,7 +6,7 @@ export default {
   native: "pal.memory",
   name: "Context and memory",
   description: "Source-linked memory adapter and Context panel. Core instruction/preparation hooks always stay on.",
-  core: { min: 2, max: 2 },
+  core: { min: 2, max: 3 },
   order: 30,
   namespace: {
     name: "memory",

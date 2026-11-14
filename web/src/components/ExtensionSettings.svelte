@@ -4,7 +4,11 @@
   import { app, refreshExtensions } from "../lib/state.svelte.ts";
   import ReleaseSettings from "./ReleaseSettings.svelte";
 
-  const slotLabels = { context: "Context section", composer: "Composer" } as const;
+  const slotLabels = {
+    context: "Context section",
+    composer: "Composer",
+    "composer-tools": "Composer tools",
+  } as const;
   let busy = $state(false);
   let error: string | undefined = $state();
   async function load() {

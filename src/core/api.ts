@@ -840,6 +840,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           await pal.context.pin(chat, await readJson(request), context);
           return send(200, { saved: true });
         }
+        if (path[3] === "usage" && method === "GET") return send(200, await pal.context.usage(chat, context));
         if (path[3] === "prompt" && method === "GET")
           return send(
             200,

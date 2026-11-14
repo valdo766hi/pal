@@ -17,7 +17,7 @@ import type { PrivateFiles } from "../core/file-policy.ts";
 import { validate } from "../core/requests.ts";
 import { MODEL_TOOLS } from "../pi/codemode.ts";
 
-export const CAPABILITY_API = 2;
+export const CAPABILITY_API = 3;
 const Order = Type.Integer({ minimum: 0, maximum: 1000 });
 const Table = Type.String({ pattern: "^pal_[a-z0-9_]{1,59}$" });
 const Component = Type.String({ pattern: "^[A-Z][A-Za-z0-9]{0,63}$" });
@@ -78,7 +78,10 @@ const Manifest = Type.Object(
         { additionalProperties: false },
       ),
     ),
-    /** Svelte components under ui/; chat slots show only in chats that selected the plugin. */
+    /**
+     * Svelte components under ui/; chat slots show only in chats that selected the plugin. `composer` pieces sit above
+     * the message box, `composer-tools` pieces in its tool row.
+     */
     ui: Type.Optional(
       Type.Object(
         {
@@ -101,7 +104,7 @@ const Manifest = Type.Object(
           slots: Type.Optional(
             Type.Array(
               Type.Object(
-                { slot: Type.Enum(["context", "composer"]), component: Component, order: Order },
+                { slot: Type.Enum(["context", "composer", "composer-tools"]), component: Component, order: Order },
                 { additionalProperties: false },
               ),
               { maxItems: 8 },
@@ -257,7 +260,7 @@ export function capabilityManifest(input: unknown): CapabilityManifest {
       storage !== undefined ||
       panels.length > 0 ||
       manifest.ui?.renderers !== undefined ||
-      manifest.ui?.slots?.some((slot) => slot.slot !== "composer") === true)
+      manifest.ui?.slots?.some((slot) => slot.slot === "context") === true)
   )
     throw new Error(`Capability ${manifest.id} is browser-only: settings and composer pieces, nothing else.`);
   if (namespace !== undefined && (namespace.name !== manifest.id || namespace.prefix !== `${own}_`))

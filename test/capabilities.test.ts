@@ -144,8 +144,17 @@ describe("compiled capability contract", () => {
     }
     const { id, version, native, name, description, core, order } = exampleCapability.manifest;
     const bare = { id, version, native, name, description, core, order, scope: "browser" };
-    for (const extra of [{ tools: exampleCapability.manifest.tools }, { ui: exampleCapability.manifest.ui }])
+    for (const extra of [
+      { tools: exampleCapability.manifest.tools },
+      { ui: exampleCapability.manifest.ui },
+      { ui: { slots: [{ slot: "context", component: "Section", order: 1 }] } },
+    ])
       expect(() => capabilityManifest({ ...bare, ...extra })).toThrow("browser-only");
+    const pieces = { slots: [{ slot: "composer-tools", component: "Gauge", order: 1 }] };
+    expect(capabilityManifest({ ...bare, core: { min: 3, max: 3 }, ui: pieces }).ui).toEqual(pieces);
+    expect(() =>
+      capabilityManifest({ ...bare, ui: { slots: [{ slot: "toolbar", component: "Gauge", order: 1 }] } }),
+    ).toThrow();
     const f = await fixture([]);
     await expect(
       CompiledCapabilities.open([{ manifest: capabilityManifest(bare), open: () => ({}) }], host(f.pal)),
@@ -179,7 +188,7 @@ describe("compiled capability contract", () => {
     expect(item).toMatchObject({
       available: true,
       capability: {
-        core: { min: 2, max: 2 },
+        core: { min: 2, max: 3 },
         order: 70,
         tools: [{ name: "example_echo", replay: "safe", callers: ["tools"], permissions: ["project.read"] }],
       },
@@ -506,7 +515,8 @@ describe("compiled capability contract", () => {
     const open = vi.fn(exampleCapability.open);
     const manifest = exampleCapability.manifest;
     for (const invalid of [
-      { ...manifest, core: { min: 3, max: 3 } },
+      { ...manifest, core: { min: 4, max: 4 } },
+      { ...manifest, core: { min: 1, max: 2 } },
       { ...manifest, native: "pal.policy" },
       { ...manifest, namespace: { ...manifest.namespace, prefix: "shell_" } },
       { ...manifest, tools: manifest.tools.map((tool) => ({ ...tool, name: "shell_run" })) },

@@ -6,7 +6,7 @@ export default {
   native: "pal.pets",
   name: "Pets",
   description: "A small pixel pet on the composer. No tools, permissions, network or model requests.",
-  core: { min: 2, max: 2 },
+  core: { min: 2, max: 3 },
   order: 90,
   scope: "browser",
   ui: {

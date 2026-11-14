@@ -474,6 +474,9 @@ export async function openPal(
         ]),
     });
     mcp = connections;
+    const plugins = new Map(
+      definitions.map(({ manifest }) => [manifest.native, { id: manifest.id, label: manifest.name }]),
+    );
     const chatContext = new ChatContext(
       database,
       () => {
@@ -482,6 +485,13 @@ export async function openPal(
       },
       models,
       store.storage,
+      (extension) =>
+        plugins.get(extension) ??
+        (extension === "codemode"
+          ? { id: "codemode", label: "Code Mode" }
+          : extension === "pal.mcp"
+            ? { id: "mcp", label: "MCP" }
+            : { id: "pal", label: "Pal" }),
     );
     const currentHarness = () => {
       if (harness === undefined) throw new Error("the harness is not open");
