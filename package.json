@@ -13,7 +13,7 @@
     "dev": "pnpm run --parallel \"/^dev:/\"",
     "dev:server": "node --watch src/main.ts --port 7338",
     "dev:web": "vite",
-    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && vite build && esbuild src/main.ts --bundle --splitting --format=esm --platform=node --target=node24 --packages=external --sourcemap --outdir=dist && node -e \"fs.copyFileSync('plugins/claude-code/vendor/inert-mcp.mjs', 'dist/inert-mcp.mjs')\"",
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && vite build && esbuild src/main.ts --bundle --splitting --format=esm --platform=node --target=node24 --packages=external --sourcemap --sources-content=false --outdir=dist && node -e \"fs.copyFileSync('plugins/claude-code/vendor/inert-mcp.mjs', 'dist/inert-mcp.mjs')\"",
     "typecheck": "tsc --noEmit && svelte-check --tsconfig web/tsconfig.json --fail-on-warnings",
     "lint": "eslint .",
     "format": "prettier --write .",
