@@ -2103,9 +2103,12 @@ describe("long transcript updates", () => {
       createdAt: Date.now(),
       expiresAt: Date.now() + 60_000,
       decidedAt: null,
+      decidedBy: null,
+      advice: null,
     });
     await stream.emit("approvals", {
       mode: "ask",
+      auto: { ready: false, label: null, note: "No decision model is part of this Pal build." },
       approvals: [pending("turn", entries[40]?.id ?? null, "echo turn"), pending("loose", null, "echo loose")],
     });
     const input = page.getByLabel("Message", { exact: true });

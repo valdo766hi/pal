@@ -1414,9 +1414,13 @@ describe("Pal in a browser", () => {
     const popover = page.getByRole("dialog", { name: "Command approval" });
     await popover.getByText("How should Pal actions be approved?").waitFor();
     const rows = popover.getByRole("radio");
-    expect(await rows.count()).toBe(2);
+    expect(await rows.count()).toBe(3);
     const ask = popover.getByRole("radio", { name: /Ask for approval/ });
     const full = popover.getByRole("radio", { name: /Full access \(YOLO\)/ });
+    // Without a decision model key, Auto is offered disabled with the reason; the keyboard skips it.
+    const auto = popover.getByRole("radio", { name: /^Auto/ });
+    expect(await auto.isDisabled()).toBe(true);
+    await auto.getByText("Unavailable: Add a Jev key in Settings → Jev").waitFor();
     expect(await ask.getAttribute("aria-checked")).toBe("true");
     expect(await full.getAttribute("aria-checked")).toBe("false");
     expect(await ask.evaluate((node) => node === document.activeElement)).toBe(true);
