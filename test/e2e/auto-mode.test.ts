@@ -178,7 +178,7 @@ describe("Auto command mode in the browser", () => {
   });
 
   it("keeps Jev's keys write-only in Settings and checks the chosen connection", async () => {
-    const fixture = await startSystemOneFixture(["ts-e2e-key-0001", "sk-or-e2e-key-0002"]);
+    const fixture = await startSystemOneFixture(["typesafe-e2e", "openrouter-e2e"]);
     cleanups.push(fixture.close);
     const f = await setup({ providerOrigin: fixture.origin });
     for (const [width, theme] of [
@@ -192,21 +192,21 @@ describe("Auto command mode in the browser", () => {
       if (width === 1440) {
         expect(await connections.getByRole("radio", { name: /TypeSafe/ }).isChecked()).toBe(true);
         const key = page.getByLabel("Key", { exact: true });
-        await key.fill("ts-e2e-key-0001");
+        await key.fill("typesafe-e2e");
         await page.getByRole("button", { name: "Save key" }).click();
         await page.getByRole("button", { name: "Check key (one billed test)" }).click();
         await page.getByText("TypeSafe answered a test classification (billed).").waitFor();
         expect(await page.getByLabel("Replace the key").inputValue()).toBe("");
-        expect(await page.content()).not.toContain("ts-e2e-key-0001");
+        expect(await page.content()).not.toContain("typesafe-e2e");
         await connections.getByRole("radio", { name: /OpenRouter/ }).check();
         await page.getByText("OpenRouter API key").waitFor();
-        await page.getByLabel("Key", { exact: true }).fill("sk-or-e2e-key-0002");
+        await page.getByLabel("Key", { exact: true }).fill("openrouter-e2e");
         await page.getByRole("button", { name: "Save key" }).click();
         await page.getByRole("button", { name: "Check key", exact: true }).click();
         await page.getByText("OpenRouter accepted the key.").waitFor();
         expect(fixture.requests.map(({ path, key }) => [path, key])).toEqual([
-          ["/v1/systemone", "ts-e2e-key-0001"],
-          ["/api/v1/key", "sk-or-e2e-key-0002"],
+          ["/v1/systemone", "typesafe-e2e"],
+          ["/api/v1/key", "openrouter-e2e"],
         ]);
       }
       await page.getByText("Recent decisions").waitFor();

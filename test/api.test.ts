@@ -375,7 +375,7 @@ describe("API", () => {
     const { api, base, pal } = await signedIn();
     const project = await pal.projects.create("api-auto-project", { name: "Auto fixture" });
     const chat = await pal.chats.createChat("api-auto-chat", { projectId: project.id }, context);
-    const key = "ts-api-secret-0001";
+    const key = "typesafe-api-fixture";
     expect((await fetch(`${base}/api/plugins/jev/status`)).status).toBe(401);
     expect((await api("GET", `chats/${chat.id}/approvals`)).body).toMatchObject({
       mode: "ask",

@@ -7,8 +7,8 @@ import { openPal } from "../src/core/app.ts";
 import { InvalidRequest } from "../src/core/requests.ts";
 import { startSystemOneFixture } from "./fixtures/system-one-server.ts";
 
-const TYPESAFE_KEY = "ts-fixture-key-0001";
-const OPENROUTER_KEY = "sk-or-fixture-key-0002";
+const TYPESAFE_KEY = "typesafe-fixture";
+const OPENROUTER_KEY = "openrouter-fixture";
 const REQUEST = {
   tool: "shell_run",
   command: "pnpm test",
@@ -136,7 +136,7 @@ describe("Jev advisor plugin", () => {
       detail: "TypeSafe answered a test classification (billed).",
     });
     expect(f.fixture.requests.at(-1)).toMatchObject({ path: "/v1/systemone", key: TYPESAFE_KEY });
-    await f.jev("PUT", "keys/openrouter", { key: "sk-or-wrong-key-0003" });
+    await f.jev("PUT", "keys/openrouter", { key: "openrouter-wrong" });
     expect(await f.jev("POST", "keys/openrouter/check")).toEqual({ ok: false, detail: "OpenRouter refused the key." });
 
     await f.jev("DELETE", "keys/typesafe");
