@@ -193,11 +193,11 @@ Settings → **MCP servers**:
     threshold (90% by default), runs the command without a card. Anything else is not run on its own: if the agent
     marked the command as one the task can do without, it goes on with other work and asks you in its reply to run it
     (the run line shows it as skipped); otherwise the normal approval card appears with the reason. Commands that change
-    privileges, push with Git, publish, delete recursively outside the folder, pipe a download into a shell, touch SSH
-    keys, credentials or Pal's data, or change the system always need you, with no Jev request. A failed, slow (over 5
-    seconds) or unclear answer counts as not safe: Auto never denies and never tries the other connection. Browser
-    actions always ask. Without a ready decision model, Auto isn't offered, and a chat left in Auto asks like Ask. This
-    is a guard against routine prompts, not a sandbox.
+    privileges, push with Git, publish, delete recursively outside the folder (or after a `cd`, or through a variable),
+    pipe a download into a shell, touch SSH keys, credentials or Pal's data, or change the system always need you, with
+    no Jev request. A failed, slow (over 5 seconds) or unclear answer counts as not safe: Auto never denies and never
+    tries the other connection. Browser actions always ask. Without a ready decision model, Auto isn't offered, and a
+    chat left in Auto asks like Ask. This is a guard against routine prompts, not a sandbox.
   - Jev keys are entered in Settings → Jev, stored sealed and never shown again. Pal never uses the OpenRouter key
     saved under Models for Jev. **Check key** is free for OpenRouter; for TypeSafe it is one billed classification.
 - **Longest agent command** (Settings → General) bounds one command the model runs directly: 2 minutes by default,
