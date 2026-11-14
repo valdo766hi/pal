@@ -12,7 +12,7 @@ import type {
   RunFailureReason,
   ToolSlot,
 } from "@earendil-works/pi-durable";
-import type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
+import type { ApprovalView, AutoStatus, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
 import type { McpReceipt } from "../../../src/pi/mcp-source.ts";
 export type { CommandApproval, McpReceipt };
 
@@ -107,6 +107,8 @@ export class ChatStream {
   /** The browser retries a dropped stream by itself; one the server refused stays closed until replaced. */
   problem: "retrying" | "closed" | undefined = $state();
   mode: CommandMode | undefined = $state();
+  /** Whether Auto can be chosen, as of the last approvals view. */
+  auto: AutoStatus | undefined = $state.raw();
   approvals: readonly CommandApproval[] = $state([]);
   #source: EventSource | undefined;
   #view: ConversationView | undefined;
@@ -145,6 +147,7 @@ export class ChatStream {
 
   showApprovals(view: ApprovalView): void {
     this.mode = view.mode;
+    this.auto = view.auto;
     this.approvals = view.approvals;
   }
 

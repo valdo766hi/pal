@@ -1,15 +1,39 @@
 <script lang="ts">
   import { tick } from "svelte";
-  import type { CommandMode } from "../lib/api.ts";
+  import type { AutoStatus, CommandMode } from "../lib/api.ts";
   import Icon from "../lib/Icon.svelte";
 
-  let { mode, onChoose }: { mode: CommandMode | undefined; onChoose: (mode: CommandMode) => Promise<void> } = $props();
-  const options = [
+  let {
+    mode,
+    auto,
+    onChoose,
+    onOpen,
+  }: {
+    mode: CommandMode | undefined;
+    auto: AutoStatus | undefined;
+    onChoose: (mode: CommandMode) => Promise<void>;
+    /** Asked when the menu opens, so Auto's availability is current. */
+    onOpen?: () => void;
+  } = $props();
+  const options = $derived([
     {
       mode: "ask",
       icon: "lock",
       title: "Ask for approval",
       detail: "Each agent shell command waits until you approve it, with its folder and timeout shown.",
+      disabled: false,
+    },
+    {
+      mode: "auto",
+      icon: "bolt",
+      title: "Auto",
+      detail:
+        auto === undefined
+          ? "Checking whether a decision model is ready…"
+          : auto.ready
+            ? auto.note
+            : `Unavailable: ${auto.note}`,
+      disabled: auto?.ready !== true,
     },
     {
       mode: "full",
@@ -17,8 +41,12 @@
       title: "Full access (YOLO)",
       detail:
         "Agent shell commands run without asking, as the Pal host user. Not a sandbox; grants, protections and limits still apply.",
+      disabled: false,
     },
-  ] as const;
+  ] as const);
+  // A chat left in Auto without a ready decision model asks like Ask; the button says so.
+  const stalled = $derived(mode === "auto" && auto !== undefined && !auto.ready);
+  const label = $derived(mode === "full" ? "Full access" : mode === "auto" ? "Auto" : "Ask first");
   let open = $state(false);
   let busy = $state(false);
   let container: HTMLDivElement | undefined;
@@ -27,8 +55,9 @@
   async function toggle() {
     open = !open;
     if (open) {
+      onOpen?.();
       await tick();
-      container?.querySelector<HTMLButtonElement>('.opt[aria-checked="true"], .opt')?.focus();
+      container?.querySelector<HTMLButtonElement>('.opt[aria-checked="true"], .opt:not(:disabled)')?.focus();
     }
   }
   async function choose(next: CommandMode) {
@@ -45,7 +74,7 @@
   function move(event: KeyboardEvent) {
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     event.preventDefault();
-    const rows = [...(container?.querySelectorAll<HTMLButtonElement>(".opt") ?? [])];
+    const rows = [...(container?.querySelectorAll<HTMLButtonElement>(".opt:not(:disabled)") ?? [])];
     const at = rows.indexOf(document.activeElement as HTMLButtonElement);
     rows[(at + (event.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length]?.focus();
   }
@@ -66,14 +95,15 @@
 <div class="command-mode" bind:this={container}>
   <button
     class="b t"
-    class:warn={mode === "full"}
+    class:warn={mode === "full" || stalled}
     bind:this={opener}
-    aria-label={`Command approval: ${mode === "full" ? "Full access" : "Ask for approval"}`}
+    aria-label={`Command approval: ${mode === "full" ? "Full access" : mode === "auto" ? (stalled ? "Auto, unavailable, asking instead" : "Auto") : "Ask for approval"}`}
+    title={stalled ? `Auto is unavailable, so commands ask you: ${auto?.note}` : undefined}
     aria-expanded={open}
     disabled={mode === undefined || busy}
     onclick={toggle}
   >
-    <Icon name={mode === "full" ? "warn" : "shield"} size={14} />{mode === "full" ? "Full access" : "Ask first"}
+    <Icon name={mode === "full" ? "warn" : mode === "auto" ? "bolt" : "shield"} size={14} />{label}
   </button>
   {#if open}
     <div class="pop" role="dialog" aria-label="Command approval">
@@ -85,7 +115,7 @@
             class:warn={option.mode === "full"}
             role="radio"
             aria-checked={mode === option.mode}
-            disabled={busy}
+            disabled={busy || (option.disabled && mode !== option.mode)}
             onclick={() => choose(option.mode)}
           >
             <span class="row"
@@ -97,8 +127,12 @@
           </button>
         {/each}
       </div>
+      {#if stalled}<p class="popn warn" role="status">
+          Auto is unavailable, so this chat asks you for every command until a decision model is ready.
+        </p>{/if}
       <p class="popn">
-        Applies to this chat. Requests already waiting still need your answer. Human Terminal is separate.
+        Applies to this chat. Requests already waiting still need your answer. Browser actions always ask. Human
+        Terminal is separate.
       </p>
     </div>
   {/if}
@@ -121,7 +155,8 @@
     min-width: 0;
   }
   .b.warn,
-  .opt.warn {
+  .opt.warn,
+  .popn.warn {
     color: var(--wa);
   }
   .opt.warn .optd {

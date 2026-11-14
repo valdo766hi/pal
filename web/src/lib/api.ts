@@ -30,7 +30,13 @@ import type { InstructionInfo, InstructionSettings } from "../../../src/core/ins
 export type { InstructionInfo, InstructionSettings };
 import type { SkillInfo, SkillSettings } from "../../../src/core/skills.ts";
 export type { SkillInfo, SkillSettings };
-export type { ApprovalView, CommandApproval, CommandMode } from "../../../src/core/approvals.ts";
+export type {
+  AdviceRecord,
+  ApprovalView,
+  AutoStatus,
+  CommandApproval,
+  CommandMode,
+} from "../../../src/core/approvals.ts";
 export type { CompatibleConfig, KeyCheck, ProviderModel, ProviderView } from "../../../src/pi/providers.ts";
 export type ModelRef = { provider: string; modelId: string };
 export type ProvidersState = {
@@ -412,6 +418,8 @@ export const api = {
     call<{ chat: ChatSummary }>("PUT", `chats/${id}/title`, { title, expectedTitle }),
   setCommandMode: (id: string, mode: import("../../../src/core/approvals.ts").CommandMode) =>
     call<{ chat: ChatSummary }>("PUT", `chats/${id}/command-mode`, { mode }),
+  approvals: (id: string) =>
+    call<import("../../../src/core/approvals.ts").ApprovalView>("GET", `chats/${id}/approvals`),
   decideCommand: (id: string, approval: string, decision: "approve" | "deny", digest: string) =>
     call<import("../../../src/core/approvals.ts").ApprovalView>("POST", `chats/${id}/approvals/${approval}`, {
       decision,

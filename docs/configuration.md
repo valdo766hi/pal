@@ -170,8 +170,21 @@ Settings → **MCP servers**:
 
 ## Agent permissions
 
-- **Command approval** is set per chat with the composer's **Ask** / **Full access** pill. Ask is the default for
-  every chat.
+- **Command approval** is set per chat with the composer's **Ask** / **Auto** / **Full access** pill. Ask is the
+  default for every chat.
+  - **Auto** needs a decision model: the Jev plugin (Settings → Jev). Each agent shell command, its folder, timeout and
+    folder access (nothing else) go to Jev through the connection you choose, **TypeSafe** (the default) or
+    **OpenRouter**, each billed to its own account with its own key. A confident "routine" answer, at or above your
+    threshold (90% by default), runs the command without a card. Anything else is not run on its own: if the agent
+    marked the command as one the task can do without, it goes on with other work and asks you in its reply to run it
+    (the run line shows it as skipped); otherwise the normal approval card appears with the reason. Commands that change
+    privileges, push with Git, publish, delete recursively outside the folder, pipe a download into a shell, touch SSH
+    keys, credentials or Pal's data, or change the system always need you, with no Jev request. A failed, slow (over 5
+    seconds) or unclear answer counts as not safe: Auto never denies and never tries the other connection. Browser
+    actions always ask. Without a ready decision model, Auto isn't offered, and a chat left in Auto asks like Ask. This
+    is a guard against routine prompts, not a sandbox.
+  - Jev keys are entered in Settings → Jev, stored sealed and never shown again. Pal never uses the OpenRouter key
+    saved under Models for Jev. **Check key** is free for OpenRouter; for TypeSafe it is one billed classification.
 - **Longest agent command** (Settings → General) bounds one command the model runs directly: 2 minutes by default,
   at most 30. Commands from its scripts stay within 2 minutes. Stop ends a command and its process group. A command
   cut off by a restart is reported as interrupted and never rerun; GNU `timeout` still ends it at its deadline.

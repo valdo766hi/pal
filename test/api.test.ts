@@ -371,6 +371,28 @@ describe("API", () => {
     expect((await api("PUT", `${path}/instructions`, { revision: 1, text: "" })).status).toBe(404);
   });
 
+  it("offers Auto only once its advisor is ready and never returns a Jev key", async () => {
+    const { api, base, pal } = await signedIn();
+    const project = await pal.projects.create("api-auto-project", { name: "Auto fixture" });
+    const chat = await pal.chats.createChat("api-auto-chat", { projectId: project.id }, context);
+    const key = "ts-api-secret-0001";
+    expect((await fetch(`${base}/api/plugins/jev/status`)).status).toBe(401);
+    expect((await api("GET", `chats/${chat.id}/approvals`)).body).toMatchObject({
+      mode: "ask",
+      auto: { ready: false, label: "Jev", note: "Add a Jev key in Settings → Jev" },
+    });
+    const refused = await api("PUT", `chats/${chat.id}/command-mode`, { mode: "auto" });
+    expect(refused).toMatchObject({ status: 409, body: { error: "auto_unavailable" } });
+    expect((await api("PUT", "plugins/jev/keys/typesafe", { key })).body).toEqual({ keySet: true });
+    expect((await api("PUT", `chats/${chat.id}/command-mode`, { mode: "auto" })).status).toBe(200);
+    const view = await api("GET", `chats/${chat.id}/approvals`);
+    expect(view.body).toMatchObject({ mode: "auto", auto: { ready: true, label: "Jev" } });
+    expect(view.body.auto.note).toContain("through TypeSafe");
+    for (const path of ["plugins/jev/status", "diagnostics", `chats/${chat.id}/diagnostics`, `chats/${chat.id}`])
+      expect(JSON.stringify((await api("GET", path)).body)).not.toContain(key);
+    expect((await api("PUT", `chats/${chat.id}/command-mode`, { mode: "yolo" })).status).toBe(400);
+  });
+
   it("reads the stored context breakdown for its owner only, without prompt text or a model call", async () => {
     const { api, base, pal } = await signedIn();
     const project = await pal.projects.create("api-usage-project", { name: "Usage fixture" });

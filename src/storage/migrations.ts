@@ -417,6 +417,51 @@ export const MIGRATIONS: readonly Migration[] = [
     // builds must refuse the store here; as at schema 23, work they started must finish under them first.
     up: refuseUnfinishedWork,
   },
+  {
+    version: 26,
+    name: "auto_command_mode",
+    // Auto mode widens the command_mode CHECK, which SQLite cannot change in place, so pal_chats is rebuilt with every
+    // row kept; approvals are rebuilt the same way to record who decided and what Auto weighed. Older builds must refuse the store: they would
+    // reject a chat in Auto and lose those decisions.
+    up: async (transaction) => {
+      await transaction.exec(`CREATE TABLE pal_chats_next (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        digest TEXT NOT NULL,
+        intent TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('provisioning', 'ready')),
+        conversation_id INTEGER UNIQUE,
+        created_at INTEGER NOT NULL,
+        project_id TEXT,
+        title TEXT,
+        deleted_at INTEGER,
+        command_mode TEXT NOT NULL DEFAULT 'ask' CHECK (command_mode IN ('ask', 'auto', 'full')),
+        CHECK ((state = 'ready') = (conversation_id IS NOT NULL))
+      ) STRICT`);
+      await transaction.exec(
+        "INSERT INTO pal_chats_next (id, request_id, digest, intent, state, conversation_id, created_at, project_id, title, deleted_at, command_mode) SELECT id, request_id, digest, intent, state, conversation_id, created_at, project_id, title, deleted_at, command_mode FROM pal_chats",
+      );
+      await transaction.exec("DROP TABLE pal_chats");
+      await transaction.exec("ALTER TABLE pal_chats_next RENAME TO pal_chats");
+      await transaction.exec(`CREATE TABLE pal_command_approvals_next (
+        id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, task_id INTEGER NOT NULL UNIQUE, call_id TEXT NOT NULL,
+        assistant INTEGER, command TEXT NOT NULL, cwd TEXT NOT NULL, timeout REAL NOT NULL,
+        digest TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'approved', 'denied', 'expired', 'stopped', 'skipped')),
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, decided_at INTEGER,
+        tool TEXT NOT NULL DEFAULT 'shell_run' CHECK (tool IN ('shell_run', 'browser_act')),
+        decided_by TEXT CHECK (decided_by IN ('owner', 'advisor')),
+        advice TEXT
+      ) STRICT`);
+      // Every decision before Auto was the owner's.
+      await transaction.exec(
+        "INSERT INTO pal_command_approvals_next (id, chat_id, task_id, call_id, assistant, command, cwd, timeout, digest, state, created_at, expires_at, decided_at, tool, decided_by) SELECT id, chat_id, task_id, call_id, assistant, command, cwd, timeout, digest, state, created_at, expires_at, decided_at, tool, CASE WHEN state IN ('approved', 'denied') THEN 'owner' END FROM pal_command_approvals",
+      );
+      await transaction.exec("DROP TABLE pal_command_approvals");
+      await transaction.exec("ALTER TABLE pal_command_approvals_next RENAME TO pal_command_approvals");
+      await transaction.exec("CREATE INDEX pal_command_approvals_chat ON pal_command_approvals (chat_id, created_at)");
+    },
+  },
 ];
 
 /**

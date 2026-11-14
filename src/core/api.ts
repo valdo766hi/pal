@@ -311,7 +311,9 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       effects: [
         mode === "full"
           ? "Full access: agent shell commands run on this host without asking, as the Pal host user."
-          : "Ask for approval: each agent shell command waits for you and is declined if nobody answers within 2 minutes.",
+          : mode === "auto"
+            ? "Auto: a decision model lets routine agent shell commands run, one billed request each; any other command waits for you and is declined if nobody answers within 2 minutes."
+            : "Ask for approval: each agent shell command waits for you and is declined if nobody answers within 2 minutes.",
         workspace?.mode === "read-only"
           ? "Read-only workspace: no file writes or agent shell commands."
           : "File changes in this chat's workspace happen without asking.",

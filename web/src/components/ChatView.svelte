@@ -3,6 +3,7 @@
   import {
     api,
     ApiError,
+    type AdviceRecord,
     type ChatSummary,
     type CommandMode as Approval,
     type Effort,
@@ -719,6 +720,15 @@
     }
   }
 
+  function refreshApprovals() {
+    const shown = stream;
+    void api.approvals(chat.id).then(
+      (view) => {
+        if (stream === shown) shown?.showApprovals(view);
+      },
+      () => {},
+    );
+  }
   async function chooseMode(next: Approval) {
     try {
       const { chat: changed } = await api.setCommandMode(chat.id, next);
@@ -753,6 +763,7 @@
     denied: "Command denied",
     expired: "Approval expired",
     stopped: "Approval request ended",
+    skipped: "Command skipped",
   } as const;
   const browserHeads = {
     ...heads,
@@ -760,8 +771,24 @@
     approved: "Browser action approved",
     denied: "Browser action denied",
   };
+  const sure = (confidence: number) => `${Math.round(confidence * 100)}%`;
+  /** Why Auto mode asked the owner about this command; undefined outside Auto. */
+  function escalation(advice: AdviceRecord | null): string | undefined {
+    if (advice === null) return undefined;
+    if (advice.by === "rule") return `Always asks: ${advice.reason}`;
+    if (advice.by === "unavailable") return advice.reason;
+    return advice.verdict === "run"
+      ? `${advice.advisor} wasn't sure (${sure(advice.confidence)})`
+      : `${advice.advisor} suggested asking (${sure(advice.confidence)} sure)`;
+  }
   function outcome(approval: CommandApproval): string {
     const at = time(approval.decidedAt ?? undefined);
+    if (approval.decidedBy === "advisor" && approval.advice?.by === "advisor")
+      return `Approved by ${approval.advice.advisor} · ${sure(approval.advice.confidence)} sure, at ${at}.`;
+    const why = escalation(approval.advice);
+    if (approval.state === "skipped")
+      return `${why ?? "Not judged safe"}. Pal didn't run it and carried on; run it yourself, or ask Pal to run it with your approval.`;
+    if (why !== undefined && approval.state !== "pending") return `${why}. ${outcome({ ...approval, advice: null })}`;
     if (approval.state === "approved")
       return `Approved once by you at ${at}. Later ${approval.tool === "browser_act" ? "browser actions" : "commands"} ask again.`;
     if (approval.state === "denied") return `Denied by you at ${at}. Nothing was run.`;
@@ -1198,6 +1225,9 @@
                 {/if}
                 Waits until {time(approval.expiresAt)} at most; Stop ends it. Nothing runs until you approve.
               </p>
+              {#if escalation(approval.advice) !== undefined}<p class="why auto">
+                  {escalation(approval.advice)}
+                </p>{/if}
               <div class="acts">
                 <button class="b p" disabled={deciding !== undefined} onclick={() => decide(approval, "approve")}
                   >Approve once</button
@@ -1442,7 +1472,12 @@
             />{/if}
           {#if phone}{@render composerTools()}{/if}
           {#if !phone}
-            {#if workspace?.mode !== "read-only"}<CommandMode mode={stream?.mode} onChoose={chooseMode} />{/if}
+            {#if workspace?.mode !== "read-only"}<CommandMode
+                mode={stream?.mode}
+                auto={stream?.auto}
+                onChoose={chooseMode}
+                onOpen={refreshApprovals}
+              />{/if}
             <WorkspaceMode {workspace} {onNewChat} />
             <span class="grow"></span>
             {@render composerTools()}
@@ -1518,7 +1553,12 @@
       <div class="li"><span class="lab">Model</span>{@render modelControl()}</div>
       {#if workspace?.mode !== "read-only"}
         <div class="li">
-          <span class="lab">Commands</span><CommandMode mode={stream?.mode} onChoose={chooseMode} />
+          <span class="lab">Commands</span><CommandMode
+            mode={stream?.mode}
+            auto={stream?.auto}
+            onChoose={chooseMode}
+            onOpen={refreshApprovals}
+          />
         </div>
       {/if}
       <div class="li"><span class="lab">Workspace</span><WorkspaceMode {workspace} {onNewChat} /></div>
@@ -1570,6 +1610,9 @@
     font-size: 12.5px;
     color: var(--tx3);
     overflow-wrap: anywhere;
+  }
+  .why.auto {
+    color: var(--wa);
   }
   .acts {
     display: flex;

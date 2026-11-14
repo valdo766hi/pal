@@ -40,7 +40,7 @@ const Rule = Type.Union([
 ]);
 /** The chat settings the owner saw when approving a schedule; a firing never runs under different ones. */
 const Binding = Type.Object(
-  { configuration: ConfigurationRevision, mode: Type.Enum(["ask", "full"]) },
+  { configuration: ConfigurationRevision, mode: Type.Enum(["ask", "auto", "full"]) },
   { additionalProperties: false },
 );
 export const ScheduleBody = Type.Object(

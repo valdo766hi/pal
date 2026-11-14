@@ -46,7 +46,8 @@ available yet. See [adding capabilities](docs/development.md#adding-capabilities
   (list, read, find, search, write, edit, attachments), shell commands, project memory, internet tools and the
   browser. Each tool call is a durable task with its own receipt.
 - **Command approval.** Per chat, **Ask** (the default) shows each shell command, its folder and timeout, and waits
-  for **Approve once** or **Deny**. **Full access** runs commands without asking.
+  for **Approve once** or **Deny**. **Auto** lets a decision model (Jev, through TypeSafe or OpenRouter with your
+  key) run clearly routine commands and asks about everything else. **Full access** runs commands without asking.
 - **Internet tools (MCP).** Exa search/fetch and Context7 documentation presets, custom Streamable HTTP servers and
   owner-approved local programs. Grants are per project, lookups are cached with explicit freshness, and results
   render as source cards.

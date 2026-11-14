@@ -332,7 +332,7 @@ export function shellTools(options: {
       defineTool({
         name: "shell_run",
         description:
-          "Run a trusted host command in the project folder. Not sandboxed; clean environment, bounded output. The timeout is 120 seconds by default and at most that from a script; call this tool directly for a longer command, up to the owner's limit. Never access Pal secrets. An interrupted command must not be blindly retried. When `executed` is present, the command ran as that rtk equivalent and its output is condensed; if the result is unusable, run `rtk bypass <command>` for the unfiltered output. Output sent to files or other programs is never condensed. Optional check binds this execution to an owner goalRevision and zero-based acceptance criterion; working_checks shows its host receipt and source freshness.",
+          'Run a trusted host command in the project folder. Not sandboxed; clean environment, bounded output. The timeout is 120 seconds by default and at most that from a script; call this tool directly for a longer command, up to the owner\'s limit. Never access Pal secrets. An interrupted command must not be blindly retried. When `executed` is present, the command ran as that rtk equivalent and its output is condensed; if the result is unusable, run `rtk bypass <command>` for the unfiltered output. Output sent to files or other programs is never condensed. Optional check binds this execution to an owner goalRevision and zero-based acceptance criterion; working_checks shows its host receipt and source freshness. In the owner\'s Auto mode, a command not judged safe waits for the owner\'s approval (ifUnsafe "ask", the default); pass ifUnsafe "skip" when the task can go on without it: it then returns at once without running, so continue with other commands and ask the owner in your reply to run it or allow it.',
         parameters: Type.Object({
           command: Type.String({ minLength: 1, maxLength: 16_384 }),
           timeout: Type.Optional(Type.Number({ minimum: 0.01, maximum: MAX_COMMAND_TIMEOUT })),
@@ -342,6 +342,7 @@ export function shellTools(options: {
               { additionalProperties: false },
             ),
           ),
+          ifUnsafe: Type.Optional(Type.Enum(["ask", "skip"])),
         }),
         callers: ["model", "tools"],
         replay: "unsafe",

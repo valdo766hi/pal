@@ -286,6 +286,9 @@ export async function openPal(
         return workspace?.state === "ready" ? { id: workspace.projectId, workspace: workspace.id } : undefined;
       },
       authorize: (api, ctx) => folders.forTool(api, ctx),
+      credentials,
+      endpoint: (url) =>
+        options.providerOrigin === undefined ? url : url.replace(/^https:\/\/[^/]+/, options.providerOrigin),
       now,
       // The helpers plugin's tool and the kernel's helper budget hooks share these bounds.
       ...(options.helperLimits === undefined ? {} : { options: { helpers: options.helperLimits } }),
@@ -448,6 +451,8 @@ export async function openPal(
       root: (conversation) => workspaceRoot(conversation, true),
       task: async (id, ctx) => harness?.getTask(id, ctx),
       browser: async (conversation, args) => browsers?.approval(conversation, args),
+      advisor: () => openedCapabilities.advisor,
+      privatePaths: [options.dataRoot],
       ...(options.approvalTtlMs === undefined ? {} : { ttlMs: options.approvalTtlMs }),
     });
     approvals = commandApprovals;

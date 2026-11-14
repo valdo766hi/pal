@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
+import type { CredentialStore } from "@earendil-works/pi-ai";
 import {
   defineExtension,
   type ConversationId,
@@ -36,9 +37,14 @@ const Manifest = Type.Object(
     order: Order,
     /**
      * `browser`: interface pieces every chat shows, switched in the browser: no tools, storage or server part, and
-     * never selected per chat.
+     * never selected per chat. `installation`: a server part for the whole installation, such as an advisor, with
+     * settings tabs and owner requests but no tools, namespace or chat pieces, and never selected per chat.
      */
-    scope: Type.Optional(Type.Literal("browser")),
+    scope: Type.Optional(Type.Enum(["browser", "installation"])),
+    /** A decision model the kernel may consult before an agent command in Auto mode; installation plugins only. */
+    advisor: Type.Optional(
+      Type.Object({ label: Type.String({ minLength: 1, maxLength: 40 }) }, { additionalProperties: false }),
+    ),
     namespace: Type.Optional(
       Type.Object(
         {
@@ -168,10 +174,15 @@ export type CapabilityHost = {
   privateFiles: PrivateFiles;
   project(conversation: ConversationId): Promise<{ id: string; workspace: string } | undefined>;
   authorize(api: ToolExecutionApi, context: Context): Promise<FolderLease>;
+  /** This plugin's secrets, sealed in Pal's credential store; only owner requests should set them. */
+  secrets: PluginSecrets;
+  /** A provider endpoint as this installation reaches it: unchanged, except that tests point it at a loopback origin. */
+  endpoint(url: string): string;
 };
 /** What the kernel opens a plugin with: its services, before they are narrowed to that plugin. */
-export type KernelServices = Omit<CapabilityHost, "sql" | "options" | "settings"> & {
+export type KernelServices = Omit<CapabilityHost, "sql" | "options" | "settings" | "secrets"> & {
   database: SqliteDatabase;
+  credentials: CredentialStore;
   /** Options by plugin ID. */
   options?: Readonly<Record<string, unknown>>;
 };
@@ -179,6 +190,43 @@ export type KernelServices = Omit<CapabilityHost, "sql" | "options" | "settings"
 export type PluginSettings = {
   get(name: string): Promise<unknown>;
   set(name: string, value: unknown): Promise<void>;
+};
+/**
+ * Secret strings by name (`^[a-z][a-z0-9.-]{0,63}$`), kept apart from settings and never sent to the browser by the
+ * kernel; `has` is what a settings tab should show.
+ */
+export type PluginSecrets = {
+  has(name: string): Promise<boolean>;
+  get(name: string): Promise<string | undefined>;
+  set(name: string, value: string): Promise<void>;
+  clear(name: string): Promise<void>;
+};
+/** One agent command an advisor judges: exactly what its settings tab says is sent. */
+export type AdviceRequest = {
+  readonly tool: "shell_run";
+  readonly command: string;
+  readonly cwd: string;
+  readonly timeoutSeconds: number;
+  readonly folderAccess: "write";
+};
+/** An advisor's answer: the kernel lets the command skip the owner only for `run` at or above `threshold`. */
+export type Advice = {
+  readonly verdict: "run" | "ask";
+  readonly confidence: number;
+  readonly threshold: number;
+  readonly reason?: string;
+  readonly model?: string;
+  /** The connection or account the request went through, as the owner knows it. */
+  readonly via?: string;
+  readonly tokens?: number;
+  readonly costUsd?: number;
+  readonly latencyMs?: number;
+};
+export type CapabilityAdvisor = {
+  /** Whether Auto may use it now, and what the owner reads: what it sends where, or how to make it ready. */
+  status(): Promise<{ ready: boolean; note: string }>;
+  /** Judge one command; throw when no answer can be given. The kernel bounds the wait and never retries. */
+  advise(request: AdviceRequest, signal: AbortSignal): Promise<Advice>;
 };
 /** One owner request under `/api/plugins/<id>/`; `path` is what follows the plugin's ID. */
 export type CapabilityRequest = {
@@ -193,6 +241,8 @@ export type CapabilityRuntime = {
   api?(request: CapabilityRequest, context: Context): Promise<unknown>;
   /** What other trusted code, such as tests, reaches through `CompiledCapabilities.service`. */
   service?: unknown;
+  /** The decision model its manifest's `advisor` declares. */
+  advisor?: CapabilityAdvisor;
   /** Called after durable work stops; release ephemeral resources, never mutate durable state here. */
   dispose?(): void | Promise<void>;
 };
@@ -259,10 +309,22 @@ export function capabilityManifest(input: unknown): CapabilityManifest {
       tools.length > 0 ||
       storage !== undefined ||
       panels.length > 0 ||
+      manifest.advisor !== undefined ||
       manifest.ui?.renderers !== undefined ||
       manifest.ui?.slots?.some((slot) => slot.slot === "context") === true)
   )
     throw new Error(`Capability ${manifest.id} is browser-only: settings and composer pieces, nothing else.`);
+  if (
+    manifest.scope === "installation" &&
+    (namespace !== undefined ||
+      tools.length > 0 ||
+      panels.length > 0 ||
+      manifest.ui?.renderers !== undefined ||
+      manifest.ui?.slots !== undefined)
+  )
+    throw new Error(`Capability ${manifest.id} serves the installation: no tools, namespace or chat pieces.`);
+  if (manifest.advisor !== undefined && manifest.scope !== "installation")
+    throw new Error(`Capability ${manifest.id} must serve the installation to advise.`);
   if (namespace !== undefined && (namespace.name !== manifest.id || namespace.prefix !== `${own}_`))
     throw new Error(`Capability ${manifest.id} has an invalid Code Mode namespace.`);
   if (new Set(tools.map((tool) => tool.name)).size !== tools.length)
@@ -324,6 +386,28 @@ function pluginSettings(database: SqliteDatabase, id: string): PluginSettings {
   };
 }
 
+/** A plugin's secrets live in `pal_credentials` under `plugin:<id>:`, sealed like provider keys. */
+function pluginSecrets(credentials: CredentialStore, id: string): PluginSecrets {
+  const key = (name: string) => {
+    if (!SETTING_NAME.test(name)) throw new Error(`Capability ${id} used an invalid secret name.`);
+    return `plugin:${id}:${name}`;
+  };
+  const read = async (name: string) => {
+    const credential = await credentials.read(key(name));
+    return credential?.type === "api_key" ? credential.key : undefined;
+  };
+  return {
+    has: async (name) => (await read(name)) !== undefined,
+    get: read,
+    async set(name, value) {
+      if (value === "" || Buffer.byteLength(value) > 4096)
+        throw new Error(`Capability ${id} secret ${name} must be 1 byte to 4 KiB.`);
+      await credentials.modify(key(name), async () => ({ type: "api_key", key: value }));
+    },
+    clear: (name) => credentials.delete(key(name)),
+  };
+}
+
 function scopedSql(database: SqliteDatabase, manifest: CapabilityManifest): SqliteDatabase {
   const owns = new Set(manifest.storage?.owns ?? []);
   const reads = new Set([...owns, ...(manifest.storage?.reads ?? [])]);
@@ -378,6 +462,8 @@ export class CompiledCapabilities {
     const ids = new Set<string>(),
       natives = new Set<string>(),
       names = new Set<string>();
+    if (prepared.filter(({ manifest }) => manifest.advisor !== undefined).length > 1)
+      throw new Error("A Pal build has at most one advisor.");
     for (const { manifest } of prepared) {
       if (manifest.scope === "browser")
         throw new Error(`Capability ${manifest.id} is browser-only and has no server part.`);
@@ -389,7 +475,7 @@ export class CompiledCapabilities {
         names.add(tool.name);
       }
     }
-    const { database, options, ...services } = kernel;
+    const { database, options, credentials, ...services } = kernel;
     const opened = new CompiledCapabilities();
     try {
       for (const { definition, manifest } of prepared) {
@@ -397,10 +483,13 @@ export class CompiledCapabilities {
           ...services,
           sql: scopedSql(database, manifest),
           settings: pluginSettings(database, manifest.id),
+          secrets: pluginSecrets(credentials, manifest.id),
           options: options?.[manifest.id],
         });
         const record = { manifest, runtime, extension: defineExtension({ name: manifest.native }) };
         opened.#opened.push(record);
+        if ((manifest.advisor === undefined) !== (runtime.advisor === undefined))
+          throw new Error(`Capability ${manifest.id} advisor declaration differs.`);
         const declarations = manifest.tools ?? [];
         if ((runtime.tools ?? []).length !== declarations.length)
           throw new Error(`Capability ${manifest.id} tool declarations differ.`);
@@ -456,6 +545,14 @@ export class CompiledCapabilities {
       this.#closing === undefined &&
       this.#opened.some(({ manifest }) => manifest.tools?.some((tool) => tool.name === name) === true)
     );
+  }
+  /** The build's advisor while open, labelled as its manifest names it. */
+  get advisor(): (CapabilityAdvisor & { label: string }) | undefined {
+    if (this.#closing !== undefined) return undefined;
+    for (const { manifest, runtime } of this.#opened)
+      if (manifest.advisor !== undefined && runtime.advisor !== undefined)
+        return { label: manifest.advisor.label, status: runtime.advisor.status, advise: runtime.advisor.advise };
+    return undefined;
   }
   service<T>(id: string): T | undefined {
     return this.#opened.find(({ manifest }) => manifest.id === id)?.runtime.service as T | undefined;
