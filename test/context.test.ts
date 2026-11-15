@@ -426,6 +426,30 @@ describe("context breakdown", () => {
     expect(result.unloaded[0]?.items).toHaveLength(50);
   });
 
+  it("keeps shortened item labels unique, since the panel keys its rows by them", () => {
+    const long = "a".repeat(130);
+    const messages: Message[] = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: `<attachment id="1" name="${long}-one">x</attachment>` },
+          { type: "text", text: `<attachment id="2" name="${long}-two">y</attachment>` },
+        ],
+        timestamp: 1,
+      },
+    ];
+    const tools = [declared(`${long}_one`), declared(`${long}_two`)];
+    const result = contextBreakdown(
+      messages,
+      { ...agent, extensions: [{ name: "pal.mcp", tools }], callable: tools, deferred: tools } as typeof agent,
+      owners,
+    );
+    const labels = result.categories.find((category) => category.id === "attachments")?.items?.map((i) => i.label);
+    expect(labels).toHaveLength(1);
+    expect(labels?.[0]).toHaveLength(120);
+    expect(result.unloaded).toEqual([{ id: "mcp", label: "MCP", count: 2, items: [long.slice(0, 120)] }]);
+  });
+
   it("labels the ring by window share, tokens only without a window, and warns at the summarizing point", () => {
     const base = { model: null, reserveTokens: 16_384, categories: [], unloaded: [], preparedAt: 1 };
     const known = { ...base, contextWindow: 1_000_000, usedTokens: 70_000 };

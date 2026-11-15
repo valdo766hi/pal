@@ -56,7 +56,9 @@ export function contextBreakdown(
     const category = totals.get(id) ?? { label, tokens: 0, items: new Map<string, number>() };
     totals.set(id, category);
     category.tokens += tokens;
-    if (item !== undefined) category.items.set(item, (category.items.get(item) ?? 0) + tokens);
+    // Shortened here, so items that read the same are one row: the panel keys its rows by label.
+    const key = item?.slice(0, MAX_LABEL);
+    if (key !== undefined) category.items.set(key, (category.items.get(key) ?? 0) + tokens);
   };
   const tool = (name: string, tokens: number, item = name) => {
     const found = tools.get(name) ?? { id: "other", label: "Other" };
@@ -120,7 +122,7 @@ export function contextBreakdown(
       const listed = [...items]
         .filter(([, count]) => count > 0)
         .sort((a, b) => b[1] - a[1])
-        .map(([name, count]) => ({ label: name.slice(0, MAX_LABEL), tokens: count }));
+        .map(([name, count]) => ({ label: name, tokens: count }));
       return {
         id,
         label,
@@ -144,14 +146,17 @@ export function contextBreakdown(
 
   const offered = new Set(agent.tools.map((offer) => offer.name));
   const unloaded = new Map<string, UnloadedTools>();
+  const counted = new Set<string>();
   for (const reachable of [...agent.callable, ...agent.deferred]) {
     if (offered.has(reachable.name) || inlined.has(reachable.name)) continue;
     const found = tools.get(reachable.name) ?? { id: "other", label: "Other" };
     const group = unloaded.get(found.id) ?? { id: found.id, label: found.label, count: 0, items: [] };
     unloaded.set(found.id, group);
-    if (group.items.includes(reachable.name)) continue;
+    if (counted.has(reachable.name)) continue;
+    counted.add(reachable.name);
     group.count++;
-    if (group.items.length < MAX_ITEMS) group.items.push(reachable.name.slice(0, MAX_LABEL));
+    const label = reachable.name.slice(0, MAX_LABEL);
+    if (group.items.length < MAX_ITEMS && !group.items.includes(label)) group.items.push(label);
   }
   return {
     usedTokens: estimate.tokens,
