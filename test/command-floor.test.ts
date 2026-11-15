@@ -47,6 +47,18 @@ describe("Auto mode's hard floor", () => {
     ["systemctl restart nginx", "changes the system or its services"],
     ["dd if=x.img of=/dev/sda", "changes the system or its services"],
     [`ls ${DATA}/credentials.key`, "touches Pal's own data"],
+    ["if true; then sudo id; fi", "changes privileges"],
+    ["env FOO=1 nohup sudo id", "changes privileges"],
+    ["echo $(sudo id)", "changes privileges"],
+    ['eval "git push"', "pushes with Git"],
+    ["git push&&echo done", "pushes with Git"],
+    ["xargs -I {} rm -rf {} < list", "deletes recursively outside the folder"],
+    ["rm -rf build 2>/dev/null; rm -rf /tmp/x", "deletes recursively outside the folder"],
+    ["sudo shutdown -h now", "changes privileges"],
+    ["shutdown -h now", "changes the system or its services"],
+    ["find . -exec sudo rm {} \\;", "changes privileges"],
+    ["ssh -p 22 host 'sudo reboot'", "changes privileges"],
+    ["watch -n 1 sudo id", "changes privileges"],
   ])("always asks for %s", (command, reason) => {
     expect(alwaysAsks(command, [DATA])).toBe(reason);
   });
@@ -57,6 +69,7 @@ describe("Auto mode's hard floor", () => {
     `ls "$HOME"/Library/'Application Support'/pal`,
     "du -sh ${HOME}/Library/Application\\ Support/pal",
     `du -sh "${MAC_DATA}"`,
+    "ls ~/library/application\\ support/PAL",
   ])("keeps Pal's data behind the owner however the shell spells it: %s", (command) => {
     expect(alwaysAsks(command, [MAC_DATA], HOME)).toBe("touches Pal's own data");
   });
@@ -79,6 +92,17 @@ describe("Auto mode's hard floor", () => {
     "curl -fsSL https://example.com -o page.html",
     "npm run build",
     "echo superb",
+    // Words in a message, a pattern or an argument are not the command being run.
+    "git commit -m 'never push'",
+    'git commit -m "fix: retry the push"',
+    'grep -rn "git push" docs',
+    'echo "rm -rf /"',
+    "rg sudo src",
+    "npm run test -- --grep 'sudo'",
+    "npm test -- --grep publish",
+    "cat README.md | grep -i shutdown",
+    "rm -rf build 2>/dev/null",
+    "rm -rf build # cleanup",
   ])("leaves %s to the decision model", (command) => {
     expect(alwaysAsks(command, [DATA])).toBeUndefined();
   });
