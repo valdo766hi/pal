@@ -257,8 +257,8 @@ nix build --out-link activation-benchmark .#activation-benchmark
 ```
 
 Each sample creates a private store, guidance root and 500-file project. Setup/seeding is outside the measured
-interval. Search must return the known Unicode filename; the terminal must deliver its live control state and
-shell prompt over the real authenticated WebSocket; the browser must deliver owner control and a blank-page
+interval. Search must return the known Unicode filename; the terminal must deliver its live control state over the real
+authenticated WebSocket and its shell must answer a typed command with a per-sample marker, whatever its prompt; the browser must deliver owner control and a blank-page
 frame using its unchanged packaged sandbox, public-only egress broker and resource scope. Unavailable protection,
 failed work or a disconnected stream fails the measurement rather than becoming a fast success or a fallback.
 No model or internet request is made. Only synthetic fixture data is used and removed after its resources close.
