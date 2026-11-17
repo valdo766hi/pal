@@ -180,7 +180,13 @@ export class TurnRelay {
     this.transformRequest = transformRequest;
     this.requestBetas = requestBetas;
     this.server = http.createServer((request, response) => {
-      const operation = this.handle(request, response).finally(() => this.active.delete(operation));
+      // Pal: a failure in one request answers or drops that request instead of ending the process.
+      const operation = this.handle(request, response)
+        .catch(() => {
+          if (!response.headersSent) response.writeHead(500).end();
+          else response.destroy();
+        })
+        .finally(() => this.active.delete(operation));
       this.active.add(operation);
     });
   }
@@ -261,7 +267,12 @@ export class TurnRelay {
   }
 
   private async handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
-    const requestUrl = new URL(request.url ?? "/", "http://127.0.0.1");
+    // Pal: a target no URL parser accepts is refused, not thrown.
+    const requestUrl = URL.parse(request.url ?? "/", "http://127.0.0.1");
+    if (requestUrl === null) {
+      response.writeHead(400).end();
+      return;
+    }
     if (request.method !== "POST" || requestUrl.pathname !== `${this.prefix}/v1/messages` || request.headers.origin) {
       response.writeHead(404).end();
       return;
