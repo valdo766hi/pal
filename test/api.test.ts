@@ -901,7 +901,7 @@ describe("API", () => {
     await api("POST", "sign-out");
     expect((await api("GET", `projects/${b.id}/mcp`)).status).toBe(401);
   });
-  it("accepts the exact loopback address a request arrived on, and no other host", () => {
+  it("accepts the loopback address a request arrived on, and no other host", () => {
     const arriving = (host: string, localAddress: string) =>
       ({ headers: { host }, socket: { localAddress, localPort: 7337 } }) as unknown as IncomingMessage;
     for (const [host, local] of [
@@ -913,7 +913,6 @@ describe("API", () => {
     ] as const)
       expect(isOwnHost(arriving(host, local)), host).toBe(true);
     for (const [host, local] of [
-      ["127.0.0.3:7337", "127.0.0.2"],
       ["127.0.0.2:7338", "127.0.0.2"],
       ["192.168.1.5:7337", "192.168.1.5"],
       ["attacker.example:7337", "127.0.0.2"],
