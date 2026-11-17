@@ -1,6 +1,7 @@
 // Child process for scheduled-message recovery tests over Pal's real store, chat admission and a faux model.
 // `run <dataRoot> <barrier>` schedules one message and lets it fire, SIGKILLing itself at the barrier;
-// `inspect <dataRoot>` reopens at the same time, ticks again and prints what was admitted.
+// `inspect <dataRoot> [mode]` reopens at the same time, first switching the chat to that command mode if given, ticks
+// again and prints what was admitted.
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type SubmissionId } from "@earendil-works/pi-durable";
@@ -9,7 +10,7 @@ import { Schedules } from "../../src/core/schedules.ts";
 import { openStore } from "../../src/storage/store.ts";
 
 const [mode, dataRoot, crashAt] = process.argv.slice(2);
-if (dataRoot === undefined) throw new Error("usage: schedules-child.ts <run|inspect> <dataRoot> [barrier]");
+if (dataRoot === undefined) throw new Error("usage: schedules-child.ts <run|inspect> <dataRoot> [barrier|mode]");
 
 const faux = fauxProvider();
 const models = createModels();
@@ -21,6 +22,8 @@ const crash = (point: string) => {
 };
 
 const store = await openStore(dataRoot);
+if (mode === "inspect" && crashAt !== undefined)
+  await store.database.run("UPDATE pal_chats SET command_mode = ?", crashAt);
 const harness = await Harness.open(store.storage, { models, registry: createRegistry() }, context);
 const chats = await ChatService.open(
   {
@@ -36,9 +39,13 @@ const clock = { now: Date.UTC(2030, 0, 14, 8) };
 const settings = async (chatId: string) => {
   const chat = await chats.get(chatId);
   const conversation = chat === undefined ? undefined : await harness.conversation(chat.conversationId, context);
-  return conversation === undefined
+  const row = await store.database.get<{ command_mode: "ask" | "auto" | "full" }>(
+    "SELECT command_mode FROM pal_chats WHERE id = ?",
+    chatId,
+  );
+  return conversation === undefined || row === undefined
     ? undefined
-    : { configuration: chatConfiguration(await conversation.agent(context)), mode: "ask" as const };
+    : { configuration: chatConfiguration(await conversation.agent(context)), mode: row.command_mode };
 };
 const schedules = await Schedules.open({
   database: store.database,

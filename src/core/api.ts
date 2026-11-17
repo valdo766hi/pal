@@ -746,7 +746,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       if (action === "title" && path.length === 3 && method === "PUT")
         return send(200, { chat: await describeChat(await pal.chats.rename(chat.id, await readJson(request))) });
       if (action === "command-mode" && path.length === 3 && method === "PUT") {
-        await pal.approvals.setMode(chat.id, validate(CommandModeBody, await readJson(request)).mode);
+        const { mode } = validate(CommandModeBody, await readJson(request));
+        await pal.chats.change(chat.id, () => pal.approvals.setMode(chat.id, mode));
         return send(200, { chat: await describeChat(chat) });
       }
       if (action === "diagnostics" && path.length === 3 && method === "GET")

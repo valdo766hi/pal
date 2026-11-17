@@ -376,6 +376,7 @@ export class Schedules {
       const admission = await this.#host.submit(schedule.chatId, pending.request, {
         text: schedule.text,
         configuration: schedule.binding.configuration,
+        mode: schedule.binding.mode,
       });
       schedule.last = admission.submissionId;
       record(schedule, {
