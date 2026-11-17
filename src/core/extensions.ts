@@ -27,8 +27,11 @@ import {
   type CompiledCapability,
 } from "../capabilities/contract.ts";
 
-/** The build's plugins from `plugins/index.ts`. */
-export const PLUGINS: readonly CompiledCapability[] = Object.values(inventory);
+/** The build's plugins with a server part, from `plugins/index.ts`; a browser plugin's line is only its manifest. */
+const LISTED: readonly (CompiledCapability | CapabilityManifest)[] = Object.values(inventory);
+export const PLUGINS: readonly CompiledCapability[] = LISTED.filter(
+  (plugin): plugin is CompiledCapability => "manifest" in plugin,
+);
 /** The kernel's own panels; Context is always shown. */
 export type PanelId = "Files" | "Changes" | "Terminal" | "Browser";
 type KernelBuiltin = Pick<

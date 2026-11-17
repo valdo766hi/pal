@@ -636,8 +636,9 @@ in a browser. See [extension architecture](architecture.md#extensions-and-releas
    kernel's panels in chats that selected the plugin; a component that fails to load says so in its place. A
    renderer receives `{ entry }`.
 6. **List it.** Add one line to `plugins/index.ts`: `export { default as <id> } from "./<id>/server.ts";`. A plugin
-   with `scope: "browser"`, such as `pets`, has only interface pieces, no `server.ts` and no line. An installation
-   plugin, such as `jev`, has both but no new-chat switch in Settings → Extensions.
+   with `scope: "browser"`, such as `pets`, has only interface pieces and no `server.ts`; its line names its manifest,
+   `./<id>/manifest.ts`. An installation plugin, such as `jev`, has both but no new-chat switch in Settings →
+   Extensions.
 7. **Build, drain and restart.** Run `pnpm check` and `pnpm build`, let running chats finish, then restart Pal on the
    new build. A changed plugin changes Pal's implementation identity, so the new build refuses to start while work is
    unfinished; finish it on the previous build first. An installed Pal takes the new build through
@@ -646,7 +647,7 @@ in a browser. See [extension architecture](architecture.md#extensions-and-releas
    versions they started with. `test/capabilities.test.ts` shows the contract checks, and `test/e2e/plugins.test.ts`
    the browser flow. Run `pnpm test` and `pnpm test:e2e`.
 
-Removing a plugin's line and folder removes its tools and interface. Its settings and entries stay, and chats that
+Removing a plugin's line removes its tools and interface, even while its folder stays. Its settings and entries stay, and chats that
 used it show its entries as a short note.
 
 ## Conventions

@@ -28,7 +28,7 @@ import {
 } from "../src/capabilities/contract.ts";
 import { openPal, type Pal } from "../src/core/app.ts";
 import type { Chat } from "../src/core/chats.ts";
-import { BuiltinExtensions } from "../src/core/extensions.ts";
+import { BuiltinExtensions, PLUGINS } from "../src/core/extensions.ts";
 import { FileAccessError } from "../src/core/files.ts";
 import { PrivateFiles } from "../src/core/file-policy.ts";
 import * as inventory from "../plugins/index.ts";
@@ -136,15 +136,17 @@ function traced(base: CompiledCapability, events: string[], output?: string): Co
 }
 
 describe("compiled capability contract", () => {
-  it("keeps every plugin folder valid, with its components, and only server plugins in the server inventory", async () => {
+  it("keeps every plugin folder valid and listed, with its components, and only server parts on the server", async () => {
     const root = join(import.meta.dirname, "../plugins");
-    const servers = Object.values(inventory).map((plugin) => plugin.manifest.id);
+    const listed = Object.values(inventory).map((plugin) => ("manifest" in plugin ? plugin.manifest.id : plugin.id));
+    const servers = PLUGINS.map((plugin) => plugin.manifest.id);
     const folders = (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory());
     expect(folders.map((entry) => entry.name)).toEqual(expect.arrayContaining(["memory", "helpers", "pets"]));
     for (const folder of folders) {
       const module: { default: unknown } = await import(pathToFileURL(join(root, folder.name, "manifest.ts")).href);
       const manifest = capabilityManifest(module.default);
       expect(manifest.id).toBe(folder.name);
+      expect(listed).toContain(manifest.id);
       expect(servers.includes(manifest.id)).toBe(manifest.scope !== "browser");
       const { slots = [], settings = [], panels = [], renderers = [] } = manifest.ui ?? {};
       for (const item of [...slots, ...settings, ...panels, ...renderers])
