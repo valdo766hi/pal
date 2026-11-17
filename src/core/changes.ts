@@ -255,7 +255,15 @@ export class Changes {
       let handled = after ?? "";
       scan: for (let start = 0; start < names.length; start += MAX_FILES) {
         const batch = names.slice(start, start + MAX_FILES);
-        const initiallyHidden = scope === "normal" ? await this.#ignored(root, batch, signal) : new Set<string>();
+        let initiallyHidden = new Set<string>();
+        if (scope === "normal")
+          try {
+            initiallyHidden = await this.#ignored(root, batch, signal);
+          } catch (error) {
+            if (!signal.aborted) throw error;
+            next = handled;
+            break scan;
+          }
         for (const path of batch) {
           if (files.length >= MAX_FILES || signal.aborted) {
             next = handled;
@@ -316,17 +324,19 @@ export class Changes {
           handled = path;
         }
       }
+      // The scan's own time may be spent; finishing the page gets its own, so it still applies the ignore rules.
+      const finish = AbortSignal.timeout(10_000);
       const hidden = await this.#ignored(
         root,
         [...files.map((file) => file.path), ...comments.map((comment) => comment.path)],
-        signal,
+        finish,
       );
       const visible = (path: string) => this.#allowed(root, path) && (scope === "include-ignored" || !hidden.has(path));
       await location.check();
       return {
         state: "ready",
         base: baseline.head,
-        head: await this.#head(root, signal),
+        head: await this.#head(root, finish),
         files: files.flatMap((file) => {
           if (!visible(file.path)) return [];
           return [hidden.has(file.path) ? { ...file, ignored: true } : file];

@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ConversationId, ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Changes } from "../src/core/changes.ts";
 import { WorkspaceBusy, WorkspaceLocks } from "../src/core/execution.ts";
 import { fileTools } from "../src/core/files.ts";
@@ -171,6 +171,53 @@ describe("revision-bound Git changes", () => {
     await expect(changes.review(project.id, "n-129.txt", "0".repeat(64), true)).rejects.toMatchObject({
       code: "changes_stale",
     });
+  });
+
+  it("returns what a scan found, with its continuation, when the scan's time runs out", async () => {
+    const { root, dataRoot, store, projects, project } = await setup();
+    const many = Array.from({ length: 130 }, (_, index) => `a-${String(index).padStart(3, "0")}.txt`);
+    for (const name of many) await writeFile(join(root, name), "same\n");
+    await git(root, "add", ".");
+    await git(root, "commit", "-qm", "many");
+    const head = (await git(root, "rev-parse", "HEAD")).stdout.trim();
+    await writeFile(join(root, "file.txt"), "after\n");
+    // The deadline passes while the scan reads one chosen file, so how far it got does not depend on timing.
+    let expiry: { ino: number; deadline: AbortController } | undefined;
+    const real = await PrivateFiles.open([store.path, `${store.path}-wal`, `${store.path}-shm`]);
+    const privateFiles = Object.assign(Object.create(real) as PrivateFiles, {
+      contains: (info: Parameters<PrivateFiles["contains"]>[0]) => {
+        if (info.ino === expiry?.ino) expiry.deadline.abort();
+        return real.contains(info);
+      },
+    });
+    const changes = new Changes(store.database, projects, dataRoot, privateFiles);
+    await changes.list(project.id);
+    const expiring = async (path: string, after?: string) => {
+      expiry = { ino: (await stat(join(root, path))).ino, deadline: new AbortController() };
+      // With the baseline recorded, the scan's deadline is the first timeout a listing asks for.
+      vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(expiry.deadline.signal);
+      try {
+        return await changes.list(project.id, "normal", undefined, after);
+      } finally {
+        vi.restoreAllMocks();
+        expiry = undefined;
+      }
+    };
+    const paths = (page: { files: { path: string }[] }) => page.files.map((file) => file.path);
+
+    // Between batches of paths: the next batch's ignore check is where the time runs out.
+    const between = await expiring("a-127.txt");
+    expect(between).toMatchObject({ files: [], next: "a-127.txt", truncated: true, base: head, head });
+    expect(paths(await changes.list(project.id, "normal", undefined, "a-127.txt"))).toEqual(["file.txt"]);
+
+    // While comparing a file: the page keeps the changes before it and still checks them against ignore rules.
+    for (const name of many.slice(0, 20)) await writeFile(join(root, name), "changed\n");
+    const during = await expiring("a-010.txt");
+    expect(paths(during)).toEqual(many.slice(0, 10));
+    expect(during).toMatchObject({ next: "a-009.txt", truncated: true, base: head, head });
+    const rest = await changes.list(project.id, "normal", undefined, "a-009.txt");
+    expect(paths(rest)).toEqual([...many.slice(10, 20), "file.txt"]);
+    expect(rest.next).toBeNull();
   });
 
   it("lists a mode-only change instead of looking clean, and notes a mode change beside a text change", async () => {
