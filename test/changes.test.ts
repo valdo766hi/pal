@@ -155,6 +155,24 @@ describe("revision-bound Git changes", () => {
     expect(pages.at(-1)?.next).toBeNull();
   });
 
+  it("reviews a file that only a continued scan shows", async () => {
+    const { root, project, changes } = await setup();
+    for (let index = 0; index < 130; index++)
+      await writeFile(join(root, `n-${String(index).padStart(3, "0")}.txt`), "new\n");
+    const first = await changes.list(project.id);
+    const after = first.next ?? undefined;
+    const later = (await changes.list(project.id, "normal", undefined, after)).files.find(
+      (file) => file.path === "n-129.txt",
+    );
+    expect(first.files.map((file) => file.path)).not.toContain("n-129.txt");
+    await changes.review(project.id, "n-129.txt", later?.revision ?? "", true);
+    const again = await changes.list(project.id, "normal", undefined, after);
+    expect(again.files.find((file) => file.path === "n-129.txt")?.reviewed).toBe(true);
+    await expect(changes.review(project.id, "n-129.txt", "0".repeat(64), true)).rejects.toMatchObject({
+      code: "changes_stale",
+    });
+  });
+
   it("lists a mode-only change instead of looking clean, and notes a mode change beside a text change", async () => {
     const { root, project, changes } = await setup();
     expect((await changes.list(project.id)).files).toEqual([]);

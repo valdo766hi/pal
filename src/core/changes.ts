@@ -439,6 +439,20 @@ export class Changes {
     return new Set(found.toString().split("\0").filter(Boolean));
   }
 
+  /**
+   * One file as it differs from the baseline now, or undefined when it doesn't or can't be shown. Checked directly,
+   * not through a listing, so a file from any page of a continued scan qualifies.
+   */
+  async #current(root: string, key: string, path: string, scope: ReviewScope, signal: AbortSignal) {
+    if (!this.#allowed(root, path)) throw new FileAccessError(`${path} is outside the project folder or protected`);
+    const baseline = await this.#baseline(key, root);
+    if (baseline === undefined) return undefined;
+    await this.#permission(root, path, scope, signal);
+    return await this.#entry(root, baseline.head, path, signal)
+      .then((entry) => this.#inspect(root, baseline.head, path, entry !== undefined, signal))
+      .catch(() => undefined);
+  }
+
   async #permission(root: string, path: string, scope: ReviewScope, signal: AbortSignal): Promise<void> {
     if (scope === "normal" && (await this.#ignored(root, [path], signal)).has(path))
       throw new HttpError(
@@ -457,10 +471,8 @@ export class Changes {
     workspaceId?: string,
   ): Promise<void> {
     const location = await this.#location(projectId, workspaceId);
-    const listing = await this.list(projectId, scope, workspaceId);
-    if (listing.state === "ready") await this.#permission(location.root, path, scope, AbortSignal.timeout(10_000));
-    const latest = listing.files.find((file) => file.path === path);
-    if (latest === undefined || latest.problem !== undefined || latest.revision !== revision)
+    const change = await this.#current(location.root, location.key, path, scope, AbortSignal.timeout(10_000));
+    if (change?.revision !== revision)
       throw new HttpError(409, "changes_stale", "the file changed; refresh and review its latest revision");
     await location.check();
     await this.#database.transaction(async (tx) => {
@@ -574,16 +586,8 @@ export class Changes {
   ): Promise<ChangeComment> {
     const location = await this.#location(projectId, workspaceId);
     const { root, key } = location;
-    if (!this.#allowed(root, path)) throw new FileAccessError(`${path} is outside the project folder or protected`);
-    const baseline = await this.#baseline(key, root);
     const signal = AbortSignal.timeout(10_000);
-    if (baseline !== undefined) await this.#permission(root, path, scope, signal);
-    const change =
-      baseline === undefined
-        ? undefined
-        : await this.#entry(root, baseline.head, path, signal)
-            .then((entry) => this.#inspect(root, baseline.head, path, entry !== undefined, signal))
-            .catch(() => undefined);
+    const change = await this.#current(root, key, path, scope, signal);
     if (change?.revision !== revision)
       throw new HttpError(409, "changes_stale", "the file changed; refresh and comment on its latest revision");
     const lines = change.after?.toString("utf8").split("\n") ?? [];
