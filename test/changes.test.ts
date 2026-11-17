@@ -155,6 +155,21 @@ describe("revision-bound Git changes", () => {
     expect(pages.at(-1)?.next).toBeNull();
   });
 
+  it("lists a mode-only change instead of looking clean, and notes a mode change beside a text change", async () => {
+    const { root, project, changes } = await setup();
+    expect((await changes.list(project.id)).files).toEqual([]);
+    await chmod(join(root, "file.txt"), 0o755);
+    const onlyMode = await changes.list(project.id);
+    expect(onlyMode.files).toEqual([
+      expect.objectContaining({ path: "file.txt", status: "M", problem: expect.stringContaining("100644 → 100755") }),
+    ]);
+    await writeFile(join(root, "file.txt"), "after\n");
+    const both = (await changes.list(project.id)).files.find((file) => file.path === "file.txt");
+    expect(both).toMatchObject({ mode: "100644 → 100755" });
+    expect(both?.problem).toBeUndefined();
+    expect(both?.patch).toContain("+after");
+  });
+
   it("captures before file tools mutate, includes manual dirt and never moves the recorded baseline", async () => {
     const { root, dataRoot, store, projects, project, changes } = await setup();
     const head = (await git(root, "rev-parse", "HEAD")).stdout.trim();

@@ -422,6 +422,9 @@
   {#if file}
     {#if file.problem}<p class="notice" role="status">{file.problem}</p>
     {:else}
+      {#if file.mode !== undefined}<p class="notice warning" role="status">
+          Its file mode also changed ({file.mode}). Review and Discard cover its text only.
+        </p>{/if}
       {@const target = file}
       <div class="patch" role="region" aria-label="File diff">
         {#each displayed as row, i (i)}

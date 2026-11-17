@@ -33,6 +33,8 @@ export type Change = {
   revision: string;
   reviewed: boolean;
   problem?: string;
+  /** A file mode change beside its text change, such as "100644 → 100755"; review and discard cover the text only. */
+  mode?: string;
 };
 /** A review comment on one line of a file revision; outdated once that line's text changes or the file stops differing. */
 export type ChangeComment = {
@@ -210,13 +212,17 @@ export class Changes {
         };
       }
       const signal = AbortSignal.timeout(10_000);
-      const tracked =
+      // Each tracked path's recorded mode, from "<mode> <type> <object>\t<path>".
+      const modes = new Map(
         baseline.head === null
           ? []
-          : (await git(root, ["ls-tree", "-r", "-z", "--name-only", baseline.head], signal))
+          : (await git(root, ["ls-tree", "-r", "-z", baseline.head], signal))
               .toString()
               .split("\0")
-              .filter(Boolean);
+              .filter(Boolean)
+              .map((line) => [line.slice(line.indexOf("\t") + 1), line.slice(0, 6)] as const),
+      );
+      const tracked = [...modes.keys()];
       const current = (await git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], signal))
         .toString()
         .split("\0")
@@ -278,6 +284,16 @@ export class Changes {
             handled = path;
             continue;
           }
+          const mode = await this.#modeChange(root, path, modes.get(path));
+          if (change === undefined && mode !== undefined)
+            files.push({
+              path,
+              status: "M",
+              patch: "",
+              revision: "",
+              reviewed: false,
+              problem: `Only its file mode changed (${mode}). Changes compares text, so review or undo the mode in a terminal.`,
+            });
           if (change !== undefined) {
             budget -= Buffer.byteLength(change.patch);
             // The first change of a scan is always kept, so a continuation makes progress.
@@ -294,6 +310,7 @@ export class Changes {
               patch,
               revision,
               reviewed: reviews.some((row) => row.path === path && row.revision === revision),
+              ...(mode === undefined ? {} : { mode }),
             });
           }
           handled = path;
@@ -331,6 +348,14 @@ export class Changes {
     } finally {
       this.#active--;
     }
+  }
+  /** How a tracked regular file's executable bit moved from its recorded Git mode, if it did. */
+  async #modeChange(root: string, path: string, recorded: string | undefined): Promise<string | undefined> {
+    if (recorded !== "100644" && recorded !== "100755") return undefined;
+    const info = await lstat(join(root, path)).catch(() => undefined);
+    if (info === undefined || !info.isFile()) return undefined;
+    const now = (info.mode & 0o111) === 0 ? "100644" : "100755";
+    return now === recorded ? undefined : `${recorded} → ${now}`;
   }
   /** One file against the baseline, or undefined when its bytes match. Throws when it cannot be shown as text. */
   async #inspect(root: string, head: string | null, path: string, tracked: boolean, signal: AbortSignal) {
