@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 
@@ -23,4 +24,26 @@ export function gnuTimeout(): string {
       }
     });
   return found ?? "timeout";
+}
+
+/**
+ * A GNU coreutils program on PATH: under its own name where that is GNU's, else Homebrew's `g`-prefixed one. macOS's
+ * own `sync` and `mv` lack the GNU options, so each candidate must report itself as GNU coreutils.
+ */
+export function gnuCoreutil(name: "sync" | "mv"): string | undefined {
+  return [name, `g${name}`]
+    .flatMap((candidate) =>
+      (process.env.PATH ?? "").split(delimiter).flatMap((dir) => (isAbsolute(dir) ? [join(dir, candidate)] : [])),
+    )
+    .find((path) => {
+      try {
+        return execFileSync(path, ["--version"], {
+          encoding: "utf8",
+          timeout: 2000,
+          stdio: ["ignore", "pipe", "ignore"],
+        }).includes("GNU coreutils");
+      } catch {
+        return false;
+      }
+    });
 }
