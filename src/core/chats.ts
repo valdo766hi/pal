@@ -285,8 +285,7 @@ export class ChatService {
 
   /**
    * Also reconciles a crash after a chat/project tombstone was committed but before its abort completed, and settles
-   * the deleted chats' unfinished inputs, so none is left holding back a release. A chat with an admission in progress
-   * is left to that admission, which settles its input when it finds the chat deleted.
+   * the deleted chats' unfinished inputs, so none is left holding back a release.
    */
   async abortDeleted(context: Context): Promise<void> {
     const rows = await this.#guard((db) =>
@@ -298,9 +297,19 @@ export class ChatService {
       const conversation = await this.#options.harness.conversation(row.conversation_id, context);
       await conversation?.abort(context, { background: true });
     }
+    await this.#settleDeletedInputs(context);
+  }
+
+  /**
+   * Settle the unfinished inputs of deleted chats, or of one deleted chat. A chat with work in turn (an admission, a
+   * retry or a settings change) is left to that work: the last of it to end settles them.
+   */
+  async #settleDeletedInputs(context: Context, chatId?: string): Promise<void> {
     const inputs = await this.#guard((db) =>
       db.all<{ chat_id: string; request_id: string; conversation_id: ConversationId | null }>(
-        "SELECT a.chat_id, a.request_id, c.conversation_id FROM pal_admissions a JOIN pal_chats c ON c.id = a.chat_id WHERE a.state = 'admitting' AND c.deleted_at IS NOT NULL",
+        "SELECT a.chat_id, a.request_id, c.conversation_id FROM pal_admissions a JOIN pal_chats c ON c.id = a.chat_id WHERE a.state = 'admitting' AND c.deleted_at IS NOT NULL AND (? IS NULL OR a.chat_id = ?)",
+        chatId ?? null,
+        chatId ?? null,
       ),
     );
     for (const input of inputs)
@@ -379,7 +388,7 @@ export class ChatService {
     selection: { model: ModelRef; thinkingLevel: ModelThinkingLevel; expected?: string },
     context: Context,
   ): Promise<string> {
-    return this.#withConfiguration(chatId, async () => {
+    return this.#withConfiguration(chatId, context, async () => {
       const chat = await this.get(chatId);
       const conversation =
         chat === undefined ? undefined : await this.#options.harness.conversation(chat.conversationId, context);
@@ -414,13 +423,13 @@ export class ChatService {
   }
 
   /** Run a change to the chat's settings in turn with its admissions, so none is admitted halfway through it. */
-  change<T>(chatId: string, work: () => Promise<T>): Promise<T> {
-    return this.#withConfiguration(chatId, work);
+  change<T>(chatId: string, work: () => Promise<T>, context: Context): Promise<T> {
+    return this.#withConfiguration(chatId, context, work);
   }
 
   /** Admit one input; repeating a request ID with the same body returns the same submission. */
   async submit(chatId: string, requestId: unknown, body: unknown, context: Context): Promise<Admission> {
-    return this.#withConfiguration(chatId, () => this.#submit(chatId, requestId, body, context));
+    return this.#withConfiguration(chatId, context, () => this.#submit(chatId, requestId, body, context));
   }
 
   /** What became of one input request: undefined if Pal never recorded it, so its sender may safely send it again. */
@@ -440,7 +449,7 @@ export class ChatService {
 
   /** Admit a blocked input again with its recorded body, in turn with the chat's other admissions. */
   async retry(chatId: string, requestId: string, context: Context): Promise<Admission> {
-    return this.#withConfiguration(chatId, async () => {
+    return this.#withConfiguration(chatId, context, async () => {
       const row = await this.#recorded(chatId, requestId);
       if (row.submission_id !== null) return { chatId, requestId, submissionId: row.submission_id };
       if (row.state === "withdrawn") throw new RequestConflict(`request ${requestId} was withdrawn`);
@@ -450,7 +459,7 @@ export class ChatService {
 
   /** Settle a blocked input as never sent, so the chat's later inputs can proceed. One Pi already admitted is kept. */
   async withdraw(chatId: string, requestId: string, context: Context): Promise<void> {
-    return this.#withConfiguration(chatId, async () => {
+    return this.#withConfiguration(chatId, context, async () => {
       const row = await this.#recorded(chatId, requestId);
       if (row.state === "withdrawn") return;
       const chat = await this.get(chatId);
@@ -484,14 +493,19 @@ export class ChatService {
     return row;
   }
 
-  async #withConfiguration<T>(chatId: string, work: () => Promise<T>): Promise<T> {
+  async #withConfiguration<T>(chatId: string, context: Context, work: () => Promise<T>): Promise<T> {
     const previous = this.#configurations.get(chatId) ?? Promise.resolve();
     const job = previous.catch(() => {}).then(work);
     this.#configurations.set(chatId, job);
     try {
       return await job;
     } finally {
-      if (this.#configurations.get(chatId) === job) this.#configurations.delete(chatId);
+      if (this.#configurations.get(chatId) === job) {
+        this.#configurations.delete(chatId);
+        // A deletion meanwhile left this chat's inputs to its work in turn, however that work ended. Once admission
+        // has stopped, restarting reconciles them instead.
+        if (!this.#stopped) await this.#settleDeletedInputs(context, chatId);
+      }
     }
   }
 

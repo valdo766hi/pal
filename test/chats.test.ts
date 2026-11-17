@@ -339,6 +339,41 @@ describe("chats", () => {
     },
   );
 
+  it.each(["chat", "project"] as const)(
+    "settles an input whose attachment read fails after its %s was deleted mid-admission",
+    async (removed) => {
+      const root = await tempDir();
+      const { store, chats, uploads, harness } = await open(root);
+      const chat = await chats.createChat("held-delete-chat", { projectId: "project-1" }, context);
+      const upload = await uploads.admit("project-1", { name: "late.txt", size: 5, type: "text/plain" });
+      await uploads.receive(upload.id, Readable.from([Buffer.from("bytes")]));
+      const reading = Promise.withResolvers<undefined>();
+      const release = Promise.withResolvers<undefined>();
+      const content = uploads.content.bind(uploads);
+      uploads.content = async (...args) => {
+        reading.resolve(undefined);
+        await release.promise;
+        return content(...args);
+      };
+      const sending = chats.submit(chat.id, "held-delete-input", { text: "hi", attachments: [upload.id] }, context);
+      sending.catch(() => {});
+      await reading.promise;
+      await rm(join(root, "uploads"), { recursive: true, force: true });
+      if (removed === "chat") await chats.remove(chat.id, context);
+      else {
+        await store.database.run("UPDATE pal_chats SET deleted_at = ? WHERE project_id = 'project-1'", Date.now());
+        await chats.abortDeleted(context);
+      }
+      release.resolve(undefined);
+      await expect(sending).rejects.toThrow();
+      await harness.waitForIdle(context);
+      expect(await store.database.all("SELECT state, blocked FROM pal_admissions")).toEqual([
+        { state: "withdrawn", blocked: null },
+      ]);
+      expect(chats.stopped).toBe(false);
+    },
+  );
+
   it("stops admission when Pal's write fails, before anything reaches Pi", async () => {
     const { store, chats, userMessages } = await open(await tempDir());
     const chat = await chats.createChat("chat-request-1", { projectId: "project-1" }, context);
