@@ -3,7 +3,8 @@
 // stream-json mode. Like the real CLI, a request process starts the MCP servers in `--mcp-config` and lists their
 // tools, merges `CLAUDE_CODE_EXTRA_BODY` from `--settings` into each request, adds a reminder to the user message,
 // sends it to `ANTHROPIC_BASE_URL` (Pal's relay) with its own login, retries once after a 5xx, streams the reply and
-// calls the MCP tool a reply asks for. It reads its behaviour from `fake-claude.json` beside it, because Pal starts
+// calls the MCP tool a reply asks for. A user message saying "stall" is never sent, like a turn stopped before its
+// request. It reads its behaviour from `fake-claude.json` beside it, because Pal starts
 // it with an allowlisted environment, and appends what it saw (PID, mode, environment names, whether a planted
 // secret leaked, the tool inventory and request attempts) to `fake-claude.log`.
 import { spawn } from "node:child_process";
@@ -136,6 +137,10 @@ for await (const line of readline.createInterface({ input: process.stdin, crlfDe
   history.push(frame.message);
   if (frame.shouldQuery === false) {
     console.log(JSON.stringify({ type: "result", num_turns: 0, ...echoUuid(frame) }));
+    continue;
+  }
+  if (JSON.stringify(frame.message.content).includes("stall")) {
+    log({ stalled: true });
     continue;
   }
   const latest = { ...frame.message, content: [reminder, ...frame.message.content] };
