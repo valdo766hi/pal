@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { openPal } from "../src/core/app.ts";
 import { backupDataRoot, inspectBackup, restoreBackup } from "../src/core/backup.ts";
@@ -290,6 +290,67 @@ describe("stopped-state backup and restore", () => {
     }).toEqual({ claims: 1, enabled: false, state: "paused", admissions: 0 });
     expect(schedule?.reason).toContain(request);
     expect(schedule?.history[0]).toMatchObject({ kind: "paused", request });
+  });
+
+  it("resumes a saved input's read of its restored managed workspace", async () => {
+    const fixture = await installation();
+    const faux = fauxProvider();
+    const model = faux.getModel();
+    const stopped = new Error("stopped after recording the input");
+    const pal = await openPal(
+      {
+        dataRoot: fixture.dataRoot,
+        installRoot: fixture.installRoot,
+        admissionBarrier: (point) => {
+          if (point === "input-recorded") throw stopped;
+        },
+      },
+      context,
+    );
+    try {
+      (pal.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+      await pal.chats.configure(
+        fixture.local.id,
+        { model: { provider: model.provider, modelId: model.id }, thinkingLevel: "off" },
+        context,
+      );
+      // Recorded with its folder scope, as a crash before Pi took it would leave it.
+      await expect(
+        pal.chats.submit(fixture.local.id, "restore-read", { text: "Read the notes" }, context),
+      ).rejects.toBe(stopped);
+    } finally {
+      await pal.close();
+    }
+    const backup = join(fixture.root, "input-backup");
+    await backupDataRoot({
+      dataRoot: fixture.dataRoot,
+      output: backup,
+      version: "test",
+      includeCredentialKey: true,
+      includeBrowserProfiles: false,
+    });
+    await rename(fixture.dataRoot, join(fixture.root, "data-before"));
+    await restoreBackup(backup, fixture.dataRoot);
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("codemode", { code: 'return await tools.files_read({path:"notes.md"});' }), {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("done"),
+    ]);
+    const restored = await openPal({ dataRoot: fixture.dataRoot, installRoot: fixture.installRoot }, context);
+    cleanups.push(() => restored.close());
+    (restored.models as ReturnType<typeof createModels>).setProvider(faux.provider);
+    const conversation = await restored.harness.conversation(fixture.local.conversationId, context);
+    await conversation?.waitForIdle(context);
+    const results = ((await conversation?.context(context))?.messages ?? []).flatMap((message) =>
+      message.role === "toolResult"
+        ? message.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
+        : [],
+    );
+    expect(results.join("\n")).toContain("managed bytes");
+    expect(
+      await restored.store.database.get("SELECT state FROM pal_admissions WHERE request_id = 'restore-read'"),
+    ).toEqual({ state: "admitted" });
   });
 
   it("refuses a running store, an existing destination and a different destination", async () => {

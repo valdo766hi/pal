@@ -130,6 +130,13 @@ const IDENTITY_DOCUMENTS = [
     select: "SELECT rowid AS id, source AS value FROM pal_memory_versions",
     update: "UPDATE pal_memory_versions SET source = ? WHERE rowid = ?",
   },
+  {
+    // An input's frozen scope; its reference and workspace entries are IDs, not identities.
+    table: "pal_admissions",
+    fields: ["primary"],
+    select: "SELECT rowid AS id, folder_scope AS value FROM pal_admissions WHERE folder_scope IS NOT NULL",
+    update: "UPDATE pal_admissions SET folder_scope = ? WHERE rowid = ?",
+  },
 ] as const;
 const UNFINISHED = [
   ["tasks", "pi_tasks", "SELECT count(*) AS n FROM pi_tasks WHERE status <> 'terminal'"],
