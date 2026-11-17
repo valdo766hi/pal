@@ -607,6 +607,34 @@ describe("drafts of deleted chats", () => {
   }, 180_000);
 });
 
+describe("long chat history", () => {
+  it.each([1440, 390])(
+    "loads earlier messages on request beyond the first page at %s px",
+    async (width) => {
+      const { pal, page, base, saved, errors } = await setup(width);
+      const conversation = await pal.harness.conversation(saved.conversationId, context);
+      if (conversation === undefined) throw new Error("missing conversation");
+      for (let index = 0; index < 1100; index++)
+        await conversation.submit(
+          { type: "write", entry: { kind: "pi.assistant", model: [fauxAssistantMessage(`Old row ${index}`)] } },
+          context,
+        );
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      await page.getByText("Old row 1099", { exact: true }).waitFor();
+      const more = page.getByRole("button", { name: "Show earlier messages", exact: true });
+      await more.waitFor();
+      expect(await page.getByText("Old row 0", { exact: true }).count()).toBe(0);
+      await screenshot(page, `older-history-${width}`);
+      await more.click();
+      await page.getByText("Old row 0", { exact: true }).waitFor({ state: "attached" });
+      await more.waitFor({ state: "detached" });
+      expect(await page.getByText(/^Old row \d+$/).count()).toBe(1100);
+      expect(errors).toEqual([]);
+    },
+    120_000,
+  );
+});
+
 describe("refused attachments", () => {
   it("lets a send Pal refused for a missing or unfinished attachment be corrected and sent", async () => {
     const { pal, page, base, saved, errors } = await setup(1440);

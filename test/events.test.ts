@@ -246,7 +246,7 @@ describe("chat event streams", () => {
     await expect.poll(() => inFlight(), { timeout: 5_000 }).toBe(0);
   });
 
-  it("resends a snapshot with every entry once a backlog outgrows the view's window", async () => {
+  it("resends a bounded snapshot once a backlog outgrows the window, and older pages fill the rest exactly", async () => {
     const { pal, base, chat } = await setup();
     const conversation = await pal.harness.conversation(chat.conversationId, context);
     if (conversation === undefined) throw new Error("missing conversation");
@@ -277,14 +277,19 @@ describe("chat event streams", () => {
     let view: View | undefined;
     let codec = decoder();
     let snapshots = 0;
+    let older: number | null = null;
     let event = "";
     for await (const line of createInterface({ input, crlfDelay: Infinity })) {
       if (line.startsWith("event: ")) event = line.slice("event: ".length);
       if (!line.startsWith("data: ")) continue;
       const data = line.slice("data: ".length);
       if (event === "snapshot") {
-        const snapshot = JSON.parse(data) as { view: View; earlier: Received[] };
+        const snapshot = JSON.parse(data) as { view: View; earlier: Received[]; older: number | null };
+        // A snapshot replaces what the browser had, and carries at most one bounded page of earlier history.
+        expect(JSON.stringify(snapshot.earlier).length).toBeLessThanOrEqual(4 * 1024 * 1024 + 1024);
+        entries.clear();
         for (const entry of snapshot.earlier) entries.set(entry.id, entry);
+        older = snapshot.older;
         view = snapshot.view;
         codec = decoder();
         snapshots++;
@@ -296,6 +301,20 @@ describe("chat event streams", () => {
     }
     input.destroy();
     expect(snapshots).toBe(2);
+    expect(older).not.toBeNull();
+    for (let pages = 0; older !== null && pages < 50; pages++) {
+      const response = await fetch(`${base}/api/chats/${chat.id}/history?before=${older}`, {
+        headers: { cookie: `pal_session=${token}` },
+      });
+      const page = (await response.json()) as { entries: Received[]; older: number | null };
+      for (const entry of page.entries) {
+        expect(entries.has(entry.id)).toBe(false);
+        expect(entry.id).toBeLessThan(older);
+        entries.set(entry.id, entry);
+      }
+      older = page.older;
+    }
+    expect(older).toBeNull();
     const received = [...entries.values()].sort((a, b) => a.id - b.id);
     expect(received.flatMap((entry) => (entry.data?.n === undefined ? [] : [entry.data.n]))).toEqual(
       Array.from({ length: 120 }, (_, n) => n),
@@ -324,6 +343,43 @@ class FakeEventSource {
 }
 
 describe("web projection of the conversation view", () => {
+  it("prepends older history once, and drops a page a newer snapshot made stale", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const pages = new Map<number, Promise<unknown>>();
+    const fetched: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      fetched.push(url);
+      const before = Number(new URL(url, "http://pal.test").searchParams.get("before"));
+      return { ok: true, json: () => pages.get(before) };
+    });
+    const stream = new ChatStream("chat-one");
+    const source = FakeEventSource.last as FakeEventSource;
+    const view = (ids: number[], before: number) => ({
+      conversation: { id: 1 },
+      entries: ids.map((id) => ({ id, kind: "pi.user" })),
+      before,
+      docs: { "pi.inbox": { items: [] } },
+    });
+    const page = (ids: number[]) => ids.map((id) => ({ id, kind: "pi.user" }));
+    source.emit("snapshot", { view: view([5, 6], 4), earlier: page([3, 4]), older: 3 });
+    pages.set(3, Promise.resolve({ entries: page([1, 2]), older: null }));
+    await stream.loadOlder();
+    expect(stream.entries.map((entry) => entry.id)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(stream.older).toBeNull();
+    await stream.loadOlder();
+    expect(fetched).toEqual(["/api/chats/chat-one/history?before=3"]);
+
+    const late = Promise.withResolvers<unknown>();
+    source.emit("snapshot", { view: view([7, 8], 6), earlier: page([5, 6]), older: 5 });
+    pages.set(5, late.promise);
+    const loading = stream.loadOlder();
+    source.emit("snapshot", { view: view([8, 9], 7), earlier: page([7]), older: 7 });
+    late.resolve({ entries: page([1, 2, 3, 4]), older: null });
+    await loading;
+    expect(stream.entries.map((entry) => entry.id)).toEqual([7, 8, 9]);
+    expect(stream.older).toBe(7);
+  });
+
   type View = { conversation: { id: number }; entries: { id: number; kind: string }[]; before?: number; docs: Docs };
   type Docs = Record<string, Record<string, unknown>>;
   const view = (docs: Docs = {}, entries: View["entries"] = [], before?: number): View => ({

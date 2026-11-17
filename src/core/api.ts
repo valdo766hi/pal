@@ -47,7 +47,7 @@ import { FolderError } from "./projects.ts";
 import { InvalidRequest, RequestConflict, validate } from "./requests.ts";
 import { UploadBody, UploadError } from "./uploads.ts";
 import { TerminalSize } from "./terminals.ts";
-import { history } from "./transcript.ts";
+import { historyPage } from "./transcript.ts";
 import type { ReleaseRpc } from "./release-rpc.ts";
 import { ReleaseDigest } from "./release-state.ts";
 import type { ScheduleNotice, ScheduleView } from "./schedules.ts";
@@ -917,6 +917,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         );
         return send(200, { chat: await describeChat(chat), model, provider, effort, configuration });
       }
+      if (action === "history" && path.length === 3 && method === "GET") {
+        const before = Number(url.searchParams.get("before"));
+        if (!Number.isSafeInteger(before) || before < 2) throw new InvalidRequest("before must be an entry ID");
+        return send(200, await historyPage(conversation, context, (before - 1) as EntryId));
+      }
       if (action === "events" && method === "GET")
         return observe(response, chat.id, chat.conversationId, cookie(request, SESSION_COOKIE));
     }
@@ -931,7 +936,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
   }
 
   /**
-   * Server-sent events: a `snapshot` of the conversation's view with every entry before its window, then each
+   * Server-sent events: a `snapshot` of the conversation's view with one bounded page of the history before its window
+   * (`older` continues it through the `history` route), then each
    * `change` to that view as Chord ops, encoded from the latest snapshot on, until the client leaves, the owner session
    * ends or expires, or the stream closes. A window that no longer continues what the client has, after a backlog,
    * arrives as a new snapshot. The chat's command approvals arrive as whole `approvals` views, first with the snapshot
@@ -1009,8 +1015,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     const snapshot = async (view: ConversationView) => {
       encoding = encoder();
       newest = view.entries.at(-1)?.id ?? view.before;
-      const earlier = view.before === undefined ? [] : await history(conversation, context, view.before);
-      await write("snapshot", { view, earlier });
+      const { entries: earlier, older } =
+        view.before === undefined
+          ? { entries: [], older: null }
+          : await historyPage(conversation, context, view.before);
+      await write("snapshot", { view, earlier, older });
     };
     await snapshot(watch.value);
     if (scope.signal.aborted) return;

@@ -303,6 +303,15 @@
     return { text: helpersPending ? "checking status" : "status unavailable", failed: true };
   }
   const items = $derived(historyItems.concat(build([], stream?.partial, [])));
+  let olderError: string | undefined = $state();
+  async function showOlder() {
+    olderError = undefined;
+    try {
+      await stream?.loadOlder();
+    } catch (failure) {
+      olderError = failure instanceof Error ? failure.message : String(failure);
+    }
+  }
   /**
    * Failed model attempts Pi retried: a later attempt answered in the same turn, or the running turn is retrying. Kept
    * as a string so the history's rows are rebuilt only when this changes, not on every streamed update.
@@ -1107,6 +1116,14 @@
           <button class="b sm" disabled={helpersPending} onclick={() => helpersRefresh++}>Retry helper status</button>
         </div>
       {/if}
+      {#if stream?.older != null}
+        <div class="older">
+          <button class="b sm" disabled={stream.loadingOlder} onclick={showOlder}
+            >{stream.loadingOlder ? "Loading earlier messages…" : "Show earlier messages"}</button
+          >
+        </div>
+      {/if}
+      {#if olderError !== undefined}<div class="callout er" role="alert">{olderError}</div>{/if}
       {#if stream?.loaded && items.length === 0}
         <div class="empty">
           <h2>Start the conversation</h2>
@@ -1652,6 +1669,10 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column-reverse;
+  }
+  .older {
+    display: flex;
+    justify-content: center;
   }
   .transcript {
     width: 100%;

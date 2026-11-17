@@ -79,8 +79,11 @@ export type Entry = {
   };
 };
 
-/** What the server sends first, and again whenever its view no longer continues what the client has. */
-export type Snapshot = { view: ConversationView; earlier: readonly EntryRecord[] };
+/**
+ * What the server sends first, and again whenever its view no longer continues what the client has: the view and one
+ * bounded page of the history before it, with `older` marking where the next page ends when more remains.
+ */
+export type Snapshot = { view: ConversationView; earlier: readonly EntryRecord[]; older?: number | null };
 
 const NONE: readonly never[] = Object.freeze([]);
 /** A run that ended this way already shows: the owner stopped it, a reset began a new context, or the answer is an error. */
@@ -110,11 +113,17 @@ export class ChatStream {
   /** Whether Auto can be chosen, as of the last approvals view. */
   auto: AutoStatus | undefined = $state.raw();
   approvals: readonly CommandApproval[] = $state([]);
+  /** The oldest entry the client has while older ones remain on the server; `loadOlder` fetches them. */
+  older: number | null = $state(null);
+  loadingOlder = $state(false);
+  readonly #chatId: string;
+  #snapshots = 0;
   #source: EventSource | undefined;
   #view: ConversationView | undefined;
   #decoder: Decoder = decoder();
 
   constructor(chatId: string) {
+    this.#chatId = chatId;
     const source = new EventSource(`/api/chats/${chatId}/events`);
     this.#source = source;
     function listen<T>(name: string, apply: (data: T) => void) {
@@ -152,9 +161,11 @@ export class ChatStream {
   }
 
   /** Snapshots are authoritative: whatever one leaves out is cleared. */
-  #reset({ view, earlier }: Snapshot): void {
+  #reset({ view, earlier, older }: Snapshot): void {
     this.#decoder = decoder();
     this.#view = view;
+    this.#snapshots++;
+    this.older = older ?? null;
     // SAFETY: Pi entries are read through Pal's narrower view: `model` holds Pi's own messages, and every `data` field the
     // view reads is checked against the entry kind that writes it (pal.shell, pal.mcp, pal.helper, pal.user) first.
     this.entries = [...earlier, ...view.entries] as unknown as Entry[];
@@ -162,6 +173,25 @@ export class ChatStream {
     this.loaded = true;
     this.connected = true;
     this.problem = undefined;
+  }
+
+  /** Prepend the next page of older history; a snapshot arriving meanwhile replaces what this page would continue. */
+  async loadOlder(): Promise<void> {
+    const before = this.older;
+    if (before === null || this.loadingOlder) return;
+    const snapshot = this.#snapshots;
+    this.loadingOlder = true;
+    try {
+      const response = await fetch(`/api/chats/${this.#chatId}/history?before=${before}`);
+      if (!response.ok) throw new Error(`Pal couldn't load earlier messages (HTTP ${response.status}).`);
+      const page = (await response.json()) as { entries: EntryRecord[]; older: number | null };
+      if (snapshot !== this.#snapshots || this.older !== before) return;
+      // SAFETY: as in #reset.
+      this.entries = [...(page.entries as unknown as Entry[]), ...this.entries];
+      this.older = page.older;
+    } finally {
+      this.loadingOlder = false;
+    }
   }
 
   /** A change to the view, as Chord ops; a malformed one leaves the view as it was until the next snapshot. */
