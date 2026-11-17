@@ -566,6 +566,40 @@ describe("saved chat settings", () => {
   });
 });
 
+describe("refused attachments", () => {
+  it("lets a send Pal refused for a missing or unfinished attachment be corrected and sent", async () => {
+    const { pal, page, base, saved, errors } = await setup(1440);
+    const admitted = () =>
+      pal.store.database.all<{ state: string }>("SELECT state FROM pal_admissions WHERE chat_id = ?", saved.id);
+    const message = page.getByLabel("Message", { exact: true });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
+    // As a draft can hold after a restore: an attachment Pal no longer has, or one not finished again.
+    for (const [name, status, change] of [
+      ["gone.txt", 404, "DELETE FROM pal_uploads WHERE id = ?"],
+      ["late.txt", 409, "UPDATE pal_uploads SET state = 'receiving', sha256 = NULL WHERE id = ?"],
+    ] as const) {
+      const before = (await admitted()).length;
+      await message.fill(`Send with ${name}`);
+      await pal.store.database.run(change, await attach(page, name));
+      const refused = admission(page, saved.id);
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      expect((await refused).status()).toBe(status);
+      await page.getByRole("alert").waitFor();
+      expect(await admitted()).toHaveLength(before);
+      expect(await message.inputValue()).toBe(`Send with ${name}`);
+      await page.getByRole("button", { name: `Remove ${name}`, exact: true }).click();
+      const sent = admission(page, saved.id);
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      expect((await sent).status()).toBe(200);
+      await expect.poll(() => message.inputValue()).toBe("");
+    }
+    expect(await admitted()).toEqual([{ state: "admitted" }, { state: "admitted" }]);
+    expect(await page.getByRole("button", { name: "Retry saved send", exact: true }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  });
+});
+
 function admission(page: Page, id: string) {
   return page.waitForResponse(
     (reply) => new URL(reply.url()).pathname === `/api/chats/${id}/inputs` && reply.request().method() === "POST",

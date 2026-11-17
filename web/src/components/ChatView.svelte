@@ -566,6 +566,16 @@
       } else if (failure instanceof ApiError && failure.code === "input_blocked") {
         // Pal keeps this input as blocked; the chat's blocked notice offers Retry and Withdraw.
         void refreshProjects();
+      } else if (
+        failure instanceof ApiError &&
+        (failure.code === "upload_not_found" || failure.code === "upload_not_ready")
+      ) {
+        // Refused before Pal recorded it, so nothing was sent: the draft stays editable to remove or replace the file.
+        if (writing.pending !== undefined) writing.reject(writing.pending);
+        writing.error =
+          failure.code === "upload_not_found"
+            ? "An attached file is no longer available. Remove it, then send again."
+            : failure.message;
       } else if (failure instanceof ApiError && failure.code === "input_held") {
         if (writing.pending !== undefined) writing.reject(writing.pending);
         writing.error = failure.message;
