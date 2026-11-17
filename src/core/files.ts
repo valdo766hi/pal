@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isUtf8 } from "node:buffer";
 import { constants } from "node:fs";
-import { access as fsAccess, lstat, open, readdir, realpath, stat } from "node:fs/promises";
+import { access as fsAccess, lstat, open, opendir, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { WorkspaceLocks } from "./execution.ts";
 import { directoryIdentity } from "./workspace-root.ts";
@@ -367,10 +367,20 @@ export function fileTools(options: {
           const found: string[] = [];
           const queue = [root];
           let visited = 0;
-          while (queue.length > 0 && visited < MAX_VISITED && found.length < MAX_ENTRIES) {
+          let stopped = "";
+          // Entries are read one at a time, so neither limit is passed inside a single wide folder.
+          search: while (queue.length > 0) {
             const folder = queue.shift() as string;
-            const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);
-            for (const entry of entries) {
+            const entries = await opendir(folder).catch(() => []);
+            for await (const entry of entries) {
+              context.abortSignal?.throwIfAborted();
+              if (visited >= MAX_VISITED || found.length >= MAX_ENTRIES) {
+                stopped =
+                  visited >= MAX_VISITED
+                    ? `\n[stopped after ${MAX_VISITED} entries; narrow the query]`
+                    : `\n[showing the first ${MAX_ENTRIES} matches; narrow the query]`;
+                break search;
+              }
               visited += 1;
               const path = join(folder, entry.name);
               if (isProtected(options.deny, root, path)) continue;
@@ -380,8 +390,7 @@ export function fileTools(options: {
             }
           }
           await lease.check();
-          const partial = visited >= MAX_VISITED ? `\n[stopped after ${MAX_VISITED} entries; narrow the query]` : "";
-          return text(`${found.join("\n") || "No matches."}${partial}`);
+          return text(`${found.join("\n") || "No matches."}${stopped}`);
         },
       }),
     ],
