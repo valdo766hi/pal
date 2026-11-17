@@ -683,16 +683,34 @@ describe("compiled capability contract", () => {
   it("keeps a plugin's SQL to its declared tables and its requests to its own ID", async () => {
     const f = await fixture([]);
     let sql: SqliteDatabase | undefined;
+    let received: object = {};
     const scoped: CompiledCapability = {
       manifest: { ...exampleCapability.manifest, storage: { owns: ["pal_example_notes"], reads: ["pal_projects"] } },
       open: (services) => {
         sql = services.sql;
+        received = services;
         return exampleCapability.open(services);
       },
     };
     const opened = await CompiledCapabilities.open([scoped], host(f.pal));
     cleanups.push(() => opened.close());
     if (sql === undefined) throw new Error("missing scoped SQL");
+    // Narrow services only: never the kernel's database, credential store, other plugins' options or Pal itself.
+    expect(Object.keys(received).sort()).toEqual([
+      "authorize",
+      "deny",
+      "endpoint",
+      "folders",
+      "now",
+      "options",
+      "privateFiles",
+      "project",
+      "secrets",
+      "settings",
+      "sql",
+      "storage",
+    ]);
+    expect(sql).not.toBe(f.pal.store.database);
     expect(await sql.all("SELECT id FROM pal_projects")).toHaveLength(1);
     await expect(sql.all("SELECT id FROM pal_chats")).rejects.toThrow("no access to pal_chats");
     await expect(sql.run("DELETE FROM pal_projects")).rejects.toThrow("no access to pal_projects");
