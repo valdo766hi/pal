@@ -8,6 +8,7 @@ import type {
   ConversationId,
   ConversationView,
   ConversationWatch,
+  Cursor,
   EntryId,
 } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
@@ -804,10 +805,19 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
             });
         }
       }
-      if (action === "helpers" && path.length === 3 && method === "GET")
+      if (action === "helpers" && path.length === 3 && method === "GET") {
+        const page = await helperViews(
+          pal.harness,
+          pal.store.storage,
+          chat.conversationId,
+          context,
+          helperCursor(url.searchParams.get("after")),
+        );
         return send(200, {
-          helpers: await helperViews(pal.harness, pal.store.storage, chat.conversationId, context),
+          helpers: page.helpers,
+          next: page.next === null ? null : Buffer.from(JSON.stringify(page.next)).toString("base64url"),
         });
+      }
       if (action === "extensions" && path.length === 3 && method === "GET")
         return send(200, {
           release: pal.extensions.release,
@@ -1056,6 +1066,18 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       }
     }
   };
+}
+
+/** A helper page's continuation, as the previous page returned it. */
+function helperCursor(after: string | null): Cursor | undefined {
+  if (after === null) return undefined;
+  try {
+    const cursor: unknown = JSON.parse(Buffer.from(after, "base64url").toString("utf8"));
+    if (typeof cursor === "object" && cursor !== null && !Array.isArray(cursor)) return cursor as Cursor;
+  } catch {
+    // Reported below.
+  }
+  throw new InvalidRequest("invalid helper page cursor");
 }
 
 function classify(error: unknown): [number, string] {

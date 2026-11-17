@@ -269,10 +269,19 @@
     let current = true;
     helpersPending = true;
     helpersError = undefined;
-    api.helpers(id).then(
+    // Every page, each bounded, so a chat's later helpers keep their status.
+    (async () => {
+      const all: HelperView[] = [];
+      for (let after: string | null | undefined; after !== null;) {
+        const page = await api.helpers(id, after);
+        all.push(...page.helpers);
+        after = page.next ?? null;
+      }
+      return all;
+    })().then(
       (loaded) => {
         if (!current) return;
-        helpers = loaded.helpers;
+        helpers = loaded;
         helpersPending = false;
       },
       (failure) => {

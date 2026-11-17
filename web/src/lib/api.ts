@@ -392,8 +392,11 @@ export const api = {
   withdrawInput: (id: string, requestId: string) =>
     call<{ withdrawn: true }>("POST", `chats/${id}/inputs/${encodeURIComponent(requestId)}/withdraw`),
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
-  helpers: (chat: string) =>
-    call<{ helpers: import("../../../src/core/delegation.ts").HelperView[] }>("GET", `chats/${chat}/helpers`),
+  helpers: (chat: string, after?: string) =>
+    call<{ helpers: import("../../../src/core/delegation.ts").HelperView[]; next: string | null }>(
+      "GET",
+      `chats/${chat}/helpers${after === undefined ? "" : `?after=${encodeURIComponent(after)}`}`,
+    ),
   scheduler: () => call<Scheduler>("GET", "scheduler"),
   setScheduler: (enabled: boolean) => call<Scheduler>("PUT", "scheduler", { enabled }),
   commandTimeout: () => call<{ seconds: number }>("GET", "command-timeout"),
