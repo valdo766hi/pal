@@ -1590,8 +1590,9 @@ async function record(url, w, h, { steps = [], name = "", entry = flags.has("ent
   const video = `record${name ? "-" + name : ""}.mp4`;
   const motion = `motion${name ? "-" + name : ""}`;
   const frames = [];
-  const dir = join(out, name ? `frames-${name}` : "frames");
-  mkdirSync(dir, { recursive: true }); temporaryFrames.add(dir);
+  // Pal: a fresh folder this run owns, so cleanup never removes frames that were already in --out.
+  mkdirSync(out, { recursive: true });
+  const dir = mkdtempSync(join(out, name ? `frames-${name}-` : "frames-")); temporaryFrames.add(dir);
   let identifier, actionStart, actionEnd, beforeAction, painted = 0;
   const lastAction = steps.findLastIndex((s) => ["click", "dblclick", "drag", "type", "fill", "select", "key"].includes(s.action));
   const captureFrame = async (label) => {

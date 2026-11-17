@@ -46,6 +46,8 @@ stdenv.mkDerivation {
       (root + "/web")
       (root + "/test")
       (root + "/scripts")
+      # The design skill's recorder, which the browser tests run.
+      (root + "/.agents/skills/oil-ui/scripts")
     ];
   };
 
