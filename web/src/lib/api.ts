@@ -203,10 +203,13 @@ export const api = {
       mode,
       tools,
     }),
-  changes: (id: string, scope: ReviewScope = "normal", workspace?: string) =>
+  changes: (id: string, scope: ReviewScope = "normal", workspace?: string, after?: string) =>
     call<import("../../../src/core/changes.ts").ChangeSet>(
       "GET",
-      inWorkspace(`projects/${id}/changes?scope=${scope}`, workspace),
+      inWorkspace(
+        `projects/${id}/changes?scope=${scope}${after === undefined ? "" : `&after=${encodeURIComponent(after)}`}`,
+        workspace,
+      ),
     ),
   context: (id: string) => call<import("../../../src/core/context.ts").ContextInfo>("GET", `chats/${id}/context`),
   workingState: (id: string, signal?: AbortSignal) =>

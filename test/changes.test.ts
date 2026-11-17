@@ -129,6 +129,32 @@ describe("revision-bound Git changes", () => {
     expect((await next.list(project.id, "include-ignored")).comments).toMatchObject([{ id: comment.id }]);
   });
 
+  it("reaches an edit after many unchanged paths and pages through more changes than one scan shows", async () => {
+    const { root, project, changes } = await setup();
+    const many = Array.from({ length: 130 }, (_, index) => `a-${String(index).padStart(3, "0")}.txt`);
+    for (const name of many) await writeFile(join(root, name), "same\n");
+    await writeFile(join(root, "z-target.txt"), "before\n");
+    await git(root, "add", ".");
+    await git(root, "commit", "-qm", "many");
+    const scan = async () => {
+      const pages = [await changes.list(project.id)];
+      for (let next = pages[0]?.next; next != null && pages.length < 10; next = pages.at(-1)?.next)
+        pages.push(await changes.list(project.id, "normal", undefined, next));
+      return pages;
+    };
+    await writeFile(join(root, "z-target.txt"), "after\n");
+    const lone = await scan();
+    expect(lone.flatMap((page) => page.files.map((file) => file.path))).toEqual(["z-target.txt"]);
+    expect(lone.at(-1)).toMatchObject({ next: null, truncated: false });
+
+    for (const name of many) await writeFile(join(root, name), "changed\n");
+    const pages = await scan();
+    expect(pages[0]?.files).toHaveLength(128);
+    expect(pages[0]?.truncated).toBe(true);
+    expect(pages.flatMap((page) => page.files.map((file) => file.path))).toEqual([...many, "z-target.txt"]);
+    expect(pages.at(-1)?.next).toBeNull();
+  });
+
   it("captures before file tools mutate, includes manual dirt and never moves the recorded baseline", async () => {
     const { root, dataRoot, store, projects, project, changes } = await setup();
     const head = (await git(root, "rev-parse", "HEAD")).stdout.trim();

@@ -143,6 +143,33 @@
       if (request === scan) busy = false;
     }
   }
+  /** Add the changes a partial scan did not reach; a moved baseline or head starts the scan over. */
+  async function more() {
+    const previous = changes;
+    if (previous?.next == null) return;
+    const request = ++scan;
+    busy = true;
+    error = undefined;
+    try {
+      const loaded = await api.changes(project.id, scope, workspace?.id, previous.next);
+      if (request !== scan) return;
+      if (loaded.base !== previous.base || loaded.head !== previous.head) return void (await refresh());
+      const before = new Map(previous.comments.map((comment) => [comment.id, comment.outdated]));
+      changes = {
+        ...loaded,
+        files: [...previous.files, ...loaded.files],
+        // Each scan checks only the lines of files it read, so a comment is outdated only if no scan found its line.
+        comments: loaded.comments.map((comment) => ({
+          ...comment,
+          outdated: comment.outdated && (before.get(comment.id) ?? true),
+        })),
+      };
+    } catch (failure) {
+      if (request === scan) error = failure instanceof Error ? failure.message : String(failure);
+    } finally {
+      if (request === scan) busy = false;
+    }
+  }
   function changeScope(checked: boolean) {
     includeIgnored = checked;
     changes = undefined;
@@ -295,9 +322,12 @@
       <button class="b sm" disabled={busy} onclick={moveBaseline}>Review from latest commit</button>
     </div>
   {/if}
-  {#if changes?.truncated}<p class="notice warning">
-      Partial scan: file, byte or time limit reached. Not all changes are shown.
-    </p>{/if}
+  {#if changes?.truncated}
+    <div class="notice warning partial">
+      <p>Partial scan: file, byte or time limit reached. Not all changes are shown.</p>
+      {#if changes.next !== null}<button class="b sm" disabled={busy} onclick={more}>Continue scan</button>{/if}
+    </div>
+  {/if}
   {#if changes === undefined}
     <p class="notice" role="status">{busy ? "Reading changes…" : "Refresh to read changes."}</p>
   {:else if changes.state === "ready" && changes.files.length === 0}
@@ -564,6 +594,16 @@
   }
   .warning {
     color: var(--wa);
+  }
+  .partial {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+  }
+  .partial p {
+    flex: 1 1 220px;
+    margin: 0;
   }
   .moved {
     display: flex;

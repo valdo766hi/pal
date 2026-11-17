@@ -54,6 +54,8 @@ export type ChangeSet = {
   files: Change[];
   comments: ChangeComment[];
   truncated: boolean;
+  /** Where a partial scan stopped: list again with this as `after` for the paths it did not reach, else null. */
+  next: string | null;
   note: string;
 };
 const within = (root: string, path: string) => {
@@ -179,7 +181,12 @@ export class Changes {
       });
     });
   }
-  async list(projectId: string, scope: ReviewScope = "normal", workspaceId?: string): Promise<ChangeSet> {
+  async list(
+    projectId: string,
+    scope: ReviewScope = "normal",
+    workspaceId?: string,
+    after?: string,
+  ): Promise<ChangeSet> {
     if (this.#active >= 2)
       throw new HttpError(409, "changes_busy", "another change scan is in progress; retry shortly");
     this.#active++;
@@ -198,6 +205,7 @@ export class Changes {
           files: [],
           comments: [],
           truncated: false,
+          next: null,
           note: "Git is unavailable or this folder is not a repository root. No baseline or rollback is invented. Use the host terminal to initialize Git explicitly.",
         };
       }
@@ -221,7 +229,7 @@ export class Changes {
               .filter(Boolean)
           : [];
       const names = [...new Set([...tracked, ...current, ...ignored])]
-        .filter((path) => this.#allowed(root, path))
+        .filter((path) => this.#allowed(root, path) && (after === undefined || path > after))
         .sort();
       const reviews = await this.#database.all<{ path: string; revision: string }>(
         "SELECT path, revision FROM pal_change_reviews WHERE scope_id = ?",
@@ -235,44 +243,61 @@ export class Changes {
       const lines = new Map<string, string[]>();
       const files: Change[] = [];
       let budget = 2 * 1024 * 1024;
-      let truncated = names.length > MAX_FILES;
-      const selected = names.slice(0, MAX_FILES);
-      const initiallyHidden = scope === "normal" ? await this.#ignored(root, selected, signal) : new Set<string>();
-      for (const path of selected) {
-        if (initiallyHidden.has(path)) continue;
-        if (signal.aborted) {
-          truncated = true;
-          break;
+      // Paths are inspected in order until enough changes are found or a byte or time limit is reached; the last path
+      // handled is where the next scan continues, so every later path stays reachable.
+      let next: string | null = null;
+      let handled = after ?? "";
+      scan: for (let start = 0; start < names.length; start += MAX_FILES) {
+        const batch = names.slice(start, start + MAX_FILES);
+        const initiallyHidden = scope === "normal" ? await this.#ignored(root, batch, signal) : new Set<string>();
+        for (const path of batch) {
+          if (files.length >= MAX_FILES || signal.aborted) {
+            next = handled;
+            break scan;
+          }
+          if (initiallyHidden.has(path)) {
+            handled = path;
+            continue;
+          }
+          let change;
+          try {
+            change = await this.#inspect(root, baseline.head, path, tracked.includes(path), signal);
+          } catch {
+            if (signal.aborted) {
+              next = handled;
+              break scan;
+            }
+            files.push({
+              path,
+              status: "M",
+              patch: "",
+              revision: "",
+              reviewed: false,
+              problem: "Unavailable: binary, oversized, missing Git object, symlink, or outside the granted folder.",
+            });
+            handled = path;
+            continue;
+          }
+          if (change !== undefined) {
+            budget -= Buffer.byteLength(change.patch);
+            // The first change of a scan is always kept, so a continuation makes progress.
+            if (budget < 0 && files.length > 0) {
+              next = handled;
+              break scan;
+            }
+            const { status, patch, revision } = change;
+            if (commented.has(path) && change.after !== null)
+              lines.set(path, change.after.toString("utf8").split("\n"));
+            files.push({
+              path,
+              status,
+              patch,
+              revision,
+              reviewed: reviews.some((row) => row.path === path && row.revision === revision),
+            });
+          }
+          handled = path;
         }
-        let change;
-        try {
-          change = await this.#inspect(root, baseline.head, path, tracked.includes(path), signal);
-        } catch {
-          files.push({
-            path,
-            status: "M",
-            patch: "",
-            revision: "",
-            reviewed: false,
-            problem: "Unavailable: binary, oversized, missing Git object, symlink, or outside the granted folder.",
-          });
-          continue;
-        }
-        if (change === undefined) continue;
-        budget -= Buffer.byteLength(change.patch);
-        if (budget < 0) {
-          truncated = true;
-          break;
-        }
-        const { status, patch, revision } = change;
-        if (commented.has(path) && change.after !== null) lines.set(path, change.after.toString("utf8").split("\n"));
-        files.push({
-          path,
-          status,
-          patch,
-          revision,
-          reviewed: reviews.some((row) => row.path === path && row.revision === revision),
-        });
       }
       const hidden = await this.#ignored(
         root,
@@ -299,7 +324,8 @@ export class Changes {
             },
           ];
         }),
-        truncated,
+        truncated: next !== null,
+        next,
         note,
       };
     } finally {

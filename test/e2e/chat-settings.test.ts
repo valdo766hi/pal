@@ -1088,6 +1088,40 @@ describe("MCP server form", () => {
   });
 });
 
+describe("Changes scan continuation", () => {
+  it.each([1440, 390])("continues a partial scan to the changes it did not reach at %s px", async (width) => {
+    const { pal, saved, page, base, errors } = await setup(width);
+    const workspace = await pal.workspaces.info(saved.id);
+    if (workspace?.state !== "ready" || workspace.root === null) throw new Error("missing workspace");
+    const root = workspace.root;
+    const git = (...args: string[]) =>
+      runGit(
+        root,
+        ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", ...args],
+        { signal: AbortSignal.timeout(5000) },
+      );
+    const names = Array.from({ length: 130 }, (_, index) => `f-${String(index).padStart(3, "0")}.txt`);
+    await git("init", "-q");
+    for (const name of names) await writeFile(join(root, name), "Base\n");
+    await git("add", ".");
+    await git("commit", "-qm", "Baseline");
+    await pal.changes.capture(root);
+    for (const name of names) await writeFile(join(root, name), "Changed\n");
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+    await page.getByRole("button", { name: "Changes", exact: true }).click();
+    const panel = page.getByRole("complementary", { name: "Workspace panel" });
+    const files = panel.getByRole("list", { name: "Changed files" }).getByRole("listitem");
+    await panel.getByText("Partial scan", { exact: false }).waitFor();
+    expect(await files.count()).toBe(128);
+    await screenshot(page, `changes-partial-${width}`);
+    await panel.getByRole("button", { name: "Continue scan", exact: true }).click();
+    await expect.poll(() => files.count()).toBe(130);
+    expect(await panel.getByText("Partial scan", { exact: false }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  });
+});
+
 async function reviewFixture(width: number) {
   const fixture = await setup(width);
   const { pal, project, saved, page, base } = fixture;

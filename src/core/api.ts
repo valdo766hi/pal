@@ -643,6 +643,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           id,
           validate(ReviewScope, url.searchParams.get("scope") ?? "normal"),
           workspaceQuery(url),
+          url.searchParams.get("after") ?? undefined,
         ),
       );
     }
