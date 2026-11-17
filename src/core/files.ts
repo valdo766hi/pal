@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { access as fsAccess, lstat, open, opendir, readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { WorkspaceLocks } from "./execution.ts";
+import { inside } from "./paths.ts";
 import { directoryIdentity } from "./workspace-root.ts";
 import { writeTextFile } from "./file-write.ts";
 import { FileAccessError, type PrivateFiles } from "./file-policy.ts";
@@ -578,9 +579,4 @@ export async function readFileSnapshot(
   } finally {
     await handle.close();
   }
-}
-
-function inside(root: string, path: string): boolean {
-  const between = relative(root, path);
-  return between === "" || (!between.startsWith("..") && !isAbsolute(between));
 }

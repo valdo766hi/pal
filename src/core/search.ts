@@ -1,10 +1,11 @@
 import { realpath } from "node:fs/promises";
-import { isAbsolute, join, relative } from "node:path";
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { GrepCursor } from "@ff-labs/fff-node";
 import { NativeFinder, type Finder, type FinderFactory } from "./native-finder.ts";
 import { FileAccessError, isProtected, readFileSnapshot, resolveProjectPath } from "./files.ts";
 import type { PrivateFiles } from "./file-policy.ts";
+import { inside } from "./paths.ts";
 
 const MAX_FINDERS = 3;
 const IDLE_MS = 5 * 60_000;
@@ -76,8 +77,7 @@ export class ProjectSearch {
     const index = await this.#index(root);
     const keep = (path: string) => {
       const target = join(root, path);
-      const between = relative(root, target);
-      return !between.startsWith("..") && !isAbsolute(between) && !isProtected(this.#deny, root, target);
+      return inside(root, target) && !isProtected(this.#deny, root, target);
     };
     if (mode === "files") {
       const found = await index.finder.fileSearch(query, { pageSize: PAGE });
@@ -305,6 +305,5 @@ export class ProjectSearch {
 }
 
 function isAncestorOf(ancestor: string, path: string): boolean {
-  const between = relative(ancestor, path);
-  return between === "" || (!between.startsWith("..") && !isAbsolute(between));
+  return inside(ancestor, path);
 }

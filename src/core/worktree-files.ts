@@ -2,9 +2,10 @@ import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readlink, realpath, symlink, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { FileAccessError, readFileSnapshot } from "./files.ts";
 import { runGit, runGitEffect } from "./git.ts";
+import { inside } from "./paths.ts";
 import { directoryIdentity } from "./workspace-root.ts";
 
 const MAX_FILES = 10_000;
@@ -322,9 +323,4 @@ async function syncDirectory(path: string): Promise<void> {
   } finally {
     await handle.close();
   }
-}
-
-function inside(root: string, path: string): boolean {
-  const part = relative(root, path);
-  return part === "" || (part !== ".." && !part.startsWith(`..${sep}`) && !isAbsolute(part));
 }

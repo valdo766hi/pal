@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/chord/context";
 import type { ConversationId, ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
@@ -43,6 +43,17 @@ async function setup(root: "home" | "managed" = "home") {
 }
 
 describe("project file tools", () => {
+  it("treats names starting with two dots as children, inside the project and inside Pal's data", async () => {
+    const { home, dataRoot, run } = await setup();
+    await writeFile(join(home, "..notes"), "dot-dot notes\n");
+    await writeFile(join(dataRoot, "..cache"), "Pal's own bytes\n");
+    expect(await run("files_read", { path: "..notes" })).toContain("dot-dot notes");
+    await expect(run("files_read", { path: ".local/share/pal/..cache" })).rejects.toThrow(/Pal's own files/);
+    await writeFile(`${home}-sibling.txt`, "sibling\n");
+    cleanups.push(() => rm(`${home}-sibling.txt`, { force: true }));
+    await expect(run("files_read", { path: `../${basename(home)}-sibling.txt` })).rejects.toThrow(/outside/);
+  });
+
   it("bounds find inside one wide folder, says why it stopped, and stops when cancelled", async () => {
     const { home, run } = await setup();
     await mkdir(join(home, "wide"));
