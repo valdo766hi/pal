@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { diffRevisions, type JsonValue } from "@earendil-works/chord/delta";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { type Browser, chromium, type Page, type WebSocketRoute } from "playwright-core";
+import { type Browser, chromium, type Locator, type Page, type WebSocketRoute } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
@@ -974,6 +974,118 @@ describe("MCP catalog consent", () => {
       expect(errors).toEqual([]);
     },
   );
+});
+
+describe("MCP server form", () => {
+  it("binds a held save to what was submitted and finishes a partly saved server instead of adding another", async () => {
+    const { pal, page, base, errors } = await setup(1440);
+    const a = await startMcpFixture();
+    cleanups.push(a.close);
+    const b = await startMcpFixture();
+    cleanups.push(b.close);
+    const bearers = (fixture: typeof a) => fixture.requests.map((request) => request.headers.authorization);
+    /** Let the next request reach Pal, but hold its response until released. */
+    const holdResponse = async (url: string, method: string) => {
+      const seen = Promise.withResolvers<undefined>();
+      const release = Promise.withResolvers<undefined>();
+      const done = Promise.withResolvers<undefined>();
+      await page.route(url, async (route) => {
+        if (route.request().method() !== method) return route.fallback();
+        const response = await route.fetch();
+        seen.resolve(undefined);
+        await release.promise;
+        await route.fulfill({ response });
+        done.resolve(undefined);
+      });
+      return {
+        seen: seen.promise,
+        release: async () => {
+          release.resolve(undefined);
+          await done.promise;
+          await page.unroute(url);
+        },
+      };
+    };
+    /** Change a field even while the form is disabled, as a late edit would. */
+    const force = (field: Locator, value: string) =>
+      field.evaluate((element, value) => {
+        (element as HTMLInputElement).value = value;
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }, value);
+    const tested = (id?: string) =>
+      page.waitForResponse((response) =>
+        new RegExp(`/api/mcp/servers/${id ?? "[^/]+"}/test$`).test(new URL(response.url()).pathname),
+      );
+    const url = page.getByLabel("URL", { exact: true });
+    const key = page.getByRole("textbox", { name: "Key", exact: true });
+    const describeServer = async (name: string, secret: string) => {
+      await page.getByRole("button", { name: "Add server", exact: true }).click();
+      await page.getByLabel("Name", { exact: true }).fill(name);
+      await url.fill(a.url);
+      await page.getByLabel(/^Private endpoint/).check();
+      await page.getByRole("combobox", { name: "Key", exact: true }).selectOption("bearer");
+      await key.fill(secret);
+    };
+    await page.goto(`${base}/#/settings/mcp`);
+    const disabled: boolean[] = [];
+
+    // Creating: the response is held while the URL and key are changed to B's.
+    await describeServer("Held", "key-held-a1");
+    let hold = await holdResponse(`${base}/api/mcp/servers`, "POST");
+    let test = tested();
+    await page.getByRole("button", { name: "Add and test", exact: true }).click();
+    await hold.seen;
+    disabled.push(await url.isDisabled(), await key.isDisabled());
+    await force(url, b.url);
+    await force(key, "key-held-b1");
+    await hold.release();
+    await test;
+    const [held] = (await pal.mcp.list()).filter((server) => server.name === "Held");
+    if (held === undefined) throw new Error("the server was not saved");
+    expect(bearers(a)).toContain("Bearer key-held-a1");
+    expect(bearers(a)).not.toContain("Bearer key-held-b1");
+    expect(b.requests).toEqual([]);
+
+    // Updating: the same, against the saved server.
+    await page.getByRole("button", { name: "Edit connection", exact: true }).click();
+    await key.fill("key-held-a2");
+    hold = await holdResponse(`${base}/api/mcp/servers/${held.id}`, "PUT");
+    test = tested(held.id);
+    await page.getByRole("button", { name: "Save and test", exact: true }).click();
+    await hold.seen;
+    disabled.push(await url.isDisabled(), await key.isDisabled());
+    await force(url, b.url);
+    await force(key, "key-held-b2");
+    await hold.release();
+    await test;
+    expect(bearers(a)).toContain("Bearer key-held-a2");
+    expect(bearers(a)).not.toContain("Bearer key-held-b2");
+    expect(b.requests).toEqual([]);
+    expect(await pal.mcp.get(held.id)).toMatchObject({ keyConfigured: true });
+    expect(disabled).toEqual([true, true, true, true]);
+
+    // A server saved before its key is refused, then before its test fails, is finished on retry, not added again.
+    await describeServer("Retry", "   ");
+    await page.getByRole("button", { name: "Add and test", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "that key is not valid" }).waitFor();
+    const saved = async () => (await pal.mcp.list()).filter((server) => server.name === "Retry");
+    const [first] = await saved();
+    if (first === undefined) throw new Error("the server was not saved");
+    await key.fill("key-retry");
+    await page.route(`${base}/api/mcp/servers/*/test`, (route) => route.abort());
+    await page.getByRole("button", { name: /^(Add|Save) and test$/ }).click();
+    await page.getByRole("alert").filter({ hasNotText: "that key is not valid" }).waitFor();
+    expect((await saved()).map((server) => server.id)).toEqual([first.id]);
+    await page.unroute(`${base}/api/mcp/servers/*/test`);
+    test = tested(first.id);
+    await page.getByRole("button", { name: /^(Add|Save) and test$/ }).click();
+    await test;
+    expect((await saved()).map((server) => server.id)).toEqual([first.id]);
+    expect(await pal.mcp.get(first.id)).toMatchObject({ keyConfigured: true });
+    expect(bearers(a)).toContain("Bearer key-retry");
+    expect(b.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
 });
 
 async function reviewFixture(width: number) {
