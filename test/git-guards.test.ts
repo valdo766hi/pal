@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { candidateFiles } from "../src/core/release-policy.ts";
 
@@ -44,26 +44,22 @@ afterEach(() => {
   for (const dir of repos.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-// The packaged test source has no Git index, so this check runs only from a repository checkout.
-const index = spawnSync("git", ["-C", join(import.meta.dirname, ".."), "ls-files", "--stage", "-z"], {
-  env,
-  encoding: "utf8",
-});
-
-describe("the repository's own tracked files", () => {
-  it.skipIf(index.status !== 0)("pass release candidate enumeration and the local guard installer", () => {
-    const paths = index.stdout
+describe("the repository's .gitignore", () => {
+  it("keeps a local AGENTS.md out of a fresh clone's index, which then passes candidate enumeration and the guards", () => {
+    const dir = repo();
+    cpSync(join(import.meta.dirname, "..", ".gitignore"), join(dir, ".gitignore"));
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src", "main.ts"), "export {};\n");
+    writeFileSync(join(dir, "AGENTS.md"), "local notes\n");
+    git(dir, "add", "-A");
+    const index = git(dir, "ls-files", "--stage", "-z");
+    const paths = index
       .split("\0")
       .filter(Boolean)
       .map((entry) => entry.slice(entry.indexOf("\t") + 1));
+    expect(paths).not.toContain("AGENTS.md");
     const build = paths.filter((path) => /^(?:src|web|test|nix|scripts)\//.test(path));
-    expect(() => candidateFiles(index.stdout, build)).not.toThrow();
-    const dir = repo();
-    for (const path of paths) {
-      mkdirSync(dirname(join(dir, path)), { recursive: true });
-      if (!existsSync(join(dir, path))) writeFileSync(join(dir, path), "");
-    }
-    git(dir, "add", "--", ...paths);
+    expect(() => candidateFiles(index, build)).not.toThrow();
     expect(run(dir, "bash", "scripts/prepare-local.sh")).toMatchObject({ status: 0 });
   });
 });

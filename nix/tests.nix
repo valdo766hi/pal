@@ -39,6 +39,7 @@ stdenv.mkDerivation {
       (root + "/eslint.config.js")
       (root + "/.prettierrc.json")
       (root + "/.prettierignore")
+      (root + "/.gitignore")
       (root + "/.github/workflows/security.yml")
       (root + "/.github/workflows/security-comment.yml")
       (root + "/src")
