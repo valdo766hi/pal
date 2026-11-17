@@ -297,6 +297,45 @@ describe("chats", () => {
       expect(await again.chats.get(chat.id)).toBeUndefined();
       expect(await again.chats.list("project-1")).toEqual([]);
       await again.harness.waitForIdle(context);
+      // No unfinished input is left: Pi's receipt is kept exactly once, an input Pi never took is settled unsent.
+      const rows = await again.store.database.all<{ state: string; submission_id: number | null }>(
+        "SELECT state, submission_id FROM pal_admissions",
+      );
+      expect(rows).toEqual([
+        point === "input-submitted"
+          ? { state: "admitted", submission_id: expect.any(Number) }
+          : { state: "withdrawn", submission_id: null },
+      ]);
+      const submissions = await again.store.database.get<{ n: number }>("SELECT count(*) AS n FROM pi_submissions");
+      expect(submissions?.n).toBe(point === "input-submitted" ? 1 : 0);
+    },
+  );
+
+  it.each(["chat", "project"] as const)(
+    "settles a blocked input when its %s is deleted, so nothing unfinished is left",
+    async (removed) => {
+      const root = await tempDir();
+      const { store, chats, uploads, harness } = await open(root);
+      const chat = await chats.createChat("blocked-delete-chat", { projectId: "project-1" }, context);
+      const upload = await uploads.admit("project-1", { name: "gone.txt", size: 5, type: "text/plain" });
+      await uploads.receive(upload.id, Readable.from([Buffer.from("bytes")]));
+      await rm(join(root, "uploads"), { recursive: true, force: true });
+      await expect(
+        chats.submit(chat.id, "blocked-delete-input", { text: "hi", attachments: [upload.id] }, context),
+      ).rejects.toThrow();
+      if (removed === "chat") await chats.remove(chat.id, context);
+      else {
+        await store.database.run("UPDATE pal_chats SET deleted_at = ? WHERE project_id = 'project-1'", Date.now());
+        await chats.abortDeleted(context);
+      }
+      await harness.waitForIdle(context);
+      const settled = await store.database.all("SELECT state FROM pal_admissions");
+      expect(settled).toEqual([{ state: "withdrawn" }]);
+      await harness.close(context);
+      const again = await open(root);
+      await again.harness.waitForIdle(context);
+      expect(await again.store.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "withdrawn" }]);
+      expect(await again.chats.get(chat.id)).toBeUndefined();
     },
   );
 

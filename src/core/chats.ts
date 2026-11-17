@@ -283,7 +283,11 @@ export class ChatService {
     await this.abortDeleted(context);
   }
 
-  /** Also reconciles a crash after a chat/project tombstone was committed but before its abort completed. */
+  /**
+   * Also reconciles a crash after a chat/project tombstone was committed but before its abort completed, and settles
+   * the deleted chats' unfinished inputs, so none is left holding back a release. A chat with an admission in progress
+   * is left to that admission, which settles its input when it finds the chat deleted.
+   */
   async abortDeleted(context: Context): Promise<void> {
     const rows = await this.#guard((db) =>
       db.all<{ conversation_id: ConversationId }>(
@@ -294,6 +298,39 @@ export class ChatService {
       const conversation = await this.#options.harness.conversation(row.conversation_id, context);
       await conversation?.abort(context, { background: true });
     }
+    const inputs = await this.#guard((db) =>
+      db.all<{ chat_id: string; request_id: string; conversation_id: ConversationId | null }>(
+        "SELECT a.chat_id, a.request_id, c.conversation_id FROM pal_admissions a JOIN pal_chats c ON c.id = a.chat_id WHERE a.state = 'admitting' AND c.deleted_at IS NOT NULL",
+      ),
+    );
+    for (const input of inputs)
+      if (!this.#configurations.has(input.chat_id))
+        await this.#settleDeleted(input.chat_id, input.request_id, input.conversation_id, context);
+  }
+
+  /** A deleted chat's input keeps the receipt Pi already holds; only one Pi never took is settled as never sent. */
+  async #settleDeleted(
+    chatId: string,
+    requestId: string,
+    conversationId: ConversationId | null,
+    context: Context,
+  ): Promise<void> {
+    const submission =
+      conversationId === null ? undefined : await this.#piSubmission(conversationId, requestId, context);
+    await this.#guard((db) =>
+      submission === undefined
+        ? db.run(
+            "UPDATE pal_admissions SET state = 'withdrawn', blocked = NULL WHERE chat_id = ? AND request_id = ? AND state = 'admitting'",
+            chatId,
+            requestId,
+          )
+        : db.run(
+            "UPDATE pal_admissions SET state = 'admitted', submission_id = ?, blocked = NULL WHERE chat_id = ? AND request_id = ? AND state = 'admitting'",
+            submission,
+            chatId,
+            requestId,
+          ),
+    );
   }
 
   async createChat(requestId: unknown, body: unknown, context: Context): Promise<Chat> {
@@ -606,7 +643,16 @@ export class ChatService {
 
   /** Submit under the same request ID, which Pi deduplicates per conversation, then record the acknowledgement. */
   async #admit(chatId: string, requestId: string, intent: InputBody, context: Context): Promise<Admission> {
-    if ((await this.get(chatId)) === undefined) throw new ChatNotFound("this chat was deleted before admission");
+    if ((await this.get(chatId)) === undefined) {
+      const row = await this.#guard((db) =>
+        db.get<{ conversation_id: ConversationId | null }>(
+          "SELECT conversation_id FROM pal_chats WHERE id = ?",
+          chatId,
+        ),
+      );
+      await this.#settleDeleted(chatId, requestId, row?.conversation_id ?? null, context);
+      throw new ChatNotFound("this chat was deleted before admission");
+    }
     const { conversation, projectId } = await this.#guard(async (db) => {
       const row = await db.get<{ conversation_id: ConversationId; project_id: string }>(
         "SELECT conversation_id, project_id FROM pal_chats WHERE id = ?",
@@ -653,6 +699,7 @@ export class ChatService {
     }
     await this.#options.barrier?.("input-submitted");
     if ((await this.get(chatId)) === undefined) {
+      await this.#settleDeleted(chatId, requestId, conversation.id, context);
       await this.abortDeleted(context);
       throw new ChatNotFound("this chat was deleted during admission");
     }
