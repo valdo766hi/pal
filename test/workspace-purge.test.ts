@@ -1,7 +1,9 @@
+import { randomBytes } from "node:crypto";
 import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { backupDataRoot, restoreBackup, unfinishedWork } from "../src/core/backup.ts";
 import { WorkspaceBusy, WorkspaceLocks } from "../src/core/execution.ts";
 import { Projects } from "../src/core/projects.ts";
 import { InvalidRequest, RequestConflict } from "../src/core/requests.ts";
@@ -201,6 +203,66 @@ describe("managed workspace cleanup", () => {
     expect(listing.workspaces.every((item) => item.identity === null && item.problem !== undefined)).toBe(true);
     expect(await lstat(join(dataRoot, "workspace-trash")).catch(() => undefined)).toBeUndefined();
   });
+
+  it.each(["recorded", "moved", "partial", "workspace-gone", "container-gone", "replaced"] as const)(
+    "completes an interrupted deletion restored from a stopped backup (%s) only on explicit retry",
+    async (phase) => {
+      const { root, dataRoot, store, projects, project, snapshot } = await setup();
+      await projects.remove(project.id);
+      await writeFile(join(project.root, "kept.txt"), "kept");
+      const body = await snapshot();
+      const directory = `${project.id}-interrupted`;
+      const destination = join(dataRoot, "workspace-trash", directory);
+      await mkdir(join(dataRoot, "workspace-trash"));
+      await store.database.run(
+        "INSERT INTO pal_workspace_purges (project_id, directory, identity) VALUES (?, ?, ?)",
+        project.id,
+        directory,
+        body.identity,
+      );
+      if (phase !== "recorded") await rename(dirname(project.root), destination);
+      if (phase === "partial") await rm(join(destination, "workspace", "kept.txt"));
+      if (phase === "workspace-gone") await rm(join(destination, "workspace"), { recursive: true });
+      if (phase === "container-gone") await rm(destination, { recursive: true });
+      await writeFile(join(dataRoot, "credentials.key"), randomBytes(32), { mode: 0o600 });
+      await store.close();
+      const backup = join(root, "backup");
+      await backupDataRoot({
+        dataRoot,
+        output: backup,
+        version: "test",
+        includeCredentialKey: true,
+        includeBrowserProfiles: false,
+      });
+      await rename(dataRoot, join(root, "data-before"));
+      await restoreBackup(backup, dataRoot);
+      const restored = await openStore(dataRoot);
+      cleanups.push(() => restored.close());
+      const purge = new WorkspacePurge(restored.database, dataRoot, new WorkspaceLocks());
+      // Restoring deletes nothing.
+      if (phase === "recorded") expect(await readFile(join(project.root, "kept.txt"), "utf8")).toBe("kept");
+      if (phase === "moved") expect(await readFile(join(destination, "workspace", "kept.txt"), "utf8")).toBe("kept");
+      if (phase === "replaced") {
+        await rm(join(destination, "workspace"), { recursive: true });
+        await mkdir(join(destination, "workspace"));
+      }
+      const [item] = (await purge.list()).workspaces;
+      if (phase === "replaced") {
+        expect(item).toMatchObject({ pending: true, identity: null });
+        await expect(purge.purge(project.id, { root: project.root, identity: body.identity })).rejects.toBeInstanceOf(
+          RequestConflict,
+        );
+        expect((await lstat(join(destination, "workspace"))).isDirectory()).toBe(true);
+        return;
+      }
+      expect(item?.pending).toBe(true);
+      expect(item?.problem).toBeUndefined();
+      await purge.purge(project.id, { root: project.root, identity: item?.identity ?? "" });
+      expect((await purge.list()).workspaces).toEqual([]);
+      expect(await lstat(destination).catch(() => undefined)).toBeUndefined();
+      expect(await unfinishedWork(restored.database, new Set(["pal_workspace_purges"]))).toEqual({ purges: 0 });
+    },
+  );
 
   it("refuses ambiguous interrupted locations instead of choosing files to delete", async () => {
     const { dataRoot, store, projects, project, purge, snapshot } = await setup();
