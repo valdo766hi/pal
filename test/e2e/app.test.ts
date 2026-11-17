@@ -2024,6 +2024,7 @@ describe("Pal in a browser", () => {
       .toMatch(
         /^Review feedback:\n\nWorkspace: [^\n]+\n\nbase\.txt \(revision [0-9a-f]{12}\), line 2 \(outdated\): two\nRename two\.\n\nbase\.txt \(revision [0-9a-f]{12}\), line 3: three\nKeep three\.$/,
       );
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("composer");
     await expect.poll(() => panel.getByText("In composer · not admitted", { exact: true }).count()).toBe(2);
     expect((await pal.changes.list(project.id)).comments.map((comment) => comment.sent)).toEqual([false, false]);
     const composed = await page.getByLabel("Message").inputValue();
