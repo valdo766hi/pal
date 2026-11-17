@@ -1,7 +1,7 @@
+import { randomInt } from "node:crypto";
 import { once } from "node:events";
 import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -76,12 +76,21 @@ async function signIn(connection: ChatGPTConnection) {
   return { result, url, callback };
 }
 
+/** A free port below the Linux (32768+) and macOS (49152+) ephemeral ranges, so no socket of a parallel run takes it. */
 async function freePort(): Promise<number> {
-  const server = createServer().listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const { port } = server.address() as AddressInfo;
-  await new Promise((resolve) => server.close(resolve));
-  return port;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const port = 20000 + randomInt(12000);
+    const server = createServer();
+    const free = await new Promise<boolean>((resolve) => {
+      server.once("error", () => resolve(false));
+      server.listen(port, "127.0.0.1", () => resolve(true));
+    });
+    if (free) {
+      await new Promise((resolve) => server.close(resolve));
+      return port;
+    }
+  }
+  throw new Error("no free port below the ephemeral range");
 }
 
 const ask = { messages: [{ role: "user" as const, content: "hi", timestamp: 0 }] };
