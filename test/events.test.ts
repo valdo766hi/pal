@@ -129,6 +129,61 @@ describe("chat event streams", () => {
     expect(before).not.toContain('"mode":"full"');
   });
 
+  it("never attach a stream whose session signs out while the stream is still setting up", async () => {
+    const { pal, base, chat, watches } = await setup();
+    const leaving = await pal.owner.signIn(PASSPHRASE);
+    const kept = await stream(base, chat.id, await pal.owner.signIn(PASSPHRASE));
+    await kept.until((text) => text.includes("event: approvals"));
+    // Hold the racing stream just after its own read found the session valid: the route's sign-in check reads it
+    // first, then the stream.
+    const held = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const read = pal.owner.sessionExpiry.bind(pal.owner);
+    let reads = 0;
+    vi.spyOn(pal.owner, "sessionExpiry").mockImplementation(async (token) => {
+      const expiry = await read(token);
+      if (token === leaving && ++reads === 2) {
+        held.resolve(undefined);
+        await release.promise;
+      }
+      return expiry;
+    });
+    const controller = new AbortController();
+    cleanups.push(async () => controller.abort());
+    let racing = "";
+    let ended = false;
+    void (async () => {
+      try {
+        const response = await fetch(`${base}/api/chats/${chat.id}/events`, {
+          headers: { cookie: `pal_session=${leaving}` },
+          signal: controller.signal,
+        });
+        const reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
+        for (let chunk = await reader?.read(); chunk !== undefined && !chunk.done; chunk = await reader?.read())
+          racing += chunk.value;
+      } catch {
+        // A refused or destroyed stream has ended too.
+      }
+      ended = true;
+    })();
+    await held.promise;
+    const signOut = await fetch(`${base}/api/sign-out`, {
+      method: "POST",
+      headers: { origin: base, cookie: `pal_session=${leaving}` },
+    });
+    expect(signOut.status).toBe(200);
+    release.resolve(undefined);
+
+    // A change committed after sign-out reaches the other session's stream, never the racing one.
+    await pal.approvals.setMode(chat.id, "full");
+    await kept.until((text) => text.includes('"mode":"full"'));
+    await expect.poll(() => ended, { timeout: 5_000 }).toBe(true);
+    expect(racing).not.toContain('"mode":"full"');
+    expect(watches()).toBe(1);
+    const after = await fetch(`${base}/api/chats/${chat.id}/events`, { headers: { cookie: `pal_session=${leaving}` } });
+    expect(after.status).toBe(401);
+  });
+
   it("closes an idle stream at its session's expiry, with no event to trigger it", async () => {
     const { pal, base, chat, watches } = await setup();
     const token = await pal.owner.signIn(PASSPHRASE);

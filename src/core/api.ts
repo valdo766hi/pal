@@ -366,10 +366,12 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     if (!(await signedIn(request))) throw new HttpError(401, "signed_out", "sign in to Pal first");
 
     if (resource === "sign-out" && path.length === 1 && method === "POST") {
-      pal.terminals.revoke(cookie(request, SESSION_COOKIE));
-      pal.browsers.revoke(cookie(request, SESSION_COOKIE));
-      revokeObservers(cookie(request, SESSION_COOKIE));
-      await pal.owner.signOut(cookie(request, SESSION_COOKIE));
+      const token = cookie(request, SESSION_COOKIE);
+      // The session ends first: a connection that registers after the revocations below then finds it gone.
+      await pal.owner.signOut(token);
+      pal.terminals.revoke(token);
+      pal.browsers.revoke(token);
+      revokeObservers(token);
       response.setHeader("set-cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
       return send(200, { signedIn: false });
     }
@@ -931,14 +933,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     conversationId: ConversationId,
     token: string | undefined,
   ): Promise<void> {
-    const expiry = await pal.owner.sessionExpiry(token);
-    if (expiry === undefined) throw new HttpError(401, "signed_out", "sign in to Pal first");
-    const conversation = await pal.harness.conversation(conversationId, context);
-    if (conversation === undefined) throw new HttpError(404, "not_found", "no such chat");
     const scope = new AbortController();
     // What `end` must release, filled in as the stream starts.
     const live: {
       watch?: ConversationWatch;
+      expiry?: ReturnType<typeof setTimeout>;
       heartbeat?: ReturnType<typeof setInterval>;
       unwatch?: () => void;
     } = {};
@@ -947,19 +946,34 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       if (scope.signal.aborted) return;
       scope.abort();
       observers.delete(end);
-      clearTimeout(expiryTimer);
+      clearTimeout(live.expiry);
       clearInterval(live.heartbeat);
       live.unwatch?.();
       void live.watch?.stop();
       if (revoked) response.destroy();
       else if (!response.writableEnded) response.end();
     };
-    const expiryTimer = setTimeout(() => end(true), Math.min(Math.max(0, expiry - Date.now()), 2 ** 31 - 1));
-    expiryTimer.unref();
+    // Registered before the session is read: sign-out ends the session and then every stream registered, so this
+    // stream either reads the session as gone or is ended by the sign-out.
     observers.set(end, token);
     // The response closes when the connection does, whether or not the request body was ever read.
     response.once("close", () => end(true));
     response.once("error", () => end(true));
+    const expiry = await pal.owner.sessionExpiry(token);
+    const conversation =
+      expiry === undefined || scope.signal.aborted
+        ? undefined
+        : await pal.harness.conversation(conversationId, context);
+    if (scope.signal.aborted) return;
+    if (expiry === undefined || conversation === undefined) {
+      scope.abort();
+      observers.delete(end);
+      throw expiry === undefined
+        ? new HttpError(401, "signed_out", "sign in to Pal first")
+        : new HttpError(404, "not_found", "no such chat");
+    }
+    live.expiry = setTimeout(() => end(true), Math.min(Math.max(0, expiry - Date.now()), 2 ** 31 - 1));
+    live.expiry.unref();
 
     const watch = await conversation.watch(context);
     live.watch = watch;
