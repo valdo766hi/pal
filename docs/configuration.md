@@ -146,7 +146,8 @@ Settings → **Models**:
     where it documents a way to (OpenRouter, OpenAI, Anthropic, DeepSeek, compatible endpoints). OpenRouter and
     DeepSeek also report your usage or balance.
   - An OpenAI-compatible endpoint takes a name, base URL, model IDs, context window and output limit. The URL may
-    point at a private network address, because you chose it.
+    point at a private network address, because you chose it. Its key is saved for that base URL, so describe the
+    endpoint first; moving it to another address turns it off and forgets the key.
 - **Claude subscription (Claude Code) · Experimental**, from the `claude-code` plugin, uses your own Claude Pro or Max
   subscription through the official Claude Code CLI. It is off until you enable it and never chosen automatically.
   - **Requirements:** Claude Code installed for the account Pal runs as and logged in with a subscription; a new process

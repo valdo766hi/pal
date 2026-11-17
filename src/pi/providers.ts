@@ -174,14 +174,26 @@ function storedKeyOnly(name: string): ApiKeyAuth {
   };
 }
 
-/** An endpoint the owner marked keyless; OpenAI's client still requires some key, which such servers ignore. */
-const KEYLESS: ApiKeyAuth = {
-  name: "No key",
-  resolve: async ({ signal }) => {
-    signal.throwIfAborted();
-    return { auth: { apiKey: "no-key" }, source: "keyless endpoint" };
-  },
-};
+/** The compatible endpoint's key names, in its sealed credential, the destination it was saved for. */
+const DESTINATION = "PAL_DESTINATION";
+
+/**
+ * The compatible endpoint's auth for one destination. A key resolves only for the destination it was saved for, and
+ * the resolved base URL sends the request there: Pi resolves auth through the provider registered now, while the
+ * request's model may predate a change of endpoint. A keyless endpoint gets a placeholder key OpenAI's client needs.
+ */
+function destinationAuth(name: string, baseUrl: string, keyless: boolean): ApiKeyAuth {
+  return {
+    name: keyless ? "No key" : name,
+    resolve: async ({ credential, signal }) => {
+      signal.throwIfAborted();
+      if (keyless) return { auth: { apiKey: "no-key", baseUrl }, source: "keyless endpoint" };
+      return credential?.key !== undefined && credential.env?.[DESTINATION] === baseUrl
+        ? { auth: { apiKey: credential.key, baseUrl }, source: "stored credential" }
+        : undefined;
+    },
+  };
+}
 
 /**
  * Pi's provider under Pal's ID with stored-key auth only (no OAuth or environment). `origin` replaces each model's
@@ -224,7 +236,7 @@ function compatibleProvider(config: CompatibleConfig): Provider {
       id: COMPATIBLE,
       name: config.name,
       baseUrl: config.baseUrl,
-      auth: { apiKey: config.keyless ? KEYLESS : storedKeyOnly(`${config.name} key`) },
+      auth: { apiKey: destinationAuth(`${config.name} key`, config.baseUrl, config.keyless) },
       models,
       api: openAICompletionsApi(),
     }) as Provider<Api>,
@@ -289,6 +301,7 @@ export class ModelProviders {
   readonly #credentials: SqliteCredentialStore;
   readonly #models: MutableModels;
   readonly #origin: string | undefined;
+  #changes: Promise<unknown> = Promise.resolve();
 
   private constructor(
     database: SqliteDatabase,
@@ -311,6 +324,7 @@ export class ModelProviders {
     origin?: string;
   }): Promise<ModelProviders> {
     const providers = new ModelProviders(options.database, options.credentials, options.models, options.origin);
+    await providers.#bindSavedKey();
     for (const id of API_PROVIDER_IDS) if (await providers.usable(id)) await providers.#register(id);
     return providers;
   }
@@ -399,17 +413,32 @@ export class ModelProviders {
     return undefined;
   }
 
-  /** Save or replace a key (the next request uses it), or remove it, which also disables a provider that needs it. */
-  async setKey(id: string, key: string | null): Promise<void> {
-    if (!isApiProvider(id)) throw new ProviderConfigError("this provider uses no key in Pal");
-    if (key === null) {
-      await this.#credentials.forget(id);
-      if (!(await this.#ready(id))) await this.setEnabled(id, false);
-      return;
-    }
-    const trimmed = key.trim();
-    if (!KEY.test(trimmed)) throw new ProviderConfigError("the key must be 8–4096 printable characters, no spaces");
-    await this.#credentials.modify(id, async () => ({ type: "api_key", key: trimmed }));
+  /**
+   * Save or replace a key (the next request uses it), or remove it, which also disables a provider that needs it. The
+   * compatible endpoint's key is saved for its current destination.
+   */
+  setKey(id: string, key: string | null): Promise<void> {
+    return this.#serial(async () => {
+      if (!isApiProvider(id)) throw new ProviderConfigError("this provider uses no key in Pal");
+      if (key === null) {
+        await this.#credentials.forget(id);
+        if (!(await this.#ready(id))) await this.#setEnabled(id, false);
+        return;
+      }
+      const trimmed = key.trim();
+      if (!KEY.test(trimmed)) throw new ProviderConfigError("the key must be 8–4096 printable characters, no spaces");
+      if (id !== COMPATIBLE) {
+        await this.#credentials.modify(id, async () => ({ type: "api_key", key: trimmed }));
+        return;
+      }
+      const config = await this.#config();
+      if (config === undefined) throw new ProviderConfigError("describe the endpoint before saving its key");
+      await this.#credentials.modify(id, async () => ({
+        type: "api_key",
+        key: trimmed,
+        env: { [DESTINATION]: config.baseUrl },
+      }));
+    });
   }
 
   /**
@@ -417,21 +446,29 @@ export class ModelProviders {
    * the owner's enablement belong to one destination, the normalized base URL: a new destination is disabled and its
    * old key forgotten before it is saved, so no key is sent to an address the owner never approved it for.
    */
-  async setCompatible(body: CompatibleConfig): Promise<void> {
-    const config = compatibleConfig(body);
-    const previous = await this.#config();
-    if (previous !== undefined && previous.baseUrl !== config.baseUrl) {
-      await this.setEnabled(COMPATIBLE, false);
-      await this.#credentials.forget(COMPATIBLE);
-    }
-    await this.#save(CONFIG, JSON.stringify(config));
-    if (await this.#enabled(COMPATIBLE)) {
-      if (await this.#ready(COMPATIBLE)) await this.#register(COMPATIBLE);
-      else await this.setEnabled(COMPATIBLE, false);
-    }
+  setCompatible(body: CompatibleConfig): Promise<void> {
+    return this.#serial(async () => {
+      const config = compatibleConfig(body);
+      const previous = await this.#config();
+      if (previous !== undefined && previous.baseUrl !== config.baseUrl) {
+        await this.#setEnabled(COMPATIBLE, false);
+        await this.#credentials.forget(COMPATIBLE);
+      }
+      await this.#save(CONFIG, JSON.stringify(config));
+      if (await this.#enabled(COMPATIBLE)) {
+        if (await this.#ready(COMPATIBLE)) await this.#register(COMPATIBLE);
+        else await this.#setEnabled(COMPATIBLE, false);
+      }
+    });
   }
 
-  async setEnabled(id: string, enabled: boolean): Promise<void> {
+  setEnabled(id: string, enabled: boolean): Promise<void> {
+    // A plugin's status check may be slow and touches no key or endpoint, so it doesn't wait behind other changes.
+    if (this.#plugin(id) !== undefined) return this.#setEnabled(id, enabled);
+    return this.#serial(() => this.#setEnabled(id, enabled));
+  }
+
+  async #setEnabled(id: string, enabled: boolean): Promise<void> {
     const plugin = this.#plugin(id);
     if (plugin !== undefined) {
       if (enabled) {
@@ -492,15 +529,16 @@ export class ModelProviders {
   async #probe(
     id: ApiProviderId,
   ): Promise<{ name: string; url: string; headers: Record<string, string> } | { ok: false; detail: string }> {
-    const credential = await this.#credentials.read(id);
-    const key = credential?.type === "api_key" ? credential.key : undefined;
     if (id === COMPATIBLE) {
       const config = await this.#config();
       if (config === undefined) throw new ProviderConfigError("describe the endpoint first");
       if (config.keyless) return { name: config.name, url: `${config.baseUrl}/models`, headers: {} };
+      const key = await this.#compatibleKey(config.baseUrl);
       if (key === undefined) throw new ProviderConfigError(`no ${config.name} key is saved`);
       return { name: config.name, url: `${config.baseUrl}/models`, headers: bearer(key) };
     }
+    const credential = await this.#credentials.read(id);
+    const key = credential?.type === "api_key" ? credential.key : undefined;
     const entry: (typeof CATALOG)[CatalogId] = CATALOG[id];
     if (key === undefined) throw new ProviderConfigError(`no ${entry.name} key is saved`);
     if (!("check" in entry)) return { ok: false, detail: "OpenCode has no key check; the first message tests it." };
@@ -524,7 +562,36 @@ export class ModelProviders {
   }
 
   async #hasKey(id: ApiProviderId): Promise<boolean> {
-    return (await this.#credentials.read(id))?.type === "api_key";
+    if (id !== COMPATIBLE) return (await this.#credentials.read(id))?.type === "api_key";
+    const config = await this.#config();
+    return config !== undefined && (await this.#compatibleKey(config.baseUrl)) !== undefined;
+  }
+
+  /** The compatible endpoint's saved key, only if it was saved for `baseUrl`. */
+  async #compatibleKey(baseUrl: string): Promise<string | undefined> {
+    const credential = await this.#credentials.read(COMPATIBLE);
+    return credential?.type === "api_key" && credential.env?.[DESTINATION] === baseUrl ? credential.key : undefined;
+  }
+
+  /**
+   * A key saved before keys named their destination belongs to the endpoint saved now: moving the endpoint always
+   * forgot the key. Runs once at startup, before any check or request.
+   */
+  async #bindSavedKey(): Promise<void> {
+    const config = await this.#config();
+    if (config === undefined) return;
+    await this.#credentials.modify(COMPATIBLE, async (current) =>
+      current?.type === "api_key" && current.key !== undefined && current.env?.[DESTINATION] === undefined
+        ? { ...current, env: { ...current.env, [DESTINATION]: config.baseUrl } }
+        : undefined,
+    );
+  }
+
+  /** Owner changes run one at a time, so no key, endpoint or enablement is decided from another's halfway state. */
+  #serial<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.#changes.then(work);
+    this.#changes = run.catch(() => {});
+    return run;
   }
 
   #plugin(id: string): PluginProvider | undefined {
