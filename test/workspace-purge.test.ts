@@ -243,8 +243,10 @@ describe("managed workspace cleanup", () => {
       if (phase === "recorded") expect(await readFile(join(project.root, "kept.txt"), "utf8")).toBe("kept");
       if (phase === "moved") expect(await readFile(join(destination, "workspace", "kept.txt"), "utf8")).toBe("kept");
       if (phase === "replaced") {
-        await rm(join(destination, "workspace"), { recursive: true });
+        // Made while the old folder still exists, so the new one cannot reuse its inode.
+        await rename(join(destination, "workspace"), join(root, "old-workspace"));
         await mkdir(join(destination, "workspace"));
+        await rm(join(root, "old-workspace"), { recursive: true });
       }
       const [item] = (await purge.list()).workspaces;
       if (phase === "replaced") {
