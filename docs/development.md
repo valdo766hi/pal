@@ -467,6 +467,21 @@ instead of an estimate. The baseline gets the same first 100 KiB of each inline,
 external commands refuse the task. A task's requirements only add to the evaluation directory's own settings, for
 that run, and are restored after it. Version 5 of the Pal and baseline adapters applies them.
 
+Three held-out tasks are reserved for judging a change after it is chosen, never for developing it:
+`fee-policy-long-context` (four transfer-fee rules sit far apart in a 1,200-clause policy, among clauses about
+other operations), `config-rename-recovery` (a planned rename is partly done; after an idle restart the agent must
+finish it without reverting the completed step, keeping the old option as an alias) and
+`csv-export-owner-correction` (CSV quoting, then an owner correction to a locale-specific delimiter and decimal
+comma that keeps the earlier rules).
+
+**Comparison rule, declared before any run.** Compare a candidate build with the build it changes on the same task
+versions, model, effort, budget, capabilities and repeat count (at least three): the development split while
+iterating, then the held-out split once. Keep the change only if no task's graded success rate drops, no run ends
+as done while failing its grade, approvals and receipts show no effect the owner did not allow, interventions do not
+increase, and median seconds and tokens per task grow by at most 25%, unless the owner accepted a larger cost for
+the expected gain before the run. Report graded completion, failure classes, latency, tokens and cost estimates for
+both builds.
+
 ```sh
 nix build --out-link evaluate .#evaluate
 ./evaluate/bin/pal-evaluate --data-dir /absolute/evaluation-data --provider openrouter --model <id> \
