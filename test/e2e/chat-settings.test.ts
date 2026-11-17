@@ -566,6 +566,47 @@ describe("saved chat settings", () => {
   });
 });
 
+describe("drafts of deleted chats", () => {
+  it("frees the tab's drafts of deleted chats and projects, and keeps live chats' drafts", async () => {
+    const { pal, page, base, saved, errors } = await setup(1440);
+    await pal.projects.create("doomed-project", { name: "Doomed" });
+    const message = page.getByLabel("Message", { exact: true });
+    const dialog = page.getByRole("alertdialog");
+    const stored = () => page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft.")));
+    const newChat = async (project: string) => {
+      await page.getByLabel(`New chat in ${project}`, { exact: true }).click();
+      await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
+      await expect.poll(() => message.isEditable()).toBe(true);
+      return new URL(page.url()).hash.split("/").at(-1) ?? "";
+    };
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await message.fill("Kept in a live chat");
+    for (let index = 0; index < 33; index++) {
+      await newChat("Settings");
+      await message.fill(`Draft ${index}`);
+      await page.getByRole("button", { name: "Delete chat New chat", exact: true }).click();
+      await dialog.getByRole("button", { name: "Delete chat", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+    }
+    const fresh = await newChat("Settings");
+    await message.fill("Still room to write");
+    await expect.poll(() => page.getByRole("button", { name: "Send", exact: true }).isEnabled()).toBe(true);
+    expect(await page.getByText(/This tab holds \d+ drafts/).count()).toBe(0);
+
+    const doomed = [await newChat("Doomed"), ""];
+    await message.fill("First doomed draft");
+    doomed[1] = await newChat("Doomed");
+    await message.fill("Second doomed draft");
+    await page.getByRole("button", { name: "Remove project Doomed", exact: true }).click();
+    await dialog.getByRole("button", { name: "Remove project", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    await expect.poll(stored).toEqual(expect.arrayContaining([`pal.draft.${saved.id}`, `pal.draft.${fresh}`]));
+    expect(await stored()).toHaveLength(2);
+    expect(doomed.every((id) => id !== "")).toBe(true);
+    expect(errors).toEqual([]);
+  }, 180_000);
+});
+
 describe("refused attachments", () => {
   it("lets a send Pal refused for a missing or unfinished attachment be corrected and sent", async () => {
     const { pal, page, base, saved, errors } = await setup(1440);

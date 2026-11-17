@@ -379,6 +379,16 @@ export class ChatDrafts {
       return draft;
     });
   }
+  /** A chat Pal confirmed deleted takes its draft with it, so the draft no longer counts toward this tab's limit. */
+  forget(chatId: string) {
+    this.#drafts.get(chatId)?.dispose();
+    this.#drafts.delete(chatId);
+    try {
+      this.#store?.removeItem(KEY + chatId);
+    } catch {
+      // Nothing saved is reachable either.
+    }
+  }
   /** Signing out forgets every draft this tab kept, in memory and in its store. */
   clear() {
     for (const draft of this.#drafts.values()) draft.dispose();
