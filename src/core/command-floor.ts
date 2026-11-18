@@ -99,6 +99,25 @@ function gitSubcommand(args: readonly string[]): string | undefined {
   return undefined;
 }
 
+/** Where the command a runner starts begins among its arguments, or -1: `npx x`, `pnpm exec x`, `uv run x`… */
+function launched(name: string, args: readonly string[]): number {
+  const operand = (from: number) => args.findIndex((arg, at) => at >= from && !arg.startsWith("-"));
+  if (["npx", "bunx", "pnpx", "parallel"].includes(name)) return operand(0);
+  const sub = operand(0);
+  const word = args[sub];
+  if (["npm", "pnpm", "yarn", "bun"].includes(name) && ["exec", "dlx", "x"].includes(word ?? ""))
+    return operand(sub + 1);
+  if (["uv", "poetry", "pipx", "pdm", "hatch", "rye"].includes(name) && word === "run") return operand(sub + 1);
+  if (name === "git" && args.includes("submodule") && args.includes("foreach"))
+    return operand(args.indexOf("foreach") + 1);
+  if (name === "direnv" && word === "exec") {
+    const folder = operand(sub + 1);
+    return folder === -1 ? -1 : operand(folder + 1);
+  }
+  const command = name === "nix" ? args.findIndex((arg) => arg === "-c" || arg === "--command") : -1;
+  return command === -1 || command + 1 >= args.length ? -1 : command + 1;
+}
+
 const base = (word: string) => word.slice(word.lastIndexOf("/") + 1);
 const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
 const KEYWORDS = new Set(["if", "then", "elif", "else", "while", "until", "do", "!", "{"]);
@@ -131,6 +150,8 @@ function simpleCommands(text: string, depth = 0): Simple[] {
         at++;
         continue;
       }
+      // `command -v` only looks a name up.
+      if (base(word) === "command" && /^-[vV]$/.test(words[at + 1] ?? "")) break;
       const values = WRAPPERS[base(word)];
       if (values === undefined) break;
       via.push(base(word));
@@ -157,6 +178,8 @@ function simpleCommands(text: string, depth = 0): Simple[] {
     const body = script === -1 ? undefined : args[script + 1];
     if (body !== undefined) found.push(...simpleCommands(body, depth + 1));
     if (name === "eval") found.push(...simpleCommands(args.join(" "), depth + 1));
+    const started = launched(name, args);
+    if (started !== -1) found.push(...simpleCommands(args.slice(started).join(" "), depth + 1));
     // A command run over SSH is still a command the agent chose; judge it like a local one.
     if (name === "ssh") {
       const host = args.findIndex(
