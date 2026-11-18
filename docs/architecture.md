@@ -56,8 +56,9 @@ A chat is a Pal record mapped to a Pi conversation (`src/core/chats.ts`).
    a shell command's timeout limit (`src/core/execution.ts`), then command approval for shell commands
    (`src/core/approvals.ts`). Pi then records the tool's intent and executes it.
 5. The chat reaches the page over server-sent events (`GET /api/chats/:id/events`): a snapshot of Pi's conversation
-   view (its newest entries and run state) with the history before it, then each change to that view as Chord ops.
-   The page keeps every entry it was sent. A reader that falls further behind than the view holds gets a new
+   view (its newest entries and run state) with one bounded page of the history before it, then each change to that
+   view as Chord ops. The page keeps every entry it was sent and fetches older pages on request
+   (`GET /api/chats/:id/history?before=`). A reader that falls further behind than the view holds gets a new
    snapshot, and reconnecting gets one too, so another device can pick up a running chat.
 
 After a crash or restart, Pi resumes from its journal. A Code Mode script replays without repeating calls that
@@ -229,18 +230,19 @@ string supplied by a skill or manifest.
   own unfinished acquisitions. Opened plugins are disposed in reverse order, once, including after a partial-startup
   failure.
 
-`plugins/index.ts` is the build-time selection, one line per plugin with a server part: memory and research helpers,
-plus the installation plugins Jev (Auto mode's decision model) and Claude Code (a model provider), which chats never
-select or pin. Add a reviewed plugin's line and rebuild; no runtime directory scan or package install occurs. Removing a line
-removes the plugin's service, native tools, namespace and interface, not its saved data or core Context/guidance
-inspection. Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins.
+`plugins/index.ts` is the build-time selection for the server and the interface alike, one line per plugin: memory
+and research helpers; the installation plugins Jev (Auto mode's decision model) and Claude Code (a model provider),
+which chats never select or pin; and the browser plugins pets and the context ring, whose line names only their
+manifest. Add a reviewed plugin's line and rebuild; no runtime directory scan or package install occurs. Removing a
+line removes the plugin's service, native tools, namespace and interface, even while its folder stays, but not its
+saved data or core Context/guidance inspection. Its new-chat switch and manifest/identity appear in Settings; Context inspects request pins.
 
 Interface components are bundled from `plugins/<id>/ui/` at build time, never downloaded. Settings tabs come from
 every plugin in the build; Context sections, workspace panels after the kernel's, composer pieces and renderers for
 the plugin's own `pal.<id>` entries appear only in chats that selected it. In a build without a plugin a chat used,
 those entries show as a short note, and a component that fails to load says so in its place. A browser plugin such as
-pets or the context ring has no server part or inventory line: only Settings tabs and composer pieces that every chat
-shows, switched in the browser.
+pets or the context ring has no server part: only Settings tabs and composer pieces that every chat shows, switched
+in the browser.
 
 Unavailable saved defaults remain visible for explicit removal. Existing chats never silently adopt another capability
 version: incompatible choices require their retained Pal release and block new input and tool execution. Invalid

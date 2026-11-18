@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import {
   access,
@@ -14,7 +14,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
@@ -173,6 +173,57 @@ describe("raw Git worktree provisioning", () => {
     await writeFile(receipt, "corrupt\n");
     await expect(runGitEffect(source, args, receipt, AbortSignal.timeout(10_000))).rejects.toThrow(/receipt/);
     expect((await git(source, "config", "--get-all", "pal.fixture")).stdout).toBe("once\n");
+  });
+
+  it("publishes its receipt with Homebrew's g-prefixed coreutils, and starts nothing without GNU sync and mv", async () => {
+    const { source, dataRoot } = await setup();
+    const onPath = (names: string[], gnu: boolean) =>
+      names
+        .flatMap((name) => (process.env.PATH ?? "").split(delimiter).map((dir) => join(dir, name)))
+        .find((path) => {
+          try {
+            const version = execFileSync(path, ["--version"], {
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+            });
+            return !gnu || version.includes("GNU coreutils");
+          } catch {
+            return false;
+          }
+        });
+    // Only what the worker needs: Homebrew's g-prefixed GNU tools, and plain sync and mv that, like macOS's own,
+    // reject GNU options.
+    const bin = await mkdtemp(join(tmpdir(), "pal-brew-path-"));
+    cleanups.push(() => rm(bin, { recursive: true, force: true }));
+    for (const [link, names, gnu] of [
+      ["git", ["git"], false],
+      ["bash", ["bash"], false],
+      ["dirname", ["dirname", "gdirname"], false],
+      ["gtimeout", ["timeout", "gtimeout"], true],
+      ["gsync", ["sync", "gsync"], true],
+      ["gmv", ["mv", "gmv"], true],
+    ] as const) {
+      const found = onPath([...names], gnu);
+      if (found === undefined) throw new Error(`no ${link} on PATH`);
+      // A wrapper, since a multi-call coreutils binary picks its program by the name it was started as.
+      await writeFile(join(bin, link), `#!/bin/sh\nexec '${found}' "$@"\n`, { mode: 0o755 });
+    }
+    const path = process.env.PATH;
+    cleanups.push(() => (process.env.PATH = path));
+    process.env.PATH = bin;
+    for (const name of ["sync", "mv"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 64\n", { mode: 0o755 });
+    const receipt = join(dataRoot, "brew-receipt");
+    await runGitEffect(source, ["config", "--add", "pal.fixture", "brew"], receipt, AbortSignal.timeout(10_000));
+    expect(await readFile(receipt, "utf8")).toBe("0\n");
+    expect((await git(source, "config", "--get-all", "pal.fixture")).stdout).toBe("brew\n");
+
+    for (const name of ["gsync", "gmv"]) await unlink(join(bin, name));
+    const refused = join(dataRoot, "refused-receipt");
+    await expect(
+      runGitEffect(source, ["config", "--add", "pal.fixture", "never"], refused, AbortSignal.timeout(10_000)),
+    ).rejects.toThrow(/GNU sync and mv/);
+    await expect(access(`${refused}.started`)).rejects.toThrow();
+    expect((await git(source, "config", "--get-all", "pal.fixture")).stdout).toBe("brew\n");
   });
 
   it("will not claim a pre-existing foreign path or accept a changed intent", async () => {

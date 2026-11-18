@@ -33,7 +33,7 @@ export function sourcePath(path: string): boolean {
     !path.includes("\0") &&
     path
       .split("/")
-      .every((part) => part !== "" && part !== "." && part !== ".." && !/^(?:agents|stack|plan)\.md$/i.test(part)) &&
+      .every((part) => part !== "" && part !== "." && part !== ".." && !/^(?:stack|plan)\.md$/i.test(part)) &&
     !path.split("/").some((part) => [".git", ".design", "node_modules"].includes(part))
   );
 }

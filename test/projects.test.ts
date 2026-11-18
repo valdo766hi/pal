@@ -34,6 +34,23 @@ describe("managed workspaces", () => {
     expect((await stat(root)).isDirectory()).toBe(true);
   });
 
+  it("refuses a folder inside Pal's data even when its name starts with two dots, and allows a sibling", async () => {
+    const { projects } = await interrupted("none");
+    const dataRoot = dirname(dirname(dirname((await projects.get("p-1"))?.root ?? "")));
+    for (const [index, inside] of ["..reference", "projects/..notes"].entries()) {
+      await mkdir(join(dataRoot, inside), { recursive: true });
+      await expect(
+        projects.create(`inside-request-${index}`, { name: "Inside", folder: join(dataRoot, inside) }),
+      ).rejects.toThrow(/inside Pal's own files/);
+    }
+    const sibling = `${dataRoot}-sibling`;
+    await mkdir(sibling);
+    cleanups.push(() => rm(sibling, { recursive: true, force: true }));
+    expect(await projects.create("sibling-request", { name: "Sibling", folder: sibling })).toMatchObject({
+      root: sibling,
+    });
+  });
+
   it("refuses to claim something else at the workspace path", async () => {
     const { projects } = await interrupted("symlink");
     expect(await projects.get("p-1")).toMatchObject({

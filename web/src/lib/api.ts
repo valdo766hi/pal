@@ -203,10 +203,13 @@ export const api = {
       mode,
       tools,
     }),
-  changes: (id: string, scope: ReviewScope = "normal", workspace?: string) =>
+  changes: (id: string, scope: ReviewScope = "normal", workspace?: string, after?: string) =>
     call<import("../../../src/core/changes.ts").ChangeSet>(
       "GET",
-      inWorkspace(`projects/${id}/changes?scope=${scope}`, workspace),
+      inWorkspace(
+        `projects/${id}/changes?scope=${scope}${after === undefined ? "" : `&after=${encodeURIComponent(after)}`}`,
+        workspace,
+      ),
     ),
   context: (id: string) => call<import("../../../src/core/context.ts").ContextInfo>("GET", `chats/${id}/context`),
   workingState: (id: string, signal?: AbortSignal) =>
@@ -389,8 +392,11 @@ export const api = {
   withdrawInput: (id: string, requestId: string) =>
     call<{ withdrawn: true }>("POST", `chats/${id}/inputs/${encodeURIComponent(requestId)}/withdraw`),
   stop: (id: string) => call<{ stopped: true }>("POST", `chats/${id}/stop`),
-  helpers: (chat: string) =>
-    call<{ helpers: import("../../../src/core/delegation.ts").HelperView[] }>("GET", `chats/${chat}/helpers`),
+  helpers: (chat: string, after?: string) =>
+    call<{ helpers: import("../../../src/core/delegation.ts").HelperView[]; next: string | null }>(
+      "GET",
+      `chats/${chat}/helpers${after === undefined ? "" : `?after=${encodeURIComponent(after)}`}`,
+    ),
   scheduler: () => call<Scheduler>("GET", "scheduler"),
   setScheduler: (enabled: boolean) => call<Scheduler>("PUT", "scheduler", { enabled }),
   commandTimeout: () => call<{ seconds: number }>("GET", "command-timeout"),

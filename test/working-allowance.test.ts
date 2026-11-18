@@ -240,9 +240,9 @@ it("charges a helper's native model step to the parent allowance instead of bypa
     fauxAssistantMessage("neither child nor parent may buy another step"),
   ]);
   expect(f.faux.state.callCount).toBe(1);
-  expect(await helperViews(f.pal.harness, f.pal.store.storage, f.chat.conversationId, context)).toMatchObject([
-    { status: "unanswered" },
-  ]);
+  expect((await helperViews(f.pal.harness, f.pal.store.storage, f.chat.conversationId, context)).helpers).toMatchObject(
+    [{ status: "unanswered" }],
+  );
   expect((await f.pal.working.inspect(f.chat, context)).allowance).toMatchObject({
     state: "blocked",
     used: { steps: 1 },

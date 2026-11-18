@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { basename, join } from "node:path";
+import { BACKGROUND_CONTEXT as context, withAbortSignal } from "@earendil-works/chord/context";
 import type { ConversationId, ToolExecutionApi, ToolRegistration } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
 import { fileTools } from "../src/core/files.ts";
@@ -32,17 +32,47 @@ async function setup(root: "home" | "managed" = "home") {
   const privateFiles = await PrivateFiles.open([join(dataRoot, "credentials.key")]);
   const extension = fileTools({ root: async () => projectRoot, deny: [dataRoot], privateFiles });
   const tools = Object.fromEntries((extension.tools ?? []).map((tool) => [tool.name, tool]));
-  const run = async (name: string, args: Record<string, unknown>): Promise<string> => {
+  const run = async (name: string, args: Record<string, unknown>, scope = context): Promise<string> => {
     const tool = tools[name] as ToolRegistration;
     // The tools read only the calling conversation from their API.
     const api = { conversationId: 1 as ConversationId } as ToolExecutionApi;
-    const result = await tool.execute(args as never, api, context);
+    const result = await tool.execute(args as never, api, scope);
     return result.output?.map((block) => (block.type === "text" ? block.text : "")).join("") ?? "";
   };
   return { home, dataRoot, run };
 }
 
 describe("project file tools", () => {
+  it("treats names starting with two dots as children, inside the project and inside Pal's data", async () => {
+    const { home, dataRoot, run } = await setup();
+    await writeFile(join(home, "..notes"), "dot-dot notes\n");
+    await writeFile(join(dataRoot, "..cache"), "Pal's own bytes\n");
+    expect(await run("files_read", { path: "..notes" })).toContain("dot-dot notes");
+    await expect(run("files_read", { path: ".local/share/pal/..cache" })).rejects.toThrow(/Pal's own files/);
+    await writeFile(`${home}-sibling.txt`, "sibling\n");
+    cleanups.push(() => rm(`${home}-sibling.txt`, { force: true }));
+    await expect(run("files_read", { path: `../${basename(home)}-sibling.txt` })).rejects.toThrow(/outside/);
+  });
+
+  it("bounds find inside one wide folder, says why it stopped, and stops when cancelled", async () => {
+    const { home, run } = await setup();
+    await mkdir(join(home, "wide"));
+    for (let index = 0; index < 600; index++) await writeFile(join(home, "wide", `match-${index}.txt`), "");
+    const found = await run("files_find", { query: "match-" });
+    expect(found.split("\n").filter((line) => line.includes("match-"))).toHaveLength(500);
+    expect(found).toContain("[showing the first 500 matches; narrow the query]");
+    await mkdir(join(home, "many"));
+    for (let index = 0; index < 5100; index++) await writeFile(join(home, "many", `entry-${index}`), "");
+    expect(await run("files_find", { query: "absent-name" })).toBe(
+      "No matches.\n[stopped after 5000 entries; narrow the query]",
+    );
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    await expect(run("files_find", { query: "match-" }, withAbortSignal(controller.signal, context))).rejects.toThrow(
+      "cancelled",
+    );
+  });
+
   it("list, read by lines and find inside the project folder", async () => {
     const { run } = await setup();
     expect(await run("files_list", { path: "repo" })).toBe(".git/\nsrc/\nescape.txt\nimage.bin  4 bytes");

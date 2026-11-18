@@ -10,7 +10,7 @@ import pkg from "../package.json" with { type: "json" };
 import type { Pal } from "./core/app.ts";
 import type { ReleaseRpc } from "./core/release-rpc.ts";
 import { parseCommand, USAGE, UsageError } from "./core/config.ts";
-import { gnuTimeout } from "./core/timeout.ts";
+import { gnuCoreutil, gnuTimeout } from "./core/timeout.ts";
 
 // The build puts the frontend in dist/public next to this bundle; running from src has none.
 const webRoot = fileURLToPath(new URL("public", import.meta.url));
@@ -218,6 +218,11 @@ async function main(argv: readonly string[]): Promise<number> {
           if (gnuTimeout() === "timeout") {
             process.stderr.write(
               "pal: GNU timeout was not found on PATH; agent shell commands and Git review will fail until coreutils is installed (gtimeout on macOS)\n",
+            );
+          }
+          if (gnuCoreutil("sync") === undefined || gnuCoreutil("mv") === undefined) {
+            process.stderr.write(
+              "pal: GNU sync and mv were not found on PATH; Worktree chats refuse to start until coreutils is installed (gsync and gmv on macOS)\n",
             );
           }
           if (!(await current.owner.exists()))

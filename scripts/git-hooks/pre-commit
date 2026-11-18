@@ -7,7 +7,7 @@ shopt -s nocasematch
 blocked=()
 while IFS= read -r -d '' path; do
 	case "$path" in
-	agents.md | */agents.md | stack.md | */stack.md | plan.md | */plan.md | \
+	stack.md | */stack.md | plan.md | */plan.md | \
 		.design/* | claude.local.md | */claude.local.md | .claude/settings.local.json | .mcp.json)
 		blocked+=("$path")
 		;;

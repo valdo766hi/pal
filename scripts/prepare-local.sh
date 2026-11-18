@@ -16,7 +16,7 @@ exclude=$(git rev-parse --path-format=absolute --git-path info/exclude)
 hooks_path=$(git config --get core.hooksPath || true)
 [[ -z $hooks_path ]] || die "core.hooksPath is set to '$hooks_path'; merge scripts/git-hooks into that hook manager manually"
 
-tracked=$(git ls-files | grep -iE '(^|/)(agents|stack|plan|claude\.local)\.md$|^\.design/' || true)
+tracked=$(git ls-files | grep -iE '(^|/)(stack|plan|claude\.local)\.md$|^\.design/' || true)
 [[ -z $tracked ]] || die "private files are in the index; untrack them with 'git rm --cached -- <path>' first:
 $tracked"
 
@@ -34,7 +34,6 @@ for hook in "${hooks[@]}"; do
 done
 
 block="# >>> $marker
-[Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd]
 [Ss][Tt][Aa][Cc][Kk].[Mm][Dd]
 [Pp][Ll][Aa][Nn].[Mm][Dd]
 CLAUDE.local.md

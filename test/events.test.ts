@@ -129,6 +129,61 @@ describe("chat event streams", () => {
     expect(before).not.toContain('"mode":"full"');
   });
 
+  it("never attach a stream whose session signs out while the stream is still setting up", async () => {
+    const { pal, base, chat, watches } = await setup();
+    const leaving = await pal.owner.signIn(PASSPHRASE);
+    const kept = await stream(base, chat.id, await pal.owner.signIn(PASSPHRASE));
+    await kept.until((text) => text.includes("event: approvals"));
+    // Hold the racing stream just after its own read found the session valid: the route's sign-in check reads it
+    // first, then the stream.
+    const held = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const read = pal.owner.sessionExpiry.bind(pal.owner);
+    let reads = 0;
+    vi.spyOn(pal.owner, "sessionExpiry").mockImplementation(async (token) => {
+      const expiry = await read(token);
+      if (token === leaving && ++reads === 2) {
+        held.resolve(undefined);
+        await release.promise;
+      }
+      return expiry;
+    });
+    const controller = new AbortController();
+    cleanups.push(async () => controller.abort());
+    let racing = "";
+    let ended = false;
+    void (async () => {
+      try {
+        const response = await fetch(`${base}/api/chats/${chat.id}/events`, {
+          headers: { cookie: `pal_session=${leaving}` },
+          signal: controller.signal,
+        });
+        const reader = response.body?.pipeThrough(new TextDecoderStream()).getReader();
+        for (let chunk = await reader?.read(); chunk !== undefined && !chunk.done; chunk = await reader?.read())
+          racing += chunk.value;
+      } catch {
+        // A refused or destroyed stream has ended too.
+      }
+      ended = true;
+    })();
+    await held.promise;
+    const signOut = await fetch(`${base}/api/sign-out`, {
+      method: "POST",
+      headers: { origin: base, cookie: `pal_session=${leaving}` },
+    });
+    expect(signOut.status).toBe(200);
+    release.resolve(undefined);
+
+    // A change committed after sign-out reaches the other session's stream, never the racing one.
+    await pal.approvals.setMode(chat.id, "full");
+    await kept.until((text) => text.includes('"mode":"full"'));
+    await expect.poll(() => ended, { timeout: 5_000 }).toBe(true);
+    expect(racing).not.toContain('"mode":"full"');
+    expect(watches()).toBe(1);
+    const after = await fetch(`${base}/api/chats/${chat.id}/events`, { headers: { cookie: `pal_session=${leaving}` } });
+    expect(after.status).toBe(401);
+  });
+
   it("closes an idle stream at its session's expiry, with no event to trigger it", async () => {
     const { pal, base, chat, watches } = await setup();
     const token = await pal.owner.signIn(PASSPHRASE);
@@ -191,7 +246,7 @@ describe("chat event streams", () => {
     await expect.poll(() => inFlight(), { timeout: 5_000 }).toBe(0);
   });
 
-  it("resends a snapshot with every entry once a backlog outgrows the view's window", async () => {
+  it("resends a bounded snapshot once a backlog outgrows the window, and older pages fill the rest exactly", async () => {
     const { pal, base, chat } = await setup();
     const conversation = await pal.harness.conversation(chat.conversationId, context);
     if (conversation === undefined) throw new Error("missing conversation");
@@ -222,14 +277,19 @@ describe("chat event streams", () => {
     let view: View | undefined;
     let codec = decoder();
     let snapshots = 0;
+    let older: number | null = null;
     let event = "";
     for await (const line of createInterface({ input, crlfDelay: Infinity })) {
       if (line.startsWith("event: ")) event = line.slice("event: ".length);
       if (!line.startsWith("data: ")) continue;
       const data = line.slice("data: ".length);
       if (event === "snapshot") {
-        const snapshot = JSON.parse(data) as { view: View; earlier: Received[] };
+        const snapshot = JSON.parse(data) as { view: View; earlier: Received[]; older: number | null };
+        // A snapshot replaces what the browser had, and carries at most one bounded page of earlier history.
+        expect(JSON.stringify(snapshot.earlier).length).toBeLessThanOrEqual(4 * 1024 * 1024 + 1024);
+        entries.clear();
         for (const entry of snapshot.earlier) entries.set(entry.id, entry);
+        older = snapshot.older;
         view = snapshot.view;
         codec = decoder();
         snapshots++;
@@ -241,6 +301,20 @@ describe("chat event streams", () => {
     }
     input.destroy();
     expect(snapshots).toBe(2);
+    expect(older).not.toBeNull();
+    for (let pages = 0; older !== null && pages < 50; pages++) {
+      const response = await fetch(`${base}/api/chats/${chat.id}/history?before=${older}`, {
+        headers: { cookie: `pal_session=${token}` },
+      });
+      const page = (await response.json()) as { entries: Received[]; older: number | null };
+      for (const entry of page.entries) {
+        expect(entries.has(entry.id)).toBe(false);
+        expect(entry.id).toBeLessThan(older);
+        entries.set(entry.id, entry);
+      }
+      older = page.older;
+    }
+    expect(older).toBeNull();
     const received = [...entries.values()].sort((a, b) => a.id - b.id);
     expect(received.flatMap((entry) => (entry.data?.n === undefined ? [] : [entry.data.n]))).toEqual(
       Array.from({ length: 120 }, (_, n) => n),
@@ -269,6 +343,43 @@ class FakeEventSource {
 }
 
 describe("web projection of the conversation view", () => {
+  it("prepends older history once, and drops a page a newer snapshot made stale", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const pages = new Map<number, Promise<unknown>>();
+    const fetched: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      fetched.push(url);
+      const before = Number(new URL(url, "http://pal.test").searchParams.get("before"));
+      return { ok: true, json: () => pages.get(before) };
+    });
+    const stream = new ChatStream("chat-one");
+    const source = FakeEventSource.last as FakeEventSource;
+    const view = (ids: number[], before: number) => ({
+      conversation: { id: 1 },
+      entries: ids.map((id) => ({ id, kind: "pi.user" })),
+      before,
+      docs: { "pi.inbox": { items: [] } },
+    });
+    const page = (ids: number[]) => ids.map((id) => ({ id, kind: "pi.user" }));
+    source.emit("snapshot", { view: view([5, 6], 4), earlier: page([3, 4]), older: 3 });
+    pages.set(3, Promise.resolve({ entries: page([1, 2]), older: null }));
+    await stream.loadOlder();
+    expect(stream.entries.map((entry) => entry.id)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(stream.older).toBeNull();
+    await stream.loadOlder();
+    expect(fetched).toEqual(["/api/chats/chat-one/history?before=3"]);
+
+    const late = Promise.withResolvers<unknown>();
+    source.emit("snapshot", { view: view([7, 8], 6), earlier: page([5, 6]), older: 5 });
+    pages.set(5, late.promise);
+    const loading = stream.loadOlder();
+    source.emit("snapshot", { view: view([8, 9], 7), earlier: page([7]), older: 7 });
+    late.resolve({ entries: page([1, 2, 3, 4]), older: null });
+    await loading;
+    expect(stream.entries.map((entry) => entry.id)).toEqual([7, 8, 9]);
+    expect(stream.older).toBe(7);
+  });
+
   type View = { conversation: { id: number }; entries: { id: number; kind: string }[]; before?: number; docs: Docs };
   type Docs = Record<string, Record<string, unknown>>;
   const view = (docs: Docs = {}, entries: View["entries"] = [], before?: number): View => ({

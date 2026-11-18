@@ -107,11 +107,6 @@ const IDENTITY_COLUMNS = [
     update: "UPDATE pal_workspaces SET identity = ? WHERE identity = ?",
   },
   {
-    table: "pal_workspace_purges",
-    select: "SELECT identity AS value FROM pal_workspace_purges",
-    update: "UPDATE pal_workspace_purges SET identity = ? WHERE identity = ?",
-  },
-  {
     table: "pal_folder_grants",
     select: "SELECT identity AS value FROM pal_folder_grants",
     update: "UPDATE pal_folder_grants SET identity = ? WHERE identity = ?",
@@ -129,6 +124,13 @@ const IDENTITY_DOCUMENTS = [
     fields: ["identity"],
     select: "SELECT rowid AS id, source AS value FROM pal_memory_versions",
     update: "UPDATE pal_memory_versions SET source = ? WHERE rowid = ?",
+  },
+  {
+    // An input's frozen scope; its reference and workspace entries are IDs, not identities.
+    table: "pal_admissions",
+    fields: ["primary"],
+    select: "SELECT rowid AS id, folder_scope AS value FROM pal_admissions WHERE folder_scope IS NOT NULL",
+    update: "UPDATE pal_admissions SET folder_scope = ? WHERE rowid = ?",
   },
 ] as const;
 const UNFINISHED = [
@@ -244,7 +246,17 @@ async function storeFacts(database: SqliteDatabase) {
       for (const field of fields) if (typeof document[field] === "string") referenced.add(document[field]);
     }
   }
-  return { schema, installation, build, unfinished, external, referenced };
+  // A pending workspace deletion pins its container and workspace folders as `dev:ino:dev:ino`, so those folders are
+  // recorded by their device and inode.
+  const pinned = new Set<string>();
+  if (tables.has("pal_workspace_purges"))
+    for (const { identity } of await database.all<{ identity: string }>(
+      "SELECT identity FROM pal_workspace_purges WHERE completed_at IS NULL",
+    )) {
+      const [cdev, cino, wdev, wino] = identity.split(":");
+      pinned.add(`${cdev}:${cino}`).add(`${wdev}:${wino}`);
+    }
+  return { schema, installation, build, unfinished, external, referenced, pinned };
 }
 
 /** Counts of durable work a store still holds, for the tables its schema has. */
@@ -282,7 +294,7 @@ async function copyStore(
     (path) => RUNTIME.has(path) || path === KEY || (!options.includeBrowserProfiles && browser(path)),
     async (path, info) => {
       if (entries.length >= MAX_ENTRIES) throw new BackupError(`more than ${MAX_ENTRIES} entries`);
-      entries.push(await copyEntry(join(dataRoot, path), join(data, path), path, info, facts.referenced));
+      entries.push(await copyEntry(join(dataRoot, path), join(data, path), path, info, facts));
     },
   );
   let browserProfiles: BackupManifest["browserProfiles"] = "absent";
@@ -310,7 +322,7 @@ async function copyEntry(
   target: string,
   path: string,
   info: BigIntStats,
-  referenced: ReadonlySet<string>,
+  { referenced, pinned }: { referenced: ReadonlySet<string>; pinned: ReadonlySet<string> },
 ): Promise<Entry> {
   if (info.isDirectory()) {
     const identity = `${info.dev}:${info.ino}:${info.birthtimeNs}`;
@@ -319,7 +331,7 @@ async function copyEntry(
       type: "directory",
       path,
       mode: Number(info.mode & 0o7777n),
-      ...(referenced.has(identity) ? { identity } : {}),
+      ...(referenced.has(identity) || pinned.has(`${info.dev}:${info.ino}`) ? { identity } : {}),
     };
   }
   if (info.isFile()) {
@@ -544,6 +556,26 @@ function remapIdentities(path: string, remap: ReadonlyMap<string, string>) {
             return current !== undefined;
           });
           if (touched.length > 0) changed += Number(statement.run(JSON.stringify(document), row.id).changes);
+        }
+      }
+      if (tables.has("pal_workspace_purges")) {
+        // Rebuilt from the recreated folders: the container must have been copied; a workspace that was already gone
+        // keeps its old part, which the deletion compares only against itself.
+        const moved = new Map(
+          [...remap].map(([old, current]) => [
+            old.split(":").slice(0, 2).join(":"),
+            current.split(":").slice(0, 2).join(":"),
+          ]),
+        );
+        const update = db.prepare("UPDATE pal_workspace_purges SET identity = ? WHERE project_id = ?");
+        for (const row of db
+          .prepare("SELECT project_id, identity FROM pal_workspace_purges WHERE completed_at IS NULL")
+          .all() as { project_id: string; identity: string }[]) {
+          const [cdev, cino, wdev, wino] = row.identity.split(":");
+          const container = moved.get(`${cdev}:${cino}`);
+          if (container === undefined) continue;
+          const workspace = moved.get(`${wdev}:${wino}`) ?? `${wdev}:${wino}`;
+          changed += Number(update.run(`${container}:${workspace}`, row.project_id).changes);
         }
       }
       if (tables.has("pal_settings")) {

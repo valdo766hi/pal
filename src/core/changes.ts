@@ -33,6 +33,8 @@ export type Change = {
   revision: string;
   reviewed: boolean;
   problem?: string;
+  /** A file mode change beside its text change, such as "100644 → 100755"; review and discard cover the text only. */
+  mode?: string;
 };
 /** A review comment on one line of a file revision; outdated once that line's text changes or the file stops differing. */
 export type ChangeComment = {
@@ -54,6 +56,8 @@ export type ChangeSet = {
   files: Change[];
   comments: ChangeComment[];
   truncated: boolean;
+  /** Where a partial scan stopped: list again with this as `after` for the paths it did not reach, else null. */
+  next: string | null;
   note: string;
 };
 const within = (root: string, path: string) => {
@@ -179,7 +183,12 @@ export class Changes {
       });
     });
   }
-  async list(projectId: string, scope: ReviewScope = "normal", workspaceId?: string): Promise<ChangeSet> {
+  async list(
+    projectId: string,
+    scope: ReviewScope = "normal",
+    workspaceId?: string,
+    after?: string,
+  ): Promise<ChangeSet> {
     if (this.#active >= 2)
       throw new HttpError(409, "changes_busy", "another change scan is in progress; retry shortly");
     this.#active++;
@@ -198,17 +207,22 @@ export class Changes {
           files: [],
           comments: [],
           truncated: false,
+          next: null,
           note: "Git is unavailable or this folder is not a repository root. No baseline or rollback is invented. Use the host terminal to initialize Git explicitly.",
         };
       }
       const signal = AbortSignal.timeout(10_000);
-      const tracked =
+      // Each tracked path's recorded mode, from "<mode> <type> <object>\t<path>".
+      const modes = new Map(
         baseline.head === null
           ? []
-          : (await git(root, ["ls-tree", "-r", "-z", "--name-only", baseline.head], signal))
+          : (await git(root, ["ls-tree", "-r", "-z", baseline.head], signal))
               .toString()
               .split("\0")
-              .filter(Boolean);
+              .filter(Boolean)
+              .map((line) => [line.slice(line.indexOf("\t") + 1), line.slice(0, 6)] as const),
+      );
+      const tracked = [...modes.keys()];
       const current = (await git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], signal))
         .toString()
         .split("\0")
@@ -221,7 +235,7 @@ export class Changes {
               .filter(Boolean)
           : [];
       const names = [...new Set([...tracked, ...current, ...ignored])]
-        .filter((path) => this.#allowed(root, path))
+        .filter((path) => this.#allowed(root, path) && (after === undefined || path > after))
         .sort();
       const reviews = await this.#database.all<{ path: string; revision: string }>(
         "SELECT path, revision FROM pal_change_reviews WHERE scope_id = ?",
@@ -235,56 +249,94 @@ export class Changes {
       const lines = new Map<string, string[]>();
       const files: Change[] = [];
       let budget = 2 * 1024 * 1024;
-      let truncated = names.length > MAX_FILES;
-      const selected = names.slice(0, MAX_FILES);
-      const initiallyHidden = scope === "normal" ? await this.#ignored(root, selected, signal) : new Set<string>();
-      for (const path of selected) {
-        if (initiallyHidden.has(path)) continue;
-        if (signal.aborted) {
-          truncated = true;
-          break;
+      // Paths are inspected in order until enough changes are found or a byte or time limit is reached; the last path
+      // handled is where the next scan continues, so every later path stays reachable.
+      let next: string | null = null;
+      let handled = after ?? "";
+      scan: for (let start = 0; start < names.length; start += MAX_FILES) {
+        const batch = names.slice(start, start + MAX_FILES);
+        let initiallyHidden = new Set<string>();
+        if (scope === "normal")
+          try {
+            initiallyHidden = await this.#ignored(root, batch, signal);
+          } catch (error) {
+            if (!signal.aborted) throw error;
+            next = handled;
+            break scan;
+          }
+        for (const path of batch) {
+          if (files.length >= MAX_FILES || signal.aborted) {
+            next = handled;
+            break scan;
+          }
+          if (initiallyHidden.has(path)) {
+            handled = path;
+            continue;
+          }
+          let change;
+          try {
+            change = await this.#inspect(root, baseline.head, path, tracked.includes(path), signal);
+          } catch {
+            if (signal.aborted) {
+              next = handled;
+              break scan;
+            }
+            files.push({
+              path,
+              status: "M",
+              patch: "",
+              revision: "",
+              reviewed: false,
+              problem: "Unavailable: binary, oversized, missing Git object, symlink, or outside the granted folder.",
+            });
+            handled = path;
+            continue;
+          }
+          const mode = await this.#modeChange(root, path, modes.get(path));
+          if (change === undefined && mode !== undefined)
+            files.push({
+              path,
+              status: "M",
+              patch: "",
+              revision: "",
+              reviewed: false,
+              problem: `Only its file mode changed (${mode}). Changes compares text, so review or undo the mode in a terminal.`,
+            });
+          if (change !== undefined) {
+            budget -= Buffer.byteLength(change.patch);
+            // The first change of a scan is always kept, so a continuation makes progress.
+            if (budget < 0 && files.length > 0) {
+              next = handled;
+              break scan;
+            }
+            const { status, patch, revision } = change;
+            if (commented.has(path) && change.after !== null)
+              lines.set(path, change.after.toString("utf8").split("\n"));
+            files.push({
+              path,
+              status,
+              patch,
+              revision,
+              reviewed: reviews.some((row) => row.path === path && row.revision === revision),
+              ...(mode === undefined ? {} : { mode }),
+            });
+          }
+          handled = path;
         }
-        let change;
-        try {
-          change = await this.#inspect(root, baseline.head, path, tracked.includes(path), signal);
-        } catch {
-          files.push({
-            path,
-            status: "M",
-            patch: "",
-            revision: "",
-            reviewed: false,
-            problem: "Unavailable: binary, oversized, missing Git object, symlink, or outside the granted folder.",
-          });
-          continue;
-        }
-        if (change === undefined) continue;
-        budget -= Buffer.byteLength(change.patch);
-        if (budget < 0) {
-          truncated = true;
-          break;
-        }
-        const { status, patch, revision } = change;
-        if (commented.has(path) && change.after !== null) lines.set(path, change.after.toString("utf8").split("\n"));
-        files.push({
-          path,
-          status,
-          patch,
-          revision,
-          reviewed: reviews.some((row) => row.path === path && row.revision === revision),
-        });
       }
+      // The scan's own time may be spent; finishing the page gets its own, so it still applies the ignore rules.
+      const finish = AbortSignal.timeout(10_000);
       const hidden = await this.#ignored(
         root,
         [...files.map((file) => file.path), ...comments.map((comment) => comment.path)],
-        signal,
+        finish,
       );
       const visible = (path: string) => this.#allowed(root, path) && (scope === "include-ignored" || !hidden.has(path));
       await location.check();
       return {
         state: "ready",
         base: baseline.head,
-        head: await this.#head(root, signal),
+        head: await this.#head(root, finish),
         files: files.flatMap((file) => {
           if (!visible(file.path)) return [];
           return [hidden.has(file.path) ? { ...file, ignored: true } : file];
@@ -299,12 +351,21 @@ export class Changes {
             },
           ];
         }),
-        truncated,
+        truncated: next !== null,
+        next,
         note,
       };
     } finally {
       this.#active--;
     }
+  }
+  /** How a tracked regular file's executable bit moved from its recorded Git mode, if it did. */
+  async #modeChange(root: string, path: string, recorded: string | undefined): Promise<string | undefined> {
+    if (recorded !== "100644" && recorded !== "100755") return undefined;
+    const info = await lstat(join(root, path)).catch(() => undefined);
+    if (info === undefined || !info.isFile()) return undefined;
+    const now = (info.mode & 0o111) === 0 ? "100644" : "100755";
+    return now === recorded ? undefined : `${recorded} → ${now}`;
   }
   /** One file against the baseline, or undefined when its bytes match. Throws when it cannot be shown as text. */
   async #inspect(root: string, head: string | null, path: string, tracked: boolean, signal: AbortSignal) {
@@ -388,6 +449,20 @@ export class Changes {
     return new Set(found.toString().split("\0").filter(Boolean));
   }
 
+  /**
+   * One file as it differs from the baseline now, or undefined when it doesn't or can't be shown. Checked directly,
+   * not through a listing, so a file from any page of a continued scan qualifies.
+   */
+  async #current(root: string, key: string, path: string, scope: ReviewScope, signal: AbortSignal) {
+    if (!this.#allowed(root, path)) throw new FileAccessError(`${path} is outside the project folder or protected`);
+    const baseline = await this.#baseline(key, root);
+    if (baseline === undefined) return undefined;
+    await this.#permission(root, path, scope, signal);
+    return await this.#entry(root, baseline.head, path, signal)
+      .then((entry) => this.#inspect(root, baseline.head, path, entry !== undefined, signal))
+      .catch(() => undefined);
+  }
+
   async #permission(root: string, path: string, scope: ReviewScope, signal: AbortSignal): Promise<void> {
     if (scope === "normal" && (await this.#ignored(root, [path], signal)).has(path))
       throw new HttpError(
@@ -406,10 +481,8 @@ export class Changes {
     workspaceId?: string,
   ): Promise<void> {
     const location = await this.#location(projectId, workspaceId);
-    const listing = await this.list(projectId, scope, workspaceId);
-    if (listing.state === "ready") await this.#permission(location.root, path, scope, AbortSignal.timeout(10_000));
-    const latest = listing.files.find((file) => file.path === path);
-    if (latest === undefined || latest.problem !== undefined || latest.revision !== revision)
+    const change = await this.#current(location.root, location.key, path, scope, AbortSignal.timeout(10_000));
+    if (change?.revision !== revision)
       throw new HttpError(409, "changes_stale", "the file changed; refresh and review its latest revision");
     await location.check();
     await this.#database.transaction(async (tx) => {
@@ -523,16 +596,8 @@ export class Changes {
   ): Promise<ChangeComment> {
     const location = await this.#location(projectId, workspaceId);
     const { root, key } = location;
-    if (!this.#allowed(root, path)) throw new FileAccessError(`${path} is outside the project folder or protected`);
-    const baseline = await this.#baseline(key, root);
     const signal = AbortSignal.timeout(10_000);
-    if (baseline !== undefined) await this.#permission(root, path, scope, signal);
-    const change =
-      baseline === undefined
-        ? undefined
-        : await this.#entry(root, baseline.head, path, signal)
-            .then((entry) => this.#inspect(root, baseline.head, path, entry !== undefined, signal))
-            .catch(() => undefined);
+    const change = await this.#current(root, key, path, scope, signal);
     if (change?.revision !== revision)
       throw new HttpError(409, "changes_stale", "the file changed; refresh and comment on its latest revision");
     const lines = change.after?.toString("utf8").split("\n") ?? [];

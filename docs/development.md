@@ -257,8 +257,8 @@ nix build --out-link activation-benchmark .#activation-benchmark
 ```
 
 Each sample creates a private store, guidance root and 500-file project. Setup/seeding is outside the measured
-interval. Search must return the known Unicode filename; the terminal must deliver its live control state and
-shell prompt over the real authenticated WebSocket; the browser must deliver owner control and a blank-page
+interval. Search must return the known Unicode filename; the terminal must deliver its live control state over the real
+authenticated WebSocket and its shell must answer a typed command with a per-sample marker, whatever its prompt; the browser must deliver owner control and a blank-page
 frame using its unchanged packaged sandbox, public-only egress broker and resource scope. Unavailable protection,
 failed work or a disconnected stream fails the measurement rather than becoming a fast success or a fallback.
 No model or internet request is made. Only synthetic fixture data is used and removed after its resources close.
@@ -467,6 +467,21 @@ instead of an estimate. The baseline gets the same first 100 KiB of each inline,
 external commands refuse the task. A task's requirements only add to the evaluation directory's own settings, for
 that run, and are restored after it. Version 5 of the Pal and baseline adapters applies them.
 
+Three held-out tasks are reserved for judging a change after it is chosen, never for developing it:
+`fee-policy-long-context` (four transfer-fee rules sit far apart in a 1,200-clause policy, among clauses about
+other operations), `config-rename-recovery` (a planned rename is partly done; after an idle restart the agent must
+finish it without reverting the completed step, keeping the old option as an alias) and
+`csv-export-owner-correction` (CSV quoting, then an owner correction to a locale-specific delimiter and decimal
+comma that keeps the earlier rules).
+
+**Comparison rule, declared before any run.** Compare a candidate build with the build it changes on the same task
+versions, model, effort, budget, capabilities and repeat count (at least three): the development split while
+iterating, then the held-out split once. Keep the change only if no task's graded success rate drops, no run ends
+as done while failing its grade, approvals and receipts show no effect the owner did not allow, interventions do not
+increase, and median seconds and tokens per task grow by at most 25%, unless the owner accepted a larger cost for
+the expected gain before the run. Report graded completion, failure classes, latency, tokens and cost estimates for
+both builds.
+
 ```sh
 nix build --out-link evaluate .#evaluate
 ./evaluate/bin/pal-evaluate --data-dir /absolute/evaluation-data --provider openrouter --model <id> \
@@ -636,8 +651,9 @@ in a browser. See [extension architecture](architecture.md#extensions-and-releas
    kernel's panels in chats that selected the plugin; a component that fails to load says so in its place. A
    renderer receives `{ entry }`.
 6. **List it.** Add one line to `plugins/index.ts`: `export { default as <id> } from "./<id>/server.ts";`. A plugin
-   with `scope: "browser"`, such as `pets`, has only interface pieces, no `server.ts` and no line. An installation
-   plugin, such as `jev`, has both but no new-chat switch in Settings → Extensions.
+   with `scope: "browser"`, such as `pets`, has only interface pieces and no `server.ts`; its line names its manifest,
+   `./<id>/manifest.ts`. An installation plugin, such as `jev`, has both but no new-chat switch in Settings →
+   Extensions.
 7. **Build, drain and restart.** Run `pnpm check` and `pnpm build`, let running chats finish, then restart Pal on the
    new build. A changed plugin changes Pal's implementation identity, so the new build refuses to start while work is
    unfinished; finish it on the previous build first. An installed Pal takes the new build through
@@ -646,7 +662,7 @@ in a browser. See [extension architecture](architecture.md#extensions-and-releas
    versions they started with. `test/capabilities.test.ts` shows the contract checks, and `test/e2e/plugins.test.ts`
    the browser flow. Run `pnpm test` and `pnpm test:e2e`.
 
-Removing a plugin's line and folder removes its tools and interface. Its settings and entries stay, and chats that
+Removing a plugin's line removes its tools and interface, even while its folder stays. Its settings and entries stay, and chats that
 used it show its entries as a short note.
 
 ## Conventions

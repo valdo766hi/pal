@@ -1289,6 +1289,7 @@ class ClaudeProcess {
   }
 
   async close(): Promise<void> {
+    liveProcesses.delete(this);
     this.closeNow();
     await Promise.allSettled([this.readTask, this.exitOutcome, this.relay.close()]);
     await rm(this.root, { recursive: true, force: true });
@@ -1318,6 +1319,10 @@ interface AcquiredProcess {
 }
 
 const processCache = new Map<string, ClaudeProcess>();
+// Pal: every live process, cached or one-shot, so closing all of them does not depend on the reuse cache.
+const liveProcesses = new Set<ClaudeProcess>();
+// Pal: counts closings of all processes; a request begun before one never starts a process after it.
+let revocations = 0;
 let managerTail: Promise<void> = Promise.resolve();
 
 async function withManagerLock<T>(operation: () => Promise<T> | T): Promise<T> {
@@ -1352,8 +1357,9 @@ async function discardProcess(acquired: AcquiredProcess): Promise<void> {
   await worker.close();
 }
 
-async function acquireProcess(input: RunClaudeInput, plan: ClaudeLaunchPlan): Promise<AcquiredProcess> {
+async function acquireProcess(input: RunClaudeInput, plan: ClaudeLaunchPlan, epoch: number): Promise<AcquiredProcess> {
   return withManagerLock(async () => {
+    if (epoch !== revocations) throw new Error("Claude Code was stopped: it was disabled or its settings changed.");
     const sessionId = input.sessionId;
     const cached = sessionId ? processCache.get(sessionId) : undefined;
     if (cached && !cached.busy) {
@@ -1386,6 +1392,7 @@ async function acquireProcess(input: RunClaudeInput, plan: ClaudeLaunchPlan): Pr
     }
 
     const worker = await ClaudeProcess.create(input, plan);
+    liveProcesses.add(worker);
     worker.busy = true;
     const retained = retain && processCache.size < MAX_CACHED_CLAUDE_PROCESSES;
     if (retained) processCache.set(sessionId!, worker);
@@ -1401,8 +1408,10 @@ export async function closeClaudeProcesses(sessionId?: string): Promise<void> {
       processCache.delete(sessionId);
       return worker ? [worker] : [];
     }
-    const all = [...processCache.values()];
+    // Pal: busy one-shot processes too, and no request from before this starts another.
+    const all = [...liveProcesses];
     processCache.clear();
+    revocations++;
     return all;
   });
   await Promise.allSettled(workers.map((worker) => worker.close()));
@@ -1417,10 +1426,10 @@ registerSessionResourceCleanup((sessionId) => {
   void closeClaudeProcesses(sessionId);
 });
 
-export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaudeOutput> {
+export async function runClaudeRequest(input: RunClaudeInput, epoch = revocations): Promise<RunClaudeOutput> {
   input.signal?.throwIfAborted();
   const plan = launchPlan(input);
-  const acquired = await acquireProcess(input, plan);
+  const acquired = await acquireProcess(input, plan, epoch);
   try {
     const output = await acquired.worker.run(input, acquired.continuation);
     const stable = acquired.worker.commit(input, output.message);
@@ -1443,7 +1452,7 @@ export async function runClaudeRequest(input: RunClaudeInput): Promise<RunClaude
     // A warm process can hold stale hidden state. If it failed before streaming
     // or reaching the API, nothing was shown or charged, so replay once on a fresh process.
     if (acquired.continuation && !acquired.worker.startedOutput && !input.signal?.aborted) {
-      return runClaudeRequest(input);
+      return runClaudeRequest(input, epoch);
     }
     throw error;
   }

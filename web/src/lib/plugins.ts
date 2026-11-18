@@ -2,6 +2,7 @@
 // Plugin interface pieces from plugins/*: manifests are read at build time, components load only when shown.
 import type { Component } from "svelte";
 import type { CapabilityManifest } from "../../../src/capabilities/contract.ts";
+import inventory from "../../../plugins/index.ts?raw";
 import type { ChatSummary, ContextInfo, GrantedFolder, Project, Workspace } from "./api.ts";
 import { ICONS, type IconName } from "./icons.ts";
 
@@ -30,9 +31,13 @@ export type SettingsSection = Piece<Record<string, never>> & { id: string; label
 export type PluginPanel = Piece<PanelProps> & { id: string; icon: IconName };
 type Choice = { id: string; version: number };
 
+/** The folders `plugins/index.ts` lists, read as text so no server code reaches the browser bundle. */
+const listed = new Set([...inventory.matchAll(/from "\.\/([^/"]+)\//g)].map((match) => match[1]));
 const manifests = Object.values(
   import.meta.glob<{ default: CapabilityManifest }>("../../../plugins/*/manifest.ts", { eager: true }),
-).map((module) => module.default);
+)
+  .map((module) => module.default)
+  .filter((manifest) => listed.has(manifest.id));
 const components = import.meta.glob("../../../plugins/*/ui/*.svelte");
 
 /** Plugin components that failed to load in this tab, newest last, for the owner's copied diagnostics. */

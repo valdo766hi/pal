@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, type ChatSummary } from "../lib/api.ts";
+  import { drafts } from "../lib/drafts.svelte.ts";
   import Icon from "../lib/Icon.svelte";
   import PalMark from "../lib/PalMark.svelte";
   import { app, navigate, refreshProjects } from "../lib/state.svelte.ts";
@@ -32,8 +33,15 @@
   async function remove() {
     const item = removing;
     if (item === undefined) return;
-    if (item.kind === "chat") await api.deleteChat(item.id);
-    else await api.removeProject(item.id);
+    // Drafts go only once Pal confirms the deletion; a failed one keeps them.
+    if (item.kind === "chat") {
+      await api.deleteChat(item.id);
+      drafts.forget(item.id);
+    } else {
+      const chats = app.projects.find((project) => project.id === item.id)?.chats ?? [];
+      await api.removeProject(item.id);
+      for (const chat of chats) drafts.forget(chat.id);
+    }
     await refreshProjects();
     if (
       app.route.view === "chat" &&

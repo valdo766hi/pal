@@ -352,6 +352,124 @@ export const lostAttachment = {
   unchanged: ["README.md"],
 } as const satisfies AnswerTask;
 
+export const feePolicy = {
+  kind: "program",
+  id: "fee-policy-long-context",
+  version: 1,
+  split: "held-out",
+  categories: ["long-context", "bug-fix"],
+  snapshot: "fee-policy",
+  entrypoint: "src/main.mjs",
+  unchanged: ["POLICY.md", "test.mjs", "src/main.mjs"],
+  prompt:
+    "Make fee() in src/fees.mjs follow POLICY.md for transfers. The policy is long: every clause about transfer " +
+    "fees applies, and clauses about other operations do not. A transfer is {amountCents, from: {owner}, to: " +
+    "{owner}} with a positive integer amount. Do not modify POLICY.md, test.mjs or src/main.mjs. Run node test.mjs.",
+  cases: [
+    { id: "base", input: { amountCents: 1234, from: { owner: "ana" }, to: { owner: "ben" } }, expected: 31 },
+    { id: "half-up", input: { amountCents: 20, from: { owner: "ana" }, to: { owner: "ben" } }, expected: 1 },
+    { id: "cap", input: { amountCents: 30000, from: { owner: "ana" }, to: { owner: "ben" } }, expected: 500 },
+    { id: "below-flat", input: { amountCents: 999999, from: { owner: "ana" }, to: { owner: "ben" } }, expected: 500 },
+    { id: "flat", input: { amountCents: 1000000, from: { owner: "ana" }, to: { owner: "ben" } }, expected: 1500 },
+    { id: "same-owner", input: { amountCents: 5000, from: { owner: "ana" }, to: { owner: "ana" } }, expected: 0 },
+    {
+      id: "same-owner-large",
+      input: { amountCents: 2000000, from: { owner: "ben" }, to: { owner: "ben" } },
+      expected: 0,
+    },
+  ],
+} as const satisfies ProgramTask;
+
+export const configRecovery = {
+  kind: "program",
+  id: "config-rename-recovery",
+  version: 1,
+  split: "held-out",
+  categories: ["recovery", "restart-checkpoint", "multi-file"],
+  snapshot: "config-rename",
+  entrypoint: "src/main.mjs",
+  unchanged: ["NOTES.md", "test.mjs", "src/defaults.mjs", "src/main.mjs"],
+  prompt:
+    "Carry out the rename planned in NOTES.md: the option timeoutMs becomes deadlineMs across src/. Start with " +
+    "src/parse.mjs.",
+  continuations: [
+    {
+      owner: false,
+      restart: true,
+      prompt:
+        "Pal restarted while you worked on the rename. Check NOTES.md and the code to see which steps are done, " +
+        "finish the rest without redoing or reverting completed work, and make node test.mjs pass.",
+    },
+  ],
+  cases: [
+    {
+      id: "defaults",
+      input: { options: {} },
+      expected: { resolved: { deadlineMs: 5000, retries: 2 }, text: "deadline 5000ms, 2 retries" },
+    },
+    {
+      id: "new-name",
+      input: { options: { deadlineMs: 900 } },
+      expected: { resolved: { deadlineMs: 900, retries: 2 }, text: "deadline 900ms, 2 retries" },
+    },
+    {
+      id: "old-alias",
+      input: { options: { timeoutMs: 1200, retries: 5 } },
+      expected: { resolved: { deadlineMs: 1200, retries: 5 }, text: "deadline 1200ms, 5 retries" },
+    },
+    {
+      id: "new-name-wins",
+      input: { options: { timeoutMs: 1200, deadlineMs: 800 } },
+      expected: { resolved: { deadlineMs: 800, retries: 2 }, text: "deadline 800ms, 2 retries" },
+    },
+  ],
+} as const satisfies ProgramTask;
+
+export const csvCorrection = {
+  kind: "program",
+  id: "csv-export-owner-correction",
+  version: 1,
+  split: "held-out",
+  categories: ["continuation", "owner-intervention", "bug-fix"],
+  snapshot: "csv-export",
+  entrypoint: "src/main.mjs",
+  unchanged: ["test.mjs", "src/main.mjs"],
+  prompt:
+    "Fix toCsv in src/csv.mjs. A field containing the delimiter, a double quote, a carriage return or a newline " +
+    "is wrapped in double quotes, with each inner double quote doubled; every row, including the last, ends with " +
+    "\\r\\n. Values are strings or numbers. Do not change test.mjs or src/main.mjs. Run node test.mjs.",
+  continuations: [
+    {
+      owner: true,
+      prompt:
+        'Owner correction: when locale is "eu", separate fields with ";" and write numbers with a decimal comma ' +
+        '(2.5 becomes 2,5); other locales keep "," and ".". Quote fields by the delimiter actually used. Keep every ' +
+        "earlier rule and check the combined behavior before finishing.",
+    },
+  ],
+  cases: [
+    {
+      id: "plain",
+      input: {
+        rows: [
+          ["a", "b"],
+          ["c", "d"],
+        ],
+      },
+      expected: "a,b\r\nc,d\r\n",
+    },
+    {
+      id: "quoting",
+      input: { rows: [["x, y", 'say "hi"', "two\nlines"]] },
+      expected: '"x, y","say ""hi""","two\nlines"\r\n',
+    },
+    { id: "numbers", input: { rows: [[2.5, 10]] }, expected: "2.5,10\r\n" },
+    { id: "eu-delimiter", input: { rows: [["a;b", "c,d", 2.5]], locale: "eu" }, expected: '"a;b";c,d;2,5\r\n' },
+    { id: "eu-quotes", input: { rows: [['q"x', 1]], locale: "eu" }, expected: '"q""x";1\r\n' },
+    { id: "empty", input: { rows: [] }, expected: "" },
+  ],
+} as const satisfies ProgramTask;
+
 export const TASKS: readonly Task[] = [
   checkout,
   inventory,
@@ -364,4 +482,7 @@ export const TASKS: readonly Task[] = [
   helperResearch,
   slowVerifierCheckout,
   lostAttachment,
+  feePolicy,
+  configRecovery,
+  csvCorrection,
 ];

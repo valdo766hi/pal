@@ -1,4 +1,6 @@
-import { access } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { activationCapability, sampleActivation } from "../scripts/benchmark-activation.ts";
 import { Projects } from "../src/core/projects.ts";
@@ -53,6 +55,30 @@ describe("optional capability activation measurements", () => {
       }
       await removedProject(roots);
     },
+  );
+
+  it.each([
+    ["measures a shell whose prompt shows no $", "PS1='fixture > '\n", true],
+    ["refuses startup text that only looks like a prompt", "printf 'fake $ prompt\\n'\nexec sleep 60\n", false],
+  ] as const)(
+    "%s",
+    async (_name, bashrc, ready) => {
+      const home = await mkdtemp(join(tmpdir(), "pal-act-home-"));
+      try {
+        await writeFile(join(home, ".bashrc"), bashrc);
+        await writeFile(join(home, ".bash_profile"), '. "$HOME/.bashrc"\n');
+        vi.stubEnv("HOME", home);
+        vi.stubEnv("SHELL", process.env.PAL_BASH ?? "/bin/bash");
+        const roots = projectRoots();
+        const sample = sampleActivation("terminal");
+        if (ready) expect(await sample).toMatchObject({ capability: "terminal", ready: "shell-prompt" });
+        else await expect(sample).rejects.toThrow("Capability readiness exceeded 20000 ms.");
+        await removedProject(roots);
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    30_000,
   );
 
   it("refuses an empty search result instead of reporting a fast successful sample", async () => {
