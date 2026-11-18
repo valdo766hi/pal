@@ -1102,9 +1102,11 @@ describe("MCP server form", () => {
       });
       return {
         seen: seen.promise,
-        release: async () => {
+        /** Unroute only once `settled`: a request the page sends while Playwright unroutes can be stranded. */
+        release: async (settled: Promise<unknown>) => {
           release.resolve(undefined);
           await done.promise;
+          await settled;
           await page.unroute(url);
         },
       };
@@ -1141,8 +1143,7 @@ describe("MCP server form", () => {
     disabled.push(await url.isDisabled(), await key.isDisabled());
     await force(url, b.url);
     await force(key, "key-held-b1");
-    await hold.release();
-    await test;
+    await hold.release(test);
     const [held] = (await pal.mcp.list()).filter((server) => server.name === "Held");
     if (held === undefined) throw new Error("the server was not saved");
     expect(bearers(a)).toContain("Bearer key-held-a1");
@@ -1159,8 +1160,7 @@ describe("MCP server form", () => {
     disabled.push(await url.isDisabled(), await key.isDisabled());
     await force(url, b.url);
     await force(key, "key-held-b2");
-    await hold.release();
-    await test;
+    await hold.release(test);
     expect(bearers(a)).toContain("Bearer key-held-a2");
     expect(bearers(a)).not.toContain("Bearer key-held-b2");
     expect(b.requests).toEqual([]);
