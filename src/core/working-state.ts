@@ -1,4 +1,4 @@
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { estimateTextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { defineDoc, defineExtension, defineTool, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";

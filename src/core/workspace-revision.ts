@@ -2,7 +2,7 @@ import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { PrivateFiles } from "./file-policy.ts";
 import { readFileSnapshot, resolveProjectPath } from "./files.ts";
 import type { FolderLease } from "./folders.ts";

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { CredentialStore, Provider } from "@earendil-works/pi-ai";
 import {
   defineExtension,

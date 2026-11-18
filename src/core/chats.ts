@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { ImageContent, ModelThinkingLevel, TextContent } from "@earendil-works/pi-ai";
 import {
   type Agent,

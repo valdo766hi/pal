@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { createModels, type Models } from "@earendil-works/pi-ai";
 import {
   type AgentChange,
