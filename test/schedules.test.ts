@@ -129,7 +129,7 @@ describe("scheduled messages", () => {
       {
         chatId: "chat-1",
         requestId: `schedule-${schedule.id}-1`,
-        body: { text: "Check the build", configuration: "a".repeat(64) },
+        body: { text: "Check the build", configuration: "a".repeat(64), mode: "ask" },
       },
     ]);
     running.clear();
@@ -345,6 +345,28 @@ describe("scheduled message recovery", () => {
       ]);
       expect(state.schedule).toMatchObject({ state: "done", fired: 1 });
       expect(state.schedule.history.filter((event: { kind: string }) => event.kind === "admitted")).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["claimed", 0, []],
+    ["input-recorded", 0, ["admitting"]],
+    ["input-submitted", 1, ["admitted"]],
+    ["input-admitted", 1, ["admitted"]],
+  ] as const)(
+    "after SIGKILL at %s, a command mode changed since approval admits nothing new and keeps a receipt",
+    async (barrier, userMessages, states) => {
+      const dataRoot = await mkdtemp(join(tmpdir(), "pal-schedules-mode-"));
+      cleanups.push(() => rm(dataRoot, { recursive: true, force: true }));
+      expect((await runChild(["run", dataRoot, barrier])).signal).toBe("SIGKILL");
+      const inspected = await runChild(["inspect", dataRoot, "full"]);
+      expect(inspected.code).toBe(0);
+      const state = JSON.parse(inspected.output);
+      expect(state.userMessages).toBe(userMessages);
+      expect(state.admissions.map((row: { state: string }) => row.state)).toEqual(states);
+      const kinds = state.schedule.history.map((event: { kind: string }) => event.kind);
+      expect(kinds.filter((kind: string) => kind === "admitted")).toHaveLength(userMessages);
+      if (userMessages === 0) expect(kinds).toContain("blocked");
     },
   );
 });

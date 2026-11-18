@@ -10,7 +10,7 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import type { ConversationId, Harness } from "@earendil-works/pi-durable";
+import type { ConversationId, Cursor, Harness } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openPal, type Pal } from "../src/core/app.ts";
 import type { Chat } from "../src/core/chats.ts";
@@ -78,7 +78,10 @@ async function fixture(options: { helpers?: boolean; limits?: HelperLimits; now?
         .flatMap((message) => (message.role === "toolResult" ? [message] : []))
         .map((message) => message.content.map((block) => (block.type === "text" ? block.text : "")).join(""));
     },
-    helpers: (chat: Chat) => helperViews(pal.harness, pal.store.storage, chat.conversationId, context),
+    helpers: async (chat: Chat) =>
+      (await helperViews(pal.harness, pal.store.storage, chat.conversationId, context)).helpers,
+    helperPage: (chat: Chat, after?: Cursor) =>
+      helperViews(pal.harness, pal.store.storage, chat.conversationId, context, after),
     async reopen(beforeOpen?: () => void) {
       await pal.close();
       beforeOpen?.();
@@ -89,6 +92,26 @@ async function fixture(options: { helpers?: boolean; limits?: HelperLimits; now?
 }
 
 describe("research helpers", () => {
+  it("keeps every helper's status reachable past one page, the newest included", async () => {
+    const f = await fixture();
+    const chat = await f.chat("helper-many");
+    for (let index = 0; index < 101; index++)
+      await f.send(chat, [
+        delegate(`Fact ${index}`),
+        fauxAssistantMessage(`Answer ${index}`),
+        fauxAssistantMessage("ok"),
+      ]);
+    const pages = [await f.helperPage(chat)];
+    for (let next = pages[0]?.next; next != null && pages.length < 5; next = pages.at(-1)?.next)
+      pages.push(await f.helperPage(chat, next));
+    expect(pages[0]?.helpers.length).toBeLessThanOrEqual(100);
+    const all = pages.flatMap((page) => page.helpers);
+    expect(new Set(all.map((helper) => helper.task)).size).toBe(101);
+    expect(all).toHaveLength(101);
+    expect(all.at(-1)).toMatchObject({ purpose: "Fact 100", status: "answered" });
+    expect(pages.at(-1)?.next).toBeNull();
+  }, 120_000);
+
   it("answer through a helper that reads only the parent run's granted folder", async () => {
     const f = await fixture();
     const chat = await f.chat("helper-chat");

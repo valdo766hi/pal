@@ -4,7 +4,7 @@ import { open } from "node:fs/promises";
 import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { readFileSnapshot } from "./files.ts";
-import { gnuTimeout } from "./timeout.ts";
+import { gnuCoreutil, gnuTimeout } from "./timeout.ts";
 
 const GIT_FLAGS = [
   "--no-pager",
@@ -65,13 +65,15 @@ umask 077
 set -C
 receipt="$1"
 timeout="$2"
-shift 2
+sync="$3"
+mv="$4"
+shift 4
 status=0
 "$timeout" --kill-after=1s 5s git "$@" >/dev/null 2>&1 || status=$?
 printf '%s\\n' "$status" > "$receipt.next"
-sync -f "$receipt.next"
-mv -T -- "$receipt.next" "$receipt"
-sync -f "$(dirname -- "$receipt")"
+"$sync" -f "$receipt.next"
+"$mv" -T -- "$receipt.next" "$receipt"
+"$sync" -f "$(dirname -- "$receipt")"
 exit "$status"
 `;
 
@@ -87,6 +89,11 @@ export async function runGitEffect(
     .update(JSON.stringify(["git-effect-1", cwd, GIT_FLAGS, args]))
     .digest("hex")}\n`;
   let started = false;
+  // Found before the intent is recorded, so a host without them refuses instead of leaving an unknown outcome.
+  const sync = mode === "start" ? gnuCoreutil("sync") : undefined;
+  const mv = mode === "start" ? gnuCoreutil("mv") : undefined;
+  if (mode === "start" && (sync === undefined || mv === undefined))
+    throw new Error("GNU sync and mv from coreutils must be on PATH (gsync and gmv on macOS)");
   if (mode === "start")
     try {
       const marker = await open(`${receipt}.started`, "wx", 0o600);
@@ -116,7 +123,19 @@ export async function runGitEffect(
     await new Promise<void>((resolve, reject) => {
       const child = execFile(
         process.env.PAL_BASH ?? "bash",
-        ["--noprofile", "--norc", "-c", RECEIPT_WORKER, "pal-git", receipt, gnuTimeout(), ...GIT_FLAGS, ...args],
+        [
+          "--noprofile",
+          "--norc",
+          "-c",
+          RECEIPT_WORKER,
+          "pal-git",
+          receipt,
+          gnuTimeout(),
+          sync ?? "sync",
+          mv ?? "mv",
+          ...GIT_FLAGS,
+          ...args,
+        ],
         {
           cwd,
           timeout: 8000,

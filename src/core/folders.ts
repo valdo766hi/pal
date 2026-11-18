@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import {
   type ConversationId,
@@ -14,6 +13,7 @@ import type { HelperLinks } from "./delegation.ts";
 import { FileAccessError } from "./files.ts";
 import type { Projects } from "./projects.ts";
 import type { ProjectSearch } from "./search.ts";
+import { inside } from "./paths.ts";
 import { normalize, RequestConflict, validate } from "./requests.ts";
 import { directoryIdentity } from "./workspace-root.ts";
 import type { Workspaces } from "./workspaces.ts";
@@ -335,9 +335,5 @@ function reference(row: { id: string; root: string; indexed: number }): GrantedF
 }
 
 function overlaps(a: string, b: string): boolean {
-  const inside = (root: string, path: string) => {
-    const part = relative(root, path);
-    return part === "" || (!part.startsWith("..") && !isAbsolute(part));
-  };
   return inside(a, b) || inside(b, a);
 }

@@ -17,7 +17,10 @@ import { baselineHarness, externalHarness, type Harness, palHarness } from "../s
 import { markdown, summarize, wilson } from "../src/evaluation/report.ts";
 import { evaluate } from "../src/evaluation/run.ts";
 import {
+  configRecovery,
+  csvCorrection,
   dependencyPlan,
+  feePolicy,
   helperResearch,
   lostAttachment,
   revisedDependencyPlan,
@@ -34,7 +37,16 @@ const fixtures = new URL("fixtures/evaluation/", import.meta.url);
 const read = (path: string) => readFile(new URL(path, fixtures), "utf8");
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 const ANSWER = JSON.stringify({ importers: ["src/api.mjs", "src/cli.mjs", "src/db.mjs"] });
-const laterTasks = [dependencyPlan, revisedDependencyPlan, helperResearch, slowVerifierCheckout, lostAttachment];
+const laterTasks = [
+  dependencyPlan,
+  revisedDependencyPlan,
+  helperResearch,
+  slowVerifierCheckout,
+  lostAttachment,
+  feePolicy,
+  configRecovery,
+  csvCorrection,
+];
 const initialTasks = TASKS.filter((task) => !laterTasks.some((later) => later.id === task.id));
 
 /** Scripted model turns: these check the machinery and say nothing about any model's quality. */

@@ -55,6 +55,8 @@ export const InputBody = Type.Object(
       Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { maxItems: MAX_INPUT_ATTACHMENTS }),
     ),
     configuration: Type.Optional(ConfigurationRevision),
+    /** The command mode its sender approved it under; it is admitted only while the chat still has that mode. */
+    mode: Type.Optional(Type.Enum(["ask", "auto", "full"])),
     feedback: Type.Optional(FeedbackBody),
   },
   { additionalProperties: false },
@@ -72,6 +74,9 @@ export class InputBlocked extends Error {}
 /** The reason a saved input is held when its chat's model or reasoning changed after it was recorded. */
 export const DESTINATION_CHANGED =
   "This chat's model or reasoning changed after this message was saved. Switch back to retry it, or withdraw it.";
+/** The reason a saved input is held when its chat's command mode changed after it was recorded. */
+export const MODE_CHANGED =
+  "This chat's command mode changed after this message was saved. Switch back to retry it, or withdraw it.";
 /** A new input refused, not recorded, because an earlier one in its chat is blocked. */
 export class InputHeld extends Error {}
 
@@ -278,7 +283,10 @@ export class ChatService {
     await this.abortDeleted(context);
   }
 
-  /** Also reconciles a crash after a chat/project tombstone was committed but before its abort completed. */
+  /**
+   * Also reconciles a crash after a chat/project tombstone was committed but before its abort completed, and settles
+   * the deleted chats' unfinished inputs, so none is left holding back a release.
+   */
   async abortDeleted(context: Context): Promise<void> {
     const rows = await this.#guard((db) =>
       db.all<{ conversation_id: ConversationId }>(
@@ -289,6 +297,49 @@ export class ChatService {
       const conversation = await this.#options.harness.conversation(row.conversation_id, context);
       await conversation?.abort(context, { background: true });
     }
+    await this.#settleDeletedInputs(context);
+  }
+
+  /**
+   * Settle the unfinished inputs of deleted chats, or of one deleted chat. A chat with work in turn (an admission, a
+   * retry or a settings change) is left to that work: the last of it to end settles them.
+   */
+  async #settleDeletedInputs(context: Context, chatId?: string): Promise<void> {
+    const inputs = await this.#guard((db) =>
+      db.all<{ chat_id: string; request_id: string; conversation_id: ConversationId | null }>(
+        "SELECT a.chat_id, a.request_id, c.conversation_id FROM pal_admissions a JOIN pal_chats c ON c.id = a.chat_id WHERE a.state = 'admitting' AND c.deleted_at IS NOT NULL AND (? IS NULL OR a.chat_id = ?)",
+        chatId ?? null,
+        chatId ?? null,
+      ),
+    );
+    for (const input of inputs)
+      if (!this.#configurations.has(input.chat_id))
+        await this.#settleDeleted(input.chat_id, input.request_id, input.conversation_id, context);
+  }
+
+  /** A deleted chat's input keeps the receipt Pi already holds; only one Pi never took is settled as never sent. */
+  async #settleDeleted(
+    chatId: string,
+    requestId: string,
+    conversationId: ConversationId | null,
+    context: Context,
+  ): Promise<void> {
+    const submission =
+      conversationId === null ? undefined : await this.#piSubmission(conversationId, requestId, context);
+    await this.#guard((db) =>
+      submission === undefined
+        ? db.run(
+            "UPDATE pal_admissions SET state = 'withdrawn', blocked = NULL WHERE chat_id = ? AND request_id = ? AND state = 'admitting'",
+            chatId,
+            requestId,
+          )
+        : db.run(
+            "UPDATE pal_admissions SET state = 'admitted', submission_id = ?, blocked = NULL WHERE chat_id = ? AND request_id = ? AND state = 'admitting'",
+            submission,
+            chatId,
+            requestId,
+          ),
+    );
   }
 
   async createChat(requestId: unknown, body: unknown, context: Context): Promise<Chat> {
@@ -337,7 +388,7 @@ export class ChatService {
     selection: { model: ModelRef; thinkingLevel: ModelThinkingLevel; expected?: string },
     context: Context,
   ): Promise<string> {
-    return this.#withConfiguration(chatId, async () => {
+    return this.#withConfiguration(chatId, context, async () => {
       const chat = await this.get(chatId);
       const conversation =
         chat === undefined ? undefined : await this.#options.harness.conversation(chat.conversationId, context);
@@ -371,9 +422,14 @@ export class ChatService {
     });
   }
 
+  /** Run a change to the chat's settings in turn with its admissions, so none is admitted halfway through it. */
+  change<T>(chatId: string, work: () => Promise<T>, context: Context): Promise<T> {
+    return this.#withConfiguration(chatId, context, work);
+  }
+
   /** Admit one input; repeating a request ID with the same body returns the same submission. */
   async submit(chatId: string, requestId: unknown, body: unknown, context: Context): Promise<Admission> {
-    return this.#withConfiguration(chatId, () => this.#submit(chatId, requestId, body, context));
+    return this.#withConfiguration(chatId, context, () => this.#submit(chatId, requestId, body, context));
   }
 
   /** What became of one input request: undefined if Pal never recorded it, so its sender may safely send it again. */
@@ -393,7 +449,7 @@ export class ChatService {
 
   /** Admit a blocked input again with its recorded body, in turn with the chat's other admissions. */
   async retry(chatId: string, requestId: string, context: Context): Promise<Admission> {
-    return this.#withConfiguration(chatId, async () => {
+    return this.#withConfiguration(chatId, context, async () => {
       const row = await this.#recorded(chatId, requestId);
       if (row.submission_id !== null) return { chatId, requestId, submissionId: row.submission_id };
       if (row.state === "withdrawn") throw new RequestConflict(`request ${requestId} was withdrawn`);
@@ -403,7 +459,7 @@ export class ChatService {
 
   /** Settle a blocked input as never sent, so the chat's later inputs can proceed. One Pi already admitted is kept. */
   async withdraw(chatId: string, requestId: string, context: Context): Promise<void> {
-    return this.#withConfiguration(chatId, async () => {
+    return this.#withConfiguration(chatId, context, async () => {
       const row = await this.#recorded(chatId, requestId);
       if (row.state === "withdrawn") return;
       const chat = await this.get(chatId);
@@ -437,14 +493,19 @@ export class ChatService {
     return row;
   }
 
-  async #withConfiguration<T>(chatId: string, work: () => Promise<T>): Promise<T> {
+  async #withConfiguration<T>(chatId: string, context: Context, work: () => Promise<T>): Promise<T> {
     const previous = this.#configurations.get(chatId) ?? Promise.resolve();
     const job = previous.catch(() => {}).then(work);
     this.#configurations.set(chatId, job);
     try {
       return await job;
     } finally {
-      if (this.#configurations.get(chatId) === job) this.#configurations.delete(chatId);
+      if (this.#configurations.get(chatId) === job) {
+        this.#configurations.delete(chatId);
+        // A deletion meanwhile left this chat's inputs to its work in turn, however that work ended. Once admission
+        // has stopped, restarting reconciles them instead.
+        if (!this.#stopped) await this.#settleDeletedInputs(context, chatId);
+      }
     }
   }
 
@@ -454,6 +515,7 @@ export class ChatService {
       whenBusy: value.whenBusy ?? "followUp",
       attachments: value.attachments ?? [],
       configuration: value.configuration,
+      mode: value.mode,
       feedback: value.feedback === undefined ? undefined : { ids: value.feedback.ids, scope: value.feedback.scope },
     }));
     const chat = await this.get(chatId);
@@ -482,6 +544,13 @@ export class ChatService {
       if (conversation === undefined) throw new ChatNotFound("the chat's conversation is missing");
       if (chatConfiguration(await conversation.agent(context)) !== expected) throw configurationChanged();
     }
+    const mode = (body as InputBody).mode;
+    if (mode !== undefined && (await this.#mode(chatId)) !== mode)
+      throw new HttpError(
+        409,
+        "command_mode_stale",
+        "This chat's command mode changed since this message was approved.",
+      );
     const feedback = (body as InputBody).feedback;
     if (previous === undefined && feedback !== undefined) {
       if (this.#options.feedback === undefined) throw new InvalidRequest("review feedback is not available");
@@ -524,6 +593,13 @@ export class ChatService {
     if (row.submission_id !== null) return { chatId, requestId: key, submissionId: row.submission_id };
     await this.#options.barrier?.("input-recorded");
     return this.#admit(chatId, key, this.#input(row.intent), context);
+  }
+
+  async #mode(chatId: string): Promise<string | undefined> {
+    const row = await this.#guard((db) =>
+      db.get<{ command_mode: string }>("SELECT command_mode FROM pal_chats WHERE id = ?", chatId),
+    );
+    return row?.command_mode;
   }
 
   #stop() {
@@ -581,7 +657,16 @@ export class ChatService {
 
   /** Submit under the same request ID, which Pi deduplicates per conversation, then record the acknowledgement. */
   async #admit(chatId: string, requestId: string, intent: InputBody, context: Context): Promise<Admission> {
-    if ((await this.get(chatId)) === undefined) throw new ChatNotFound("this chat was deleted before admission");
+    if ((await this.get(chatId)) === undefined) {
+      const row = await this.#guard((db) =>
+        db.get<{ conversation_id: ConversationId | null }>(
+          "SELECT conversation_id FROM pal_chats WHERE id = ?",
+          chatId,
+        ),
+      );
+      await this.#settleDeleted(chatId, requestId, row?.conversation_id ?? null, context);
+      throw new ChatNotFound("this chat was deleted before admission");
+    }
     const { conversation, projectId } = await this.#guard(async (db) => {
       const row = await db.get<{ conversation_id: ConversationId; project_id: string }>(
         "SELECT conversation_id, project_id FROM pal_chats WHERE id = ?",
@@ -601,6 +686,8 @@ export class ChatService {
           chatConfiguration(await conversation.agent(context)) !== intent.configuration
         )
           throw new InputBlocked(DESTINATION_CHANGED);
+        if (intent.mode !== undefined && (await this.#mode(chatId)) !== intent.mode)
+          throw new InputBlocked(MODE_CHANGED);
         return this.#attachments(projectId, intent);
       })().catch(async (error: unknown) => {
         if (error instanceof InputBlocked)
@@ -626,6 +713,7 @@ export class ChatService {
     }
     await this.#options.barrier?.("input-submitted");
     if ((await this.get(chatId)) === undefined) {
+      await this.#settleDeleted(chatId, requestId, conversation.id, context);
       await this.abortDeleted(context);
       throw new ChatNotFound("this chat was deleted during admission");
     }

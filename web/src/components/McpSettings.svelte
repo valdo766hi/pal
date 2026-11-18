@@ -154,6 +154,10 @@
     if (busy.save) return;
     busy.save = true;
     error = undefined;
+    // Every request below uses this submission, read before the first await, so a later edit never redirects a key.
+    const id = editing;
+    const { key, transport } = draft;
+    let saved = false;
     try {
       let input: McpServerInput;
       if (draft.transport === "stdio") {
@@ -172,17 +176,22 @@
         const auth = draft.auth === "header" ? { kind: "header" as const, header: draft.header } : { kind: draft.auth };
         input = { name: draft.name.trim(), url: draft.url.trim(), auth, private: draft.private };
       }
-      const { server } = editing === undefined ? await api.mcpAdd(input) : await api.mcpUpdate(editing, input);
-      if (editing === undefined) servers = [...servers, server];
-      else replace(server);
-      if (draft.key !== "" && draft.auth !== "none") replace((await api.mcpKey(server.id, draft.key)).server);
-      if (draft.transport === "http") replace((await api.mcpTest(server.id)).server);
+      const { server } = id === undefined ? await api.mcpAdd(input) : await api.mcpUpdate(id, input);
+      saved = true;
+      if (id === undefined) {
+        servers = [...servers, server];
+        // A retry after a later step fails finishes this server instead of creating another.
+        editing = server.id;
+      } else replace(server);
+      if (key !== "" && input.auth.kind !== "none") replace((await api.mcpKey(server.id, key)).server);
+      if (transport === "http") replace((await api.mcpTest(server.id)).server);
       open[server.id] = true;
       adding = false;
       editing = undefined;
       draft = emptyDraft();
     } catch (failure) {
-      error = failure instanceof ApiError ? failure.message : String(failure);
+      const message = failure instanceof ApiError ? failure.message : String(failure);
+      error = saved ? `The server is saved, but this step failed: ${message}` : message;
     } finally {
       busy.save = false;
     }
@@ -292,143 +301,151 @@
         }}><Icon name="x" /></button
       >
     </div>
-    <div class="fields">
-      <label class="fl">Name<input class="f" bind:value={draft.name} maxlength="80" autocomplete="off" /></label>
-      <div class="fl">
-        <span>Transport</span>
-        <div class="seg" role="radiogroup" aria-label="Transport">
-          <button
-            class="segb"
-            role="radio"
-            aria-checked={draft.transport === "http"}
-            disabled={editing !== undefined || busy.save}
-            onclick={() => transport("http")}>Streamable HTTP</button
-          >
-          <button
-            class="segb"
-            role="radio"
-            aria-checked={draft.transport === "stdio"}
-            disabled={editing !== undefined || busy.save}
-            onclick={() => transport("stdio")}>Local stdio</button
-          >
+    <fieldset class="form" disabled={busy.save}>
+      <div class="fields">
+        <label class="fl">Name<input class="f" bind:value={draft.name} maxlength="80" autocomplete="off" /></label>
+        <div class="fl">
+          <span>Transport</span>
+          <div class="seg" role="radiogroup" aria-label="Transport">
+            <button
+              class="segb"
+              role="radio"
+              aria-checked={draft.transport === "http"}
+              disabled={editing !== undefined || busy.save}
+              onclick={() => transport("http")}>Streamable HTTP</button
+            >
+            <button
+              class="segb"
+              role="radio"
+              aria-checked={draft.transport === "stdio"}
+              disabled={editing !== undefined || busy.save}
+              onclick={() => transport("stdio")}>Local stdio</button
+            >
+          </div>
         </div>
       </div>
-    </div>
-    {#if draft.transport === "stdio"}
-      <p class="callout wa">
-        Local programs run as the Pal host user, not in a sandbox. They can access files and network beyond their
-        working folder. Save first, inspect and approve the exact program, then test and select its tools.
-      </p>
-      <label class="fl"
-        >Command<input
-          class="f mono"
-          bind:value={draft.command}
-          maxlength="4096"
-          placeholder="/nix/store/…-server/bin/server"
-          autocomplete="off"
-          spellcheck="false"
-        /></label
-      >
-      <p class="sub">
-        Use an executable already provided by Nix. Pal never installs a package, evaluates a flake, loads .envrc or
-        imports repository MCP configuration automatically.
-      </p>
-      <label class="fl"
-        >Working folder on this server<input
-          class="f mono"
-          bind:value={draft.cwd}
-          maxlength="4096"
-          autocomplete="off"
-          spellcheck="false"
-        /></label
-      >
-      <p class="sub">
-        Choose an existing folder outside Pal's private data and installation. This is separate from device uploads or a
-        chat's working folder.
-      </p>
-      {#each draft.args as arg, index (arg.id)}
-        <div class="fields">
-          <label class="fl wide"
-            >Argument {index + 1}<textarea
-              class="f mono"
-              rows="2"
-              maxlength="4096"
-              bind:value={arg.value}
-              spellcheck="false"></textarea></label
-          >
-          <button
-            class="b sm q"
-            aria-label={`Remove argument ${index + 1}`}
-            onclick={() => (draft.args = draft.args.filter((item) => item.id !== arg.id))}
-            ><Icon name="x" />Remove</button
-          >
-        </div>
-      {/each}
-      <div>
-        <button
-          class="b sm q"
-          disabled={draft.args.length >= 32}
-          onclick={() => (draft.args = [...draft.args, { id: requestId(), value: "" }])}
-          ><Icon name="plus" />Add argument</button
-        >
-      </div>
-      <p class="sub">
-        Each row is one exact argument; no shell splitting or expansion. Arguments may name mutable data or code you
-        also trust. Do not put keys in arguments.
-      </p>
-    {:else}
-      <label class="fl wide"
-        >URL<input
-          class="f mono"
-          bind:value={draft.url}
-          placeholder="https://tools.example.com/mcp"
-          maxlength="2048"
-          autocomplete="off"
-          spellcheck="false"
-        /></label
-      >
-    {/if}
-    <div class="fields">
-      <label class="fl">
-        {draft.transport === "stdio" ? "Authentication" : "Key"}
-        <select class="f" bind:value={draft.auth}>
-          <option value="none">None</option>
-          {#if draft.transport === "stdio"}<option value="env">Encrypted key in environment</option>
-          {:else}<option value="header">API key header</option><option value="bearer">Bearer token</option>{/if}
-        </select>
-      </label>
-      {#if draft.auth === "header"}<label class="fl"
-          >Header name<input class="f mono" bind:value={draft.header} autocomplete="off" spellcheck="false" /></label
-        >{/if}
-      {#if draft.auth === "env"}<label class="fl"
-          >Key variable<input
+      {#if draft.transport === "stdio"}
+        <p class="callout wa">
+          Local programs run as the Pal host user, not in a sandbox. They can access files and network beyond their
+          working folder. Save first, inspect and approve the exact program, then test and select its tools.
+        </p>
+        <label class="fl"
+          >Command<input
             class="f mono"
-            bind:value={draft.variable}
-            maxlength="64"
+            bind:value={draft.command}
+            maxlength="4096"
+            placeholder="/nix/store/…-server/bin/server"
             autocomplete="off"
             spellcheck="false"
           /></label
-        >{/if}
-      {#if draft.auth !== "none"}<label class="fl wide"
-          >Key<input class="f mono" type="password" bind:value={draft.key} maxlength="4096" autocomplete="off" /></label
-        >{/if}
-    </div>
-    {#if draft.transport === "http"}
-      <label class="flr"
-        ><input type="checkbox" bind:checked={draft.private} />Private endpoint: allow a local or private-network
-        address (and plain HTTP). Only for servers you run.</label
-      >
-    {:else}
-      <p class="sub">
-        Only the dedicated key variable is injected; the host's environment, model provider credentials and other
-        servers' keys are never inherited. Use a variable ending in KEY, TOKEN, SECRET or PASSWORD, such as
-        SERVICE_API_KEY. Startup or configuration variables are not accepted.
-      </p>
-    {/if}
-    {#if editing !== undefined}<p class="sub">
-        Changing the endpoint, program, folder or authentication identity disables the connection, clears approvals and
-        deletes its old key. Re-enter a key if needed.
-      </p>{/if}
+        >
+        <p class="sub">
+          Use an executable already provided by Nix. Pal never installs a package, evaluates a flake, loads .envrc or
+          imports repository MCP configuration automatically.
+        </p>
+        <label class="fl"
+          >Working folder on this server<input
+            class="f mono"
+            bind:value={draft.cwd}
+            maxlength="4096"
+            autocomplete="off"
+            spellcheck="false"
+          /></label
+        >
+        <p class="sub">
+          Choose an existing folder outside Pal's private data and installation. This is separate from device uploads or
+          a chat's working folder.
+        </p>
+        {#each draft.args as arg, index (arg.id)}
+          <div class="fields">
+            <label class="fl wide"
+              >Argument {index + 1}<textarea
+                class="f mono"
+                rows="2"
+                maxlength="4096"
+                bind:value={arg.value}
+                spellcheck="false"></textarea></label
+            >
+            <button
+              class="b sm q"
+              aria-label={`Remove argument ${index + 1}`}
+              onclick={() => (draft.args = draft.args.filter((item) => item.id !== arg.id))}
+              ><Icon name="x" />Remove</button
+            >
+          </div>
+        {/each}
+        <div>
+          <button
+            class="b sm q"
+            disabled={draft.args.length >= 32}
+            onclick={() => (draft.args = [...draft.args, { id: requestId(), value: "" }])}
+            ><Icon name="plus" />Add argument</button
+          >
+        </div>
+        <p class="sub">
+          Each row is one exact argument; no shell splitting or expansion. Arguments may name mutable data or code you
+          also trust. Do not put keys in arguments.
+        </p>
+      {:else}
+        <label class="fl wide"
+          >URL<input
+            class="f mono"
+            bind:value={draft.url}
+            placeholder="https://tools.example.com/mcp"
+            maxlength="2048"
+            autocomplete="off"
+            spellcheck="false"
+          /></label
+        >
+      {/if}
+      <div class="fields">
+        <label class="fl">
+          {draft.transport === "stdio" ? "Authentication" : "Key"}
+          <select class="f" bind:value={draft.auth}>
+            <option value="none">None</option>
+            {#if draft.transport === "stdio"}<option value="env">Encrypted key in environment</option>
+            {:else}<option value="header">API key header</option><option value="bearer">Bearer token</option>{/if}
+          </select>
+        </label>
+        {#if draft.auth === "header"}<label class="fl"
+            >Header name<input class="f mono" bind:value={draft.header} autocomplete="off" spellcheck="false" /></label
+          >{/if}
+        {#if draft.auth === "env"}<label class="fl"
+            >Key variable<input
+              class="f mono"
+              bind:value={draft.variable}
+              maxlength="64"
+              autocomplete="off"
+              spellcheck="false"
+            /></label
+          >{/if}
+        {#if draft.auth !== "none"}<label class="fl wide"
+            >Key<input
+              class="f mono"
+              type="password"
+              bind:value={draft.key}
+              maxlength="4096"
+              autocomplete="off"
+            /></label
+          >{/if}
+      </div>
+      {#if draft.transport === "http"}
+        <label class="flr"
+          ><input type="checkbox" bind:checked={draft.private} />Private endpoint: allow a local or private-network
+          address (and plain HTTP). Only for servers you run.</label
+        >
+      {:else}
+        <p class="sub">
+          Only the dedicated key variable is injected; the host's environment, model provider credentials and other
+          servers' keys are never inherited. Use a variable ending in KEY, TOKEN, SECRET or PASSWORD, such as
+          SERVICE_API_KEY. Startup or configuration variables are not accepted.
+        </p>
+      {/if}
+      {#if editing !== undefined}<p class="sub">
+          Changing the endpoint, program, folder or authentication identity disables the connection, clears approvals
+          and deletes its old key. Re-enter a key if needed.
+        </p>{/if}
+    </fieldset>
     <div class="row-buttons end">
       <button
         class="b p"
@@ -703,6 +720,15 @@
   .accent {
     border-color: var(--acln);
     gap: 12px;
+  }
+  .form {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
   .row-buttons {
     display: flex;

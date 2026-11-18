@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { diffRevisions, type JsonValue } from "@earendil-works/chord/delta";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { type Browser, chromium, type Page, type WebSocketRoute } from "playwright-core";
+import { type Browser, chromium, type Locator, type Page, type WebSocketRoute } from "playwright-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { createApi } from "../../src/core/api.ts";
 import { openPal } from "../../src/core/app.ts";
@@ -566,6 +566,109 @@ describe("saved chat settings", () => {
   });
 });
 
+describe("drafts of deleted chats", () => {
+  it("frees the tab's drafts of deleted chats and projects, and keeps live chats' drafts", async () => {
+    const { pal, page, base, saved, errors } = await setup(1440);
+    await pal.projects.create("doomed-project", { name: "Doomed" });
+    const message = page.getByLabel("Message", { exact: true });
+    const dialog = page.getByRole("alertdialog");
+    const stored = () => page.evaluate(() => Object.keys(sessionStorage).filter((key) => key.startsWith("pal.draft.")));
+    const newChat = async (project: string) => {
+      await page.getByLabel(`New chat in ${project}`, { exact: true }).click();
+      await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
+      await expect.poll(() => message.isEditable()).toBe(true);
+      return new URL(page.url()).hash.split("/").at(-1) ?? "";
+    };
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await message.fill("Kept in a live chat");
+    for (let index = 0; index < 33; index++) {
+      await newChat("Settings");
+      await message.fill(`Draft ${index}`);
+      await page.getByRole("button", { name: "Delete chat New chat", exact: true }).click();
+      await dialog.getByRole("button", { name: "Delete chat", exact: true }).click();
+      await dialog.waitFor({ state: "detached" });
+    }
+    const fresh = await newChat("Settings");
+    await message.fill("Still room to write");
+    await expect.poll(() => page.getByRole("button", { name: "Send", exact: true }).isEnabled()).toBe(true);
+    expect(await page.getByText(/This tab holds \d+ drafts/).count()).toBe(0);
+
+    const doomed = [await newChat("Doomed"), ""];
+    await message.fill("First doomed draft");
+    doomed[1] = await newChat("Doomed");
+    await message.fill("Second doomed draft");
+    await page.getByRole("button", { name: "Remove project Doomed", exact: true }).click();
+    await dialog.getByRole("button", { name: "Remove project", exact: true }).click();
+    await dialog.waitFor({ state: "detached" });
+    await expect.poll(stored).toEqual(expect.arrayContaining([`pal.draft.${saved.id}`, `pal.draft.${fresh}`]));
+    expect(await stored()).toHaveLength(2);
+    expect(doomed.every((id) => id !== "")).toBe(true);
+    expect(errors).toEqual([]);
+  }, 180_000);
+});
+
+describe("long chat history", () => {
+  it.each([1440, 390])(
+    "loads earlier messages on request beyond the first page at %s px",
+    async (width) => {
+      const { pal, page, base, saved, errors } = await setup(width);
+      const conversation = await pal.harness.conversation(saved.conversationId, context);
+      if (conversation === undefined) throw new Error("missing conversation");
+      for (let index = 0; index < 1100; index++)
+        await conversation.submit(
+          { type: "write", entry: { kind: "pi.assistant", model: [fauxAssistantMessage(`Old row ${index}`)] } },
+          context,
+        );
+      await page.goto(`${base}/#/chat/${saved.id}`);
+      await page.getByText("Old row 1099", { exact: true }).waitFor();
+      const more = page.getByRole("button", { name: "Show earlier messages", exact: true });
+      await more.waitFor();
+      expect(await page.getByText("Old row 0", { exact: true }).count()).toBe(0);
+      await screenshot(page, `older-history-${width}`);
+      await more.click();
+      await page.getByText("Old row 0", { exact: true }).waitFor({ state: "attached" });
+      await more.waitFor({ state: "detached" });
+      expect(await page.getByText(/^Old row \d+$/).count()).toBe(1100);
+      expect(errors).toEqual([]);
+    },
+    120_000,
+  );
+});
+
+describe("refused attachments", () => {
+  it("lets a send Pal refused for a missing or unfinished attachment be corrected and sent", async () => {
+    const { pal, page, base, saved, errors } = await setup(1440);
+    const admitted = () =>
+      pal.store.database.all<{ state: string }>("SELECT state FROM pal_admissions WHERE chat_id = ?", saved.id);
+    const message = page.getByLabel("Message", { exact: true });
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    await expect.poll(() => page.getByRole("button", { name: /^Model and reasoning:/ }).isEnabled()).toBe(true);
+    // As a draft can hold after a restore: an attachment Pal no longer has, or one not finished again.
+    for (const [name, status, change] of [
+      ["gone.txt", 404, "DELETE FROM pal_uploads WHERE id = ?"],
+      ["late.txt", 409, "UPDATE pal_uploads SET state = 'receiving', sha256 = NULL WHERE id = ?"],
+    ] as const) {
+      const before = (await admitted()).length;
+      await message.fill(`Send with ${name}`);
+      await pal.store.database.run(change, await attach(page, name));
+      const refused = admission(page, saved.id);
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      expect((await refused).status()).toBe(status);
+      await page.getByRole("alert").waitFor();
+      expect(await admitted()).toHaveLength(before);
+      expect(await message.inputValue()).toBe(`Send with ${name}`);
+      await page.getByRole("button", { name: `Remove ${name}`, exact: true }).click();
+      const sent = admission(page, saved.id);
+      await page.getByRole("button", { name: "Send", exact: true }).click();
+      expect((await sent).status()).toBe(200);
+      await expect.poll(() => message.inputValue()).toBe("");
+    }
+    expect(await admitted()).toEqual([{ state: "admitted" }, { state: "admitted" }]);
+    expect(await page.getByRole("button", { name: "Retry saved send", exact: true }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  });
+});
+
 function admission(page: Page, id: string) {
   return page.waitForResponse(
     (reply) => new URL(reply.url()).pathname === `/api/chats/${id}/inputs` && reply.request().method() === "POST",
@@ -974,6 +1077,152 @@ describe("MCP catalog consent", () => {
       expect(errors).toEqual([]);
     },
   );
+});
+
+describe("MCP server form", () => {
+  it("binds a held save to what was submitted and finishes a partly saved server instead of adding another", async () => {
+    const { pal, page, base, errors } = await setup(1440);
+    const a = await startMcpFixture();
+    cleanups.push(a.close);
+    const b = await startMcpFixture();
+    cleanups.push(b.close);
+    const bearers = (fixture: typeof a) => fixture.requests.map((request) => request.headers.authorization);
+    /** Let the next request reach Pal, but hold its response until released. */
+    const holdResponse = async (url: string, method: string) => {
+      const seen = Promise.withResolvers<undefined>();
+      const release = Promise.withResolvers<undefined>();
+      const done = Promise.withResolvers<undefined>();
+      await page.route(url, async (route) => {
+        if (route.request().method() !== method) return route.fallback();
+        const response = await route.fetch();
+        seen.resolve(undefined);
+        await release.promise;
+        await route.fulfill({ response });
+        done.resolve(undefined);
+      });
+      return {
+        seen: seen.promise,
+        release: async () => {
+          release.resolve(undefined);
+          await done.promise;
+          await page.unroute(url);
+        },
+      };
+    };
+    /** Change a field even while the form is disabled, as a late edit would. */
+    const force = (field: Locator, value: string) =>
+      field.evaluate((element, value) => {
+        (element as HTMLInputElement).value = value;
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+      }, value);
+    const tested = (id?: string) =>
+      page.waitForResponse((response) =>
+        new RegExp(`/api/mcp/servers/${id ?? "[^/]+"}/test$`).test(new URL(response.url()).pathname),
+      );
+    const url = page.getByLabel("URL", { exact: true });
+    const key = page.getByRole("textbox", { name: "Key", exact: true });
+    const describeServer = async (name: string, secret: string) => {
+      await page.getByRole("button", { name: "Add server", exact: true }).click();
+      await page.getByLabel("Name", { exact: true }).fill(name);
+      await url.fill(a.url);
+      await page.getByLabel(/^Private endpoint/).check();
+      await page.getByRole("combobox", { name: "Key", exact: true }).selectOption("bearer");
+      await key.fill(secret);
+    };
+    await page.goto(`${base}/#/settings/mcp`);
+    const disabled: boolean[] = [];
+
+    // Creating: the response is held while the URL and key are changed to B's.
+    await describeServer("Held", "key-held-a1");
+    let hold = await holdResponse(`${base}/api/mcp/servers`, "POST");
+    let test = tested();
+    await page.getByRole("button", { name: "Add and test", exact: true }).click();
+    await hold.seen;
+    disabled.push(await url.isDisabled(), await key.isDisabled());
+    await force(url, b.url);
+    await force(key, "key-held-b1");
+    await hold.release();
+    await test;
+    const [held] = (await pal.mcp.list()).filter((server) => server.name === "Held");
+    if (held === undefined) throw new Error("the server was not saved");
+    expect(bearers(a)).toContain("Bearer key-held-a1");
+    expect(bearers(a)).not.toContain("Bearer key-held-b1");
+    expect(b.requests).toEqual([]);
+
+    // Updating: the same, against the saved server.
+    await page.getByRole("button", { name: "Edit connection", exact: true }).click();
+    await key.fill("key-held-a2");
+    hold = await holdResponse(`${base}/api/mcp/servers/${held.id}`, "PUT");
+    test = tested(held.id);
+    await page.getByRole("button", { name: "Save and test", exact: true }).click();
+    await hold.seen;
+    disabled.push(await url.isDisabled(), await key.isDisabled());
+    await force(url, b.url);
+    await force(key, "key-held-b2");
+    await hold.release();
+    await test;
+    expect(bearers(a)).toContain("Bearer key-held-a2");
+    expect(bearers(a)).not.toContain("Bearer key-held-b2");
+    expect(b.requests).toEqual([]);
+    expect(await pal.mcp.get(held.id)).toMatchObject({ keyConfigured: true });
+    expect(disabled).toEqual([true, true, true, true]);
+
+    // A server saved before its key is refused, then before its test fails, is finished on retry, not added again.
+    await describeServer("Retry", "   ");
+    await page.getByRole("button", { name: "Add and test", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "that key is not valid" }).waitFor();
+    const saved = async () => (await pal.mcp.list()).filter((server) => server.name === "Retry");
+    const [first] = await saved();
+    if (first === undefined) throw new Error("the server was not saved");
+    await key.fill("key-retry");
+    await page.route(`${base}/api/mcp/servers/*/test`, (route) => route.abort());
+    await page.getByRole("button", { name: /^(Add|Save) and test$/ }).click();
+    await page.getByRole("alert").filter({ hasNotText: "that key is not valid" }).waitFor();
+    expect((await saved()).map((server) => server.id)).toEqual([first.id]);
+    await page.unroute(`${base}/api/mcp/servers/*/test`);
+    test = tested(first.id);
+    await page.getByRole("button", { name: /^(Add|Save) and test$/ }).click();
+    await test;
+    expect((await saved()).map((server) => server.id)).toEqual([first.id]);
+    expect(await pal.mcp.get(first.id)).toMatchObject({ keyConfigured: true });
+    expect(bearers(a)).toContain("Bearer key-retry");
+    expect(b.requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+});
+
+describe("Changes scan continuation", () => {
+  it.each([1440, 390])("continues a partial scan to the changes it did not reach at %s px", async (width) => {
+    const { pal, saved, page, base, errors } = await setup(width);
+    const workspace = await pal.workspaces.info(saved.id);
+    if (workspace?.state !== "ready" || workspace.root === null) throw new Error("missing workspace");
+    const root = workspace.root;
+    const git = (...args: string[]) =>
+      runGit(
+        root,
+        ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", ...args],
+        { signal: AbortSignal.timeout(5000) },
+      );
+    const names = Array.from({ length: 130 }, (_, index) => `f-${String(index).padStart(3, "0")}.txt`);
+    await git("init", "-q");
+    for (const name of names) await writeFile(join(root, name), "Base\n");
+    await git("add", ".");
+    await git("commit", "-qm", "Baseline");
+    await pal.changes.capture(root);
+    for (const name of names) await writeFile(join(root, name), "Changed\n");
+    await page.goto(`${base}/#/chat/${saved.id}`);
+    if (width < 700) await page.getByRole("button", { name: "Workspace tools", exact: true }).click();
+    await page.getByRole("button", { name: "Changes", exact: true }).click();
+    const panel = page.getByRole("complementary", { name: "Workspace panel" });
+    const files = panel.getByRole("list", { name: "Changed files" }).getByRole("listitem");
+    await panel.getByText("Partial scan", { exact: false }).waitFor();
+    expect(await files.count()).toBe(128);
+    await screenshot(page, `changes-partial-${width}`);
+    await panel.getByRole("button", { name: "Continue scan", exact: true }).click();
+    await expect.poll(() => files.count()).toBe(130);
+    expect(await panel.getByText("Partial scan", { exact: false }).count()).toBe(0);
+    expect(errors).toEqual([]);
+  });
 });
 
 async function reviewFixture(width: number) {

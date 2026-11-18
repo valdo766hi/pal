@@ -7,8 +7,11 @@ import { grade } from "./grade.ts";
 import {
   checkout,
   checkpointCheckout,
+  configRecovery,
   continuedCheckout,
+  csvCorrection,
   dependencyPlan,
+  feePolicy,
   helperResearch,
   inventory,
   lostAttachment,
@@ -83,6 +86,12 @@ for (const [task, name, passed] of [
   [slowVerifierCheckout, "slow-verifier-fixed", true],
   [lostAttachment, "attachment-report", false],
   [lostAttachment, "attachment-report-solved", true],
+  [feePolicy, "fee-policy", false],
+  [feePolicy, "fee-policy-solved", true],
+  [configRecovery, "config-rename", false],
+  [configRecovery, "config-rename-solved", true],
+  [csvCorrection, "csv-export", false],
+  [csvCorrection, "csv-export-solved", true],
 ] as const) {
   const result = await grade(join(fixtures, name), task);
   assert.equal(result.passed, passed, name);

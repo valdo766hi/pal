@@ -430,8 +430,8 @@ async function listenForCallback(
     settle = resolve;
   });
   const server = createServer((request, response) => {
-    const received = new URL(request.url ?? "/", "http://127.0.0.1");
-    const ours = received.pathname === CALLBACK_PATH && received.searchParams.get("state") === state;
+    const received = URL.parse(request.url ?? "/", "http://127.0.0.1");
+    const ours = received?.pathname === CALLBACK_PATH && received.searchParams.get("state") === state;
     response.writeHead(ours ? 200 : 400, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
     response.end(
       ours ? "Return to Pal to finish signing in. You can close this tab." : "This sign-in link is not active.",

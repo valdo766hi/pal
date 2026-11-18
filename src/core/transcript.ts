@@ -30,6 +30,38 @@ export async function history(conversation: Conversation, context: Context, thro
   return pages.flat().reverse();
 }
 
+/** Bounds of one page of older history sent to the browser: a snapshot's, or one it asks for. */
+const HISTORY_PAGE_ENTRIES = 1000;
+const HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The newest entries through `through`, oldest first, within the page bounds (at least one when any exists), and the
+ * oldest one's ID when older entries remain, which a later page continues before.
+ */
+export async function historyPage(
+  conversation: Conversation,
+  context: Context,
+  through: EntryId,
+): Promise<{ entries: EntryRecord[]; older: EntryId | null }> {
+  const entries: EntryRecord[] = [];
+  let bytes = 0;
+  let cursor: Cursor | undefined;
+  do {
+    const page = await conversation.entries({ maxEntryId: through }, PAGE, cursor, context);
+    for (const entry of page.items) {
+      const size = JSON.stringify(entry).length;
+      if (entries.length > 0 && (entries.length >= HISTORY_PAGE_ENTRIES || bytes + size > HISTORY_PAGE_BYTES)) {
+        const older = entries.at(-1)?.id ?? null;
+        return { entries: entries.reverse(), older };
+      }
+      entries.push(entry);
+      bytes += size;
+    }
+    cursor = page.next;
+  } while (cursor !== undefined);
+  return { entries: entries.reverse(), older: null };
+}
+
 /** The conversation's view as it is now, read once. */
 export async function currentView(
   conversation: Conversation,

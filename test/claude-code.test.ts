@@ -18,6 +18,7 @@ afterEach(async () => {
 
 type Logged = {
   pid: number;
+  stalled?: boolean;
   mode?: string;
   request?: boolean;
   cwd?: string;
@@ -224,6 +225,67 @@ describe("Claude subscription provider plugin", () => {
     await f.pal.providers.setEnabled("claude-code", false);
     expect(cachedClaudeProcessCount()).toBe(0);
     expect(() => process.kill(warm, 0), "the warm process outlived disabling").toThrow();
+  }, 60_000);
+
+  it("ends every Claude Code process on disable, cached or not, and starts none for the stopped turns", async () => {
+    const f = await setup();
+    await f.pal.providers.setEnabled("claude-code", true);
+    const [model] = (await f.pal.providers.list()).find((provider) => provider.id === "claude-code")?.models ?? [];
+    if (model === undefined) throw new Error("no Claude Code model listed");
+    const project = await f.pal.projects.create("claude-overlap", { name: "Overlap" });
+    const chats = [{ id: f.chat.id, conversation: f.conversation }];
+    for (const key of ["claude-chat-b", "claude-chat-c"]) {
+      const chat = await f.pal.chats.createChat(key, { projectId: project.id }, context);
+      const conversation = await f.pal.harness.conversation(chat.conversationId, context);
+      if (conversation === undefined) throw new Error("missing conversation");
+      chats.push({ id: chat.id, conversation });
+    }
+    for (const { conversation } of chats)
+      await conversation.configure({ model: { provider: "claude-code", modelId: model.id } }, context);
+    // Two chats keep warm processes, which fill the cache.
+    for (const [index, { id, conversation }] of chats.slice(0, 2).entries()) {
+      await f.pal.chats.submit(id, `claude-warm-${index}`, { text: "hello" }, context);
+      await conversation.waitForIdle(context);
+    }
+    expect(cachedClaudeProcessCount()).toBe(2);
+    // Both warm processes and a third, uncached one hold a turn at Anthropic.
+    const before = f.anthropic.requests.length;
+    for (const [index, { id }] of chats.entries())
+      await f.pal.chats.submit(id, `claude-hold-${index}`, { text: "hold" }, context);
+    await vi.waitFor(() => expect(f.anthropic.requests).toHaveLength(before + 3), { timeout: 20_000 });
+    const started = (await f.seen()).length;
+    const pids = (await f.seen()).filter(({ request }) => request).map(({ pid }) => pid);
+    expect(new Set(pids).size).toBe(3);
+
+    await f.pal.providers.setEnabled("claude-code", false);
+    expect(cachedClaudeProcessCount()).toBe(0);
+    await vi.waitFor(
+      () => {
+        for (const pid of pids) expect(() => process.kill(pid, 0), `process ${pid} outlived disabling`).toThrow();
+      },
+      { timeout: 10_000 },
+    );
+    for (const { conversation } of chats) await conversation.waitForIdle(context);
+    // No stopped turn retried on a fresh process with the settings it started under.
+    expect((await f.seen()).length).toBe(started);
+  }, 60_000);
+
+  it("never retries a warm turn on a fresh process after disabling stops it before it reached Anthropic", async () => {
+    const f = await setup();
+    await f.pal.providers.setEnabled("claude-code", true);
+    const [model] = (await f.pal.providers.list()).find((provider) => provider.id === "claude-code")?.models ?? [];
+    if (model === undefined) throw new Error("no Claude Code model listed");
+    await f.conversation.configure({ model: { provider: "claude-code", modelId: model.id } }, context);
+    expect((await f.send("hello")).at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+    await f.pal.chats.submit(f.chat.id, "claude-stall", { text: "stall" }, context);
+    await vi.waitFor(async () => expect((await f.logged()).some(({ stalled }) => stalled)).toBe(true), {
+      timeout: 20_000,
+    });
+    const started = (await f.seen()).length;
+    await f.pal.providers.setEnabled("claude-code", false);
+    await f.conversation.waitForIdle(context);
+    expect((await f.seen()).length).toBe(started);
+    expect(cachedClaudeProcessCount()).toBe(0);
   }, 60_000);
 
   it("lets each Claude Code request reach Anthropic once and cuts it on Stop", async () => {

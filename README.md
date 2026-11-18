@@ -96,8 +96,9 @@ keep an intact build for recovery. See [source-installation resume safety](docs/
 
 Platform notes:
 
-- **macOS:** agent shell commands and Git-backed features (Changes, Worktree chats) need GNU `timeout`.
-  Run `brew install coreutils`; Pal finds its `gtimeout` automatically.
+- **macOS:** agent shell commands and Git-backed features (Changes, Worktree chats) need GNU `timeout`, and
+  Worktree chats also GNU `sync` and `mv`. Run `brew install coreutils`; Pal finds its `gtimeout`, `gsync` and
+  `gmv` automatically.
 - **Linux:** the terminal's `node-pty` is compiled during install, which needs Python 3 and a C/C++ toolchain
   (for example `build-essential`).
 - **Nix-only features:** the sandboxed browser, local MCP programs and the release supervisor need programs the

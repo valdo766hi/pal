@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApi } from "../src/core/api.ts";
 import { openPal, type Pal } from "../src/core/app.ts";
 import { startServer } from "../src/core/server.ts";
 import { apiKeyProvider } from "../src/pi/providers.ts";
+import { loadMasterKey, SqliteCredentialStore } from "../src/storage/credentials.ts";
 import { startOpenAIFixture } from "./fixtures/openai-server.ts";
 import { GOOD_KEY as GOOD, startProviderFixture } from "./fixtures/provider-server.ts";
 
@@ -70,6 +71,7 @@ async function setup() {
   return {
     chatgpt,
     provider,
+    dataRoot,
     api,
     send,
     chat,
@@ -425,6 +427,119 @@ describe("API-key model providers", () => {
     expect((await send(chatId)).status).toBe(200);
     // A keyless endpoint gets the placeholder; the key saved for the earlier destination never reaches this one.
     expect(other.requests.map((request) => request.headers.authorization)).not.toContain(`Bearer ${GOOD}`);
+  });
+
+  it("never sends a compatible key to a destination it wasn't saved for, however a check, a request or an enable races a save", async () => {
+    const fixture = await setup();
+    const { api, provider } = fixture;
+    const other = await startProviderFixture();
+    cleanups.push(other.close);
+    const OTHER_KEY = "sk-fixture-other";
+    const endpoint = (origin: string, keyless = false) => ({
+      name: "Local models",
+      baseUrl: `${origin}/compat/v1`,
+      models: ["local-a"],
+      contextWindow: 32_768,
+      maxTokens: 4096,
+      images: false,
+      keyless,
+    });
+    const sent = (server: typeof provider, key: string) =>
+      server.requests.some((request) => request.headers.authorization === `Bearer ${key}`);
+    const state = async () =>
+      (await api("GET", "providers")).body.providers.find((entry: { id: string }) => entry.id === "compatible");
+    /** Hold the next read of the compatible credential, before or after it reads the store, until released. */
+    const holdRead = (when: "before" | "after") => {
+      const original = SqliteCredentialStore.prototype.read;
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      let reached = () => {};
+      const held = new Promise<void>((resolve) => (reached = resolve));
+      let armed = true;
+      const spy = vi.spyOn(SqliteCredentialStore.prototype, "read").mockImplementation(async function (
+        this: SqliteCredentialStore,
+        id: string,
+      ) {
+        if (!armed || id !== "compatible") return original.call(this, id);
+        armed = false;
+        if (when === "after") {
+          const credential = await original.call(this, id);
+          reached();
+          await gate;
+          return credential;
+        }
+        reached();
+        await gate;
+        return original.call(this, id);
+      });
+      cleanups.push(() => spy.mockRestore());
+      return {
+        held,
+        release: () => {
+          spy.mockRestore();
+          release();
+        },
+      };
+    };
+    const useA = async () => {
+      await api("PUT", "providers/compatible/config", endpoint(provider.origin));
+      await api("PUT", "providers/compatible/key", { key: GOOD });
+      await api("PUT", "providers/compatible/enabled", { enabled: true });
+    };
+
+    // Check(A) has read A's key when the owner moves the endpoint to B and saves B's key.
+    await useA();
+    let hold = holdRead("after");
+    const checking = api("POST", "providers/compatible/check");
+    await hold.held;
+    await api("PUT", "providers/compatible/config", endpoint(other.origin));
+    await api("PUT", "providers/compatible/key", { key: OTHER_KEY });
+    hold.release();
+    await checking;
+    expect(sent(other, GOOD)).toBe(false);
+    expect(sent(provider, OTHER_KEY)).toBe(false);
+
+    // A model request to A resolves its key only after the owner has moved to B, saved B's key and enabled B.
+    await useA();
+    const model = fixture.pal.models.getModel("compatible", "local-a");
+    if (model === undefined) throw new Error("the compatible model is not registered");
+    hold = holdRead("before");
+    const streaming = fixture.pal.models
+      .complete(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] })
+      .catch(() => undefined);
+    await hold.held;
+    await api("PUT", "providers/compatible/config", endpoint(other.origin));
+    await api("PUT", "providers/compatible/key", { key: OTHER_KEY });
+    await api("PUT", "providers/compatible/enabled", { enabled: true });
+    hold.release();
+    await streaming;
+    expect(sent(provider, OTHER_KEY)).toBe(false);
+    expect(sent(other, GOOD)).toBe(false);
+
+    // Enabling A is deciding on A's key when the owner moves the endpoint to keyless B: B must stay off.
+    await api("PUT", "providers/compatible/config", endpoint(provider.origin));
+    await api("PUT", "providers/compatible/key", { key: GOOD });
+    hold = holdRead("after");
+    const enabling = api("PUT", "providers/compatible/enabled", { enabled: true });
+    await hold.held;
+    const moving = api("PUT", "providers/compatible/config", endpoint(other.origin, true));
+    await Promise.race([moving, new Promise((resolve) => setTimeout(resolve, 500))]);
+    hold.release();
+    await Promise.all([enabling, moving]);
+    expect(await state()).toMatchObject({ enabled: false, config: { baseUrl: `${other.origin}/compat/v1` } });
+
+    // A key saved before keys named their destination still works for the endpoint it was saved with.
+    await api("PUT", "providers/compatible/config", endpoint(provider.origin));
+    const credentials = new SqliteCredentialStore(
+      fixture.pal.store.database,
+      await loadMasterKey(join(fixture.dataRoot, "credentials.key")),
+      fixture.pal.store.installationId,
+    );
+    await credentials.modify("compatible", async () => ({ type: "api_key", key: GOOD }));
+    await fixture.reopen();
+    expect(await state()).toMatchObject({ hasKey: true });
+    expect((await api("POST", "providers/compatible/check")).body.check).toMatchObject({ ok: true });
+    expect(sent(other, GOOD)).toBe(false);
   });
 
   it("starts new chats on the owner's chosen default provider model", async () => {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { arch, cpus, platform, release, tmpdir, totalmem } from "node:os";
@@ -42,7 +43,12 @@ async function streamReady(base: string, path: string, token: string, capability
   });
   const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
   const fail = () => ready.reject(new Error("Capability stream failed."));
+  // A terminal is ready once its shell runs a command: the marker appears only in that command's output, never in its
+  // echo, so neither a prompt's look nor startup text can stand in for it.
+  const nonce = randomUUID();
+  const marker = `pal-ready-${nonce}`;
   let controlled = false,
+    asked = false,
     blank = false,
     framed = false,
     output = "";
@@ -62,6 +68,12 @@ async function streamReady(base: string, path: string, token: string, capability
         if (message.type === "error") fail();
         if (message.type === "state") {
           controlled = message.control === true && Number.isSafeInteger(message.epoch);
+          if (capability === "terminal" && controlled && !asked) {
+            asked = true;
+            ws.send(
+              JSON.stringify({ type: "input", epoch: message.epoch, data: `printf 'pal-ready-%s\\n' ${nonce}\r` }),
+            );
+          }
           if (Array.isArray(message.tabs))
             blank = message.tabs.some(
               (tab: unknown) => tab !== null && typeof tab === "object" && "url" in tab && tab.url === "about:blank",
@@ -73,7 +85,7 @@ async function streamReady(base: string, path: string, token: string, capability
         fail();
       }
     }
-    if (controlled && (capability === "terminal" ? output.includes("$") : blank && framed)) ready.resolve(undefined);
+    if (controlled && (capability === "terminal" ? output.includes(marker) : blank && framed)) ready.resolve(undefined);
   });
   const timer = setTimeout(() => ready.reject(new Error("Capability readiness exceeded 20000 ms.")), 20_000);
   try {
@@ -170,7 +182,7 @@ async function main(args: readonly string[]) {
     identity: { source: await realpath(join(import.meta.dirname, "..")) },
     limits:
       "This immutable runner's in-process Pal; owner setup and 500-file project seeding are excluded. " +
-      "Search ends at the first verified matching file, terminal at its live controller/prompt, browser at a controlled blank-page frame. " +
+      "Search ends at the first verified matching file, terminal once its shell answers a command, browser at a controlled blank-page frame. " +
       "RSS is the main process, not peak or aggregate child memory; child counts are its direct libuv process handles. " +
       "Samples share a process, loaded addons and filesystem caches, but have fresh stores/projects/guidance roots. " +
       "Unavailable protection or failed work fails the measurement; no sandbox fallback or provider call.",

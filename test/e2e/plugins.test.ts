@@ -42,6 +42,9 @@ beforeAll(async () => {
   await symlink(await realpath(join(repo, "node_modules")), join(root, "node_modules"), "dir");
   await install(join(repo, "test/fixtures/plugins/example"), join(root, "plugins/example"));
   await appendFile(join(root, "plugins/index.ts"), 'export { default as example } from "./example/server.ts";\n');
+  // Leaving a plugin out is removing its line: its folder stays, and nothing of it is built in.
+  const index = join(root, "plugins/index.ts");
+  await writeFile(index, (await readFile(index, "utf8")).replace(/^.*"\.\/pets\/.*\n/m, ""));
   await build({
     configFile: join(root, "vite.config.ts"),
     root: join(root, "web"),
@@ -121,6 +124,8 @@ describe("a plugin added as its folder and inventory line", () => {
       await first.page.getByRole("status").filter({ hasText: "Saved." }).waitFor();
       await first.page.reload();
       await expect.poll(() => first.page.getByLabel("Echo prefix").inputValue()).toBe("» ");
+      const sections = first.page.getByRole("navigation", { name: "Settings sections" });
+      expect(await sections.getByText("Pets", { exact: true }).count()).toBe(0);
       await first.session.close();
 
       // A panel whose code doesn't load reports it in place; the rest of the shell keeps working.
@@ -150,6 +155,13 @@ describe("a plugin added as its folder and inventory line", () => {
       const without = await start(current, "/nonexistent-install", join(repo, "dist/public"));
       const removed = await open(without.base);
       await removed.page.getByText("Recorded by a plugin this build doesn't include.").waitFor();
+      await removed.page.evaluate(() => {
+        location.hash = "#/settings/general";
+      });
+      await removed.page
+        .getByRole("navigation", { name: "Settings sections" })
+        .getByText("Pets", { exact: true })
+        .waitFor();
       await removed.session.close();
     } finally {
       await close();

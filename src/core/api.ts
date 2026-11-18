@@ -8,6 +8,7 @@ import type {
   ConversationId,
   ConversationView,
   ConversationWatch,
+  Cursor,
   EntryId,
 } from "@earendil-works/pi-durable";
 import { Type } from "typebox";
@@ -46,7 +47,7 @@ import { FolderError } from "./projects.ts";
 import { InvalidRequest, RequestConflict, validate } from "./requests.ts";
 import { UploadBody, UploadError } from "./uploads.ts";
 import { TerminalSize } from "./terminals.ts";
-import { history } from "./transcript.ts";
+import { historyPage } from "./transcript.ts";
 import type { ReleaseRpc } from "./release-rpc.ts";
 import { ReleaseDigest } from "./release-state.ts";
 import type { ScheduleNotice, ScheduleView } from "./schedules.ts";
@@ -366,10 +367,12 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     if (!(await signedIn(request))) throw new HttpError(401, "signed_out", "sign in to Pal first");
 
     if (resource === "sign-out" && path.length === 1 && method === "POST") {
-      pal.terminals.revoke(cookie(request, SESSION_COOKIE));
-      pal.browsers.revoke(cookie(request, SESSION_COOKIE));
-      revokeObservers(cookie(request, SESSION_COOKIE));
-      await pal.owner.signOut(cookie(request, SESSION_COOKIE));
+      const token = cookie(request, SESSION_COOKIE);
+      // The session ends first: a connection that registers after the revocations below then finds it gone.
+      await pal.owner.signOut(token);
+      pal.terminals.revoke(token);
+      pal.browsers.revoke(token);
+      revokeObservers(token);
       response.setHeader("set-cookie", `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
       return send(200, { signedIn: false });
     }
@@ -641,6 +644,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           id,
           validate(ReviewScope, url.searchParams.get("scope") ?? "normal"),
           workspaceQuery(url),
+          url.searchParams.get("after") ?? undefined,
         ),
       );
     }
@@ -746,7 +750,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       if (action === "title" && path.length === 3 && method === "PUT")
         return send(200, { chat: await describeChat(await pal.chats.rename(chat.id, await readJson(request))) });
       if (action === "command-mode" && path.length === 3 && method === "PUT") {
-        await pal.approvals.setMode(chat.id, validate(CommandModeBody, await readJson(request)).mode);
+        const { mode } = validate(CommandModeBody, await readJson(request));
+        await pal.chats.change(chat.id, () => pal.approvals.setMode(chat.id, mode), context);
         return send(200, { chat: await describeChat(chat) });
       }
       if (action === "diagnostics" && path.length === 3 && method === "GET")
@@ -800,10 +805,19 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
             });
         }
       }
-      if (action === "helpers" && path.length === 3 && method === "GET")
+      if (action === "helpers" && path.length === 3 && method === "GET") {
+        const page = await helperViews(
+          pal.harness,
+          pal.store.storage,
+          chat.conversationId,
+          context,
+          helperCursor(url.searchParams.get("after")),
+        );
         return send(200, {
-          helpers: await helperViews(pal.harness, pal.store.storage, chat.conversationId, context),
+          helpers: page.helpers,
+          next: page.next === null ? null : Buffer.from(JSON.stringify(page.next)).toString("base64url"),
         });
+      }
       if (action === "extensions" && path.length === 3 && method === "GET")
         return send(200, {
           release: pal.extensions.release,
@@ -903,6 +917,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         );
         return send(200, { chat: await describeChat(chat), model, provider, effort, configuration });
       }
+      if (action === "history" && path.length === 3 && method === "GET") {
+        const before = Number(url.searchParams.get("before"));
+        if (!Number.isSafeInteger(before) || before < 2) throw new InvalidRequest("before must be an entry ID");
+        return send(200, await historyPage(conversation, context, (before - 1) as EntryId));
+      }
       if (action === "events" && method === "GET")
         return observe(response, chat.id, chat.conversationId, cookie(request, SESSION_COOKIE));
     }
@@ -917,7 +936,8 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
   }
 
   /**
-   * Server-sent events: a `snapshot` of the conversation's view with every entry before its window, then each
+   * Server-sent events: a `snapshot` of the conversation's view with one bounded page of the history before its window
+   * (`older` continues it through the `history` route), then each
    * `change` to that view as Chord ops, encoded from the latest snapshot on, until the client leaves, the owner session
    * ends or expires, or the stream closes. A window that no longer continues what the client has, after a backlog,
    * arrives as a new snapshot. The chat's command approvals arrive as whole `approvals` views, first with the snapshot
@@ -930,14 +950,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     conversationId: ConversationId,
     token: string | undefined,
   ): Promise<void> {
-    const expiry = await pal.owner.sessionExpiry(token);
-    if (expiry === undefined) throw new HttpError(401, "signed_out", "sign in to Pal first");
-    const conversation = await pal.harness.conversation(conversationId, context);
-    if (conversation === undefined) throw new HttpError(404, "not_found", "no such chat");
     const scope = new AbortController();
     // What `end` must release, filled in as the stream starts.
     const live: {
       watch?: ConversationWatch;
+      expiry?: ReturnType<typeof setTimeout>;
       heartbeat?: ReturnType<typeof setInterval>;
       unwatch?: () => void;
     } = {};
@@ -946,19 +963,34 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       if (scope.signal.aborted) return;
       scope.abort();
       observers.delete(end);
-      clearTimeout(expiryTimer);
+      clearTimeout(live.expiry);
       clearInterval(live.heartbeat);
       live.unwatch?.();
       void live.watch?.stop();
       if (revoked) response.destroy();
       else if (!response.writableEnded) response.end();
     };
-    const expiryTimer = setTimeout(() => end(true), Math.min(Math.max(0, expiry - Date.now()), 2 ** 31 - 1));
-    expiryTimer.unref();
+    // Registered before the session is read: sign-out ends the session and then every stream registered, so this
+    // stream either reads the session as gone or is ended by the sign-out.
     observers.set(end, token);
     // The response closes when the connection does, whether or not the request body was ever read.
     response.once("close", () => end(true));
     response.once("error", () => end(true));
+    const expiry = await pal.owner.sessionExpiry(token);
+    const conversation =
+      expiry === undefined || scope.signal.aborted
+        ? undefined
+        : await pal.harness.conversation(conversationId, context);
+    if (scope.signal.aborted) return;
+    if (expiry === undefined || conversation === undefined) {
+      scope.abort();
+      observers.delete(end);
+      throw expiry === undefined
+        ? new HttpError(401, "signed_out", "sign in to Pal first")
+        : new HttpError(404, "not_found", "no such chat");
+    }
+    live.expiry = setTimeout(() => end(true), Math.min(Math.max(0, expiry - Date.now()), 2 ** 31 - 1));
+    live.expiry.unref();
 
     const watch = await conversation.watch(context);
     live.watch = watch;
@@ -983,8 +1015,11 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
     const snapshot = async (view: ConversationView) => {
       encoding = encoder();
       newest = view.entries.at(-1)?.id ?? view.before;
-      const earlier = view.before === undefined ? [] : await history(conversation, context, view.before);
-      await write("snapshot", { view, earlier });
+      const { entries: earlier, older } =
+        view.before === undefined
+          ? { entries: [], older: null }
+          : await historyPage(conversation, context, view.before);
+      await write("snapshot", { view, earlier, older });
     };
     await snapshot(watch.value);
     if (scope.signal.aborted) return;
@@ -1040,6 +1075,18 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       }
     }
   };
+}
+
+/** A helper page's continuation, as the previous page returned it. */
+function helperCursor(after: string | null): Cursor | undefined {
+  if (after === null) return undefined;
+  try {
+    const cursor: unknown = JSON.parse(Buffer.from(after, "base64url").toString("utf8"));
+    if (typeof cursor === "object" && cursor !== null && !Array.isArray(cursor)) return cursor as Cursor;
+  } catch {
+    // Reported below.
+  }
+  throw new InvalidRequest("invalid helper page cursor");
 }
 
 function classify(error: unknown): [number, string] {

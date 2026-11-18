@@ -49,17 +49,29 @@ export function cookie(request: IncomingMessage, name: string): string | undefin
   return undefined;
 }
 
-const LOOPBACK_NAMES = ["127.0.0.1", "localhost", "[::1]"];
+/** An IPv4 address in the 127/8 loopback range, exactly as a browser sends it in a Host header. */
+const LOOPBACK_127 = /^127(?:\.\d{1,3}){3}$/;
 
 /**
- * A loopback name at the arrival port, or the exact configured public host. No forwarded headers or wildcard hosts.
+ * A loopback authority at the arrival port. The listener only ever binds what the CLI accepted as loopback
+ * (any 127/8 IPv4 address, "localhost" or "::1"), so a Host naming one of those at the arrival port is this
+ * server's own, whatever specific address was bound. No forwarded headers or wildcard hosts.
  */
+function isLoopbackAuthority(host: string, port: number | undefined): boolean {
+  const index = host.lastIndexOf(":");
+  if (index === -1 || host.slice(index + 1) !== String(port)) return false;
+  const name = host.slice(0, index);
+  return (
+    name === "localhost" ||
+    name === "[::1]" ||
+    (LOOPBACK_127.test(name) && name.split(".").every((part) => Number(part) <= 255))
+  );
+}
+
+/** A loopback name at the arrival port, or the exact configured public host. No forwarded headers or wildcard hosts. */
 export function isOwnHost(request: IncomingMessage, external?: URL): boolean {
   const host = request.headers.host;
-  return (
-    host !== undefined &&
-    (host === external?.host || LOOPBACK_NAMES.some((name) => host === `${name}:${request.socket.localPort}`))
-  );
+  return host !== undefined && (host === external?.host || isLoopbackAuthority(host, request.socket.localPort));
 }
 
 /** Whether a state-changing request comes from this server's own pages: the exact origin, not merely same-site. */

@@ -13,7 +13,9 @@ Pal's changes, all marked or type-only:
 - `env.ts`: `hostEnvironment()`, the only host variables a Claude Code process inherits; `claude-cli.ts` uses it
   wherever upstream read `process.env`.
 - `claude-cli.ts`: a new process needs a subscription login, not just any login, and `forgetClaudeReadiness()`
-  drops the cached check.
+  drops the cached check. Closing all processes also ends busy one-shot ones, and no request begun before it starts
+  another, including its retry.
+- `turn-relay.ts`: a request target no URL parser accepts gets 400, and a request's failure never ends the process.
 - `stream.ts`: the working directory comes from the provider (`PI_CLAUDE_CODE_CWD`, an empty folder), not Pal's own,
   and so does the relay's upstream (`PI_CLAUDE_CODE_UPSTREAM`, Anthropic's API unless a test points it elsewhere).
 - Pal compiles with `exactOptionalPropertyTypes` and `erasableSyntaxOnly`: optional fields accept `undefined`,

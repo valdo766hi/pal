@@ -4,6 +4,7 @@ import {
   CompactionTask,
   configure,
   type ConversationId,
+  type Cursor,
   defineDoc,
   defineDocFamily,
   defineExtension,
@@ -422,15 +423,19 @@ export type HelperView = {
   unknownEffects: { tool: string; task: number }[];
 };
 
-/** The owner's view of a chat's helpers, from durable state only; an interrupted helper's started calls are unknown. */
+/**
+ * One page of the owner's view of a chat's helpers, oldest first, from durable state only; an interrupted helper's
+ * started calls are unknown. `next` continues to the later helpers, so each read stays bounded.
+ */
 export async function helperViews(
   harness: Harness,
   storage: Storage,
   conversation: ConversationId,
   context: Context,
-): Promise<HelperView[]> {
-  const children = await storage.scanConversations({ ownerConversationId: conversation }, 100, undefined, context);
-  return Promise.all(
+  after?: Cursor,
+): Promise<{ helpers: HelperView[]; next: Cursor | null }> {
+  const children = await storage.scanConversations({ ownerConversationId: conversation }, 100, after, context);
+  const helpers = await Promise.all(
     children.items.map(async (record): Promise<HelperView> => {
       const helper = await harness.snapshot(Helper, record.id, context);
       const outcome = helper?.outcome ?? null;
@@ -453,4 +458,5 @@ export async function helperViews(
       };
     }),
   );
+  return { helpers, next: children.next ?? null };
 }

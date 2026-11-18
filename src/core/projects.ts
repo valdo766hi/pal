@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { access, constants, lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { type Static, Type } from "typebox";
+import { inside } from "./paths.ts";
 import { InvalidRequest, normalize, RequestConflict } from "./requests.ts";
 
 export const ProjectBody = Type.Object(
@@ -204,10 +205,7 @@ export class Projects {
   }
 
   #isForbidden(path: string): boolean {
-    return this.#forbidden.some((root) => {
-      const inside = relative(root, path);
-      return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside));
-    });
+    return this.#forbidden.some((root) => inside(root, path));
   }
 
   /**

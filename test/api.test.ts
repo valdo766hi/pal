@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { type IncomingMessage, request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import { startMcpFixture } from "./fixtures/mcp-server.ts";
 import { STDIO_FIXTURE } from "./fixtures/stdio-server.ts";
 import { createApi } from "../src/core/api.ts";
 import { openPal } from "../src/core/app.ts";
+import { isOwnHost } from "../src/core/http.ts";
 import { startServer } from "../src/core/server.ts";
 import { browse, startOpenAIFixture } from "./fixtures/openai-server.ts";
 import { fakeReleaseControl } from "./fixtures/releases.ts";
@@ -900,6 +901,25 @@ describe("API", () => {
     await api("POST", "sign-out");
     expect((await api("GET", `projects/${b.id}/mcp`)).status).toBe(401);
   });
+  it("accepts the loopback address a request arrived on, and no other host", () => {
+    const arriving = (host: string, localAddress: string) =>
+      ({ headers: { host }, socket: { localAddress, localPort: 7337 } }) as unknown as IncomingMessage;
+    for (const [host, local] of [
+      ["127.0.0.2:7337", "127.0.0.2"],
+      ["127.0.0.2:7337", "::ffff:127.0.0.2"],
+      ["127.0.0.1:7337", "127.0.0.1"],
+      ["localhost:7337", "127.0.0.1"],
+      ["[::1]:7337", "::1"],
+    ] as const)
+      expect(isOwnHost(arriving(host, local)), host).toBe(true);
+    for (const [host, local] of [
+      ["127.0.0.2:7338", "127.0.0.2"],
+      ["192.168.1.5:7337", "192.168.1.5"],
+      ["attacker.example:7337", "127.0.0.2"],
+    ] as const)
+      expect(isOwnHost(arriving(host, local)), host).toBe(false);
+  });
+
   it("answers only its own host and accepts writes only from its own origin", async () => {
     const { base, api } = await start();
     const port = new URL(base).port;

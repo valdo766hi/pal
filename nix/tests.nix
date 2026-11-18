@@ -39,6 +39,7 @@ stdenv.mkDerivation {
       (root + "/eslint.config.js")
       (root + "/.prettierrc.json")
       (root + "/.prettierignore")
+      (root + "/.gitignore")
       (root + "/.github/workflows/security.yml")
       (root + "/.github/workflows/security-comment.yml")
       (root + "/src")
@@ -46,6 +47,8 @@ stdenv.mkDerivation {
       (root + "/web")
       (root + "/test")
       (root + "/scripts")
+      # The design skill's recorder, which the browser tests run.
+      (root + "/.agents/skills/oil-ui/scripts")
     ];
   };
 
