@@ -120,7 +120,7 @@ stdenv.mkDerivation (finalAttrs: {
     };
     pnpm = pnpm_11;
     fetcherVersion = 4;
-    hash = "sha256-ltU4SlXC8Pgj+qjv0LTE5lNz470WeCi+UDNLSkwkiuo=";
+    hash = "sha256-S1oM6obuhpBzECHARxx25ladO2WOaqZzjCSkElTCOtw=";
   };
 
   nativeBuildInputs = [
@@ -147,6 +147,8 @@ stdenv.mkDerivation (finalAttrs: {
     pnpm prune --prod --ignore-scripts
     mkdir -p $out/lib/pal $out/bin
     cp -r dist node_modules package.json $out/lib/pal/
+    # Pal never enables Node source maps, so its dependencies' maps are never read.
+    find $out/lib/pal/node_modules -name '*.map' -type f -delete
     ln -s ${releaseSource} $out/lib/pal/release-source
     node scripts/release-manifest.ts ${releaseSource} "$out" ${pkgsPath} "$out/lib/pal/release.json"
     makeWrapper ${lib.getExe nodejs_24} $out/bin/pal --add-flags $out/lib/pal/dist/main.js \

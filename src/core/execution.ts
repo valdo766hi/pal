@@ -12,7 +12,7 @@ import {
   type TaskId,
 } from "@earendil-works/pi-durable";
 import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { Type } from "typebox";
 import { gnuTimeout } from "./timeout.ts";
 import type { WorkingChecks } from "./working-checks.ts";

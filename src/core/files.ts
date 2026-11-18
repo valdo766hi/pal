@@ -11,7 +11,7 @@ import { FileAccessError, type PrivateFiles } from "./file-policy.ts";
 import type { ProjectSearch, SearchMode } from "./search.ts";
 import type { FolderLease, GrantedFolder } from "./folders.ts";
 import type { AttachmentPage } from "./uploads.ts";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { ConversationId, ToolExecutionApi } from "@earendil-works/pi-durable";
 import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
 import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";

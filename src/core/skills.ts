@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { defineDoc, defineExtension, defineTool, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
