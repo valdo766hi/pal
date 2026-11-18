@@ -9,5 +9,3 @@ result-*
 *.sqlite-*
 .env
 .env.*
-# Local agent notes stay private.
-[Aa][Gg][Ee][Nn][Tt][Ss].[Mm][Dd]

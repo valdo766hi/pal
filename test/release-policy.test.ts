@@ -127,13 +127,13 @@ describe("controlled release policy", () => {
       "../secret",
       "/etc/passwd",
       "src/../../secret",
-      "AGENTS.md",
       "Plan.MD",
       ".design/raw.html",
       "src/node_modules/code.js",
       "x\\y",
     ])
       expect(sourcePath(path), path).toBe(false);
+    expect(sourcePath("AGENTS.md")).toBe(true);
     await writeFile(join(root, "PLAN.md"), "private handoff");
     await expect(sourcePaths(root)).rejects.toThrow(/private/);
   });

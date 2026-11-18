@@ -44,23 +44,24 @@ afterEach(() => {
   for (const dir of repos.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("the repository's .gitignore", () => {
-  it("keeps a local AGENTS.md out of a fresh clone's index, which then passes candidate enumeration and the guards", () => {
+describe("public agent guidance", () => {
+  it("lets a clone track AGENTS.md through candidate enumeration, the guard installer and the commit hook", () => {
     const dir = repo();
     cpSync(join(import.meta.dirname, "..", ".gitignore"), join(dir, ".gitignore"));
     mkdirSync(join(dir, "src"));
     writeFileSync(join(dir, "src", "main.ts"), "export {};\n");
-    writeFileSync(join(dir, "AGENTS.md"), "local notes\n");
+    writeFileSync(join(dir, "AGENTS.md"), "# Guidance\n");
     git(dir, "add", "-A");
     const index = git(dir, "ls-files", "--stage", "-z");
     const paths = index
       .split("\0")
       .filter(Boolean)
       .map((entry) => entry.slice(entry.indexOf("\t") + 1));
-    expect(paths).not.toContain("AGENTS.md");
+    expect(paths).toContain("AGENTS.md");
     const build = paths.filter((path) => /^(?:src|web|test|nix|scripts)\//.test(path));
     expect(() => candidateFiles(index, build)).not.toThrow();
     expect(run(dir, "bash", "scripts/prepare-local.sh")).toMatchObject({ status: 0 });
+    expect(commit(dir, "docs: add agent guidance")).toMatchObject({ status: 0 });
   });
 });
 
@@ -72,10 +73,11 @@ describe("prepare-local.sh", () => {
     const exclude = readFileSync(join(dir, ".git", "info", "exclude"), "utf8");
     expect(exclude.match(/>>> pal-local-guard/g)).toHaveLength(1);
 
-    for (const name of ["AGENTS.md", "stack.md", "Plan.MD", "nested/agents.md", ".design/approved/x.png"]) {
+    for (const name of ["CLAUDE.local.md", "stack.md", "Plan.MD", "nested/plan.md", ".design/approved/x.png"]) {
       expect(run(dir, "git", "check-ignore", "-q", name).status, name).toBe(0);
     }
-    expect(run(dir, "git", "check-ignore", "-q", "src/plan.ts").status).toBe(1);
+    for (const name of ["src/plan.ts", "AGENTS.md"])
+      expect(run(dir, "git", "check-ignore", "-q", name).status, name).toBe(1);
   });
 
   it("refuses foreign hooks, a hooksPath, and private docs already in the index", () => {
