@@ -59,6 +59,18 @@ describe("Auto mode's hard floor", () => {
     ["find . -exec sudo rm {} \\;", "changes privileges"],
     ["ssh -p 22 host 'sudo reboot'", "changes privileges"],
     ["watch -n 1 sudo id", "changes privileges"],
+    // Commands started through a runner are judged like the runner's own.
+    ["git submodule foreach git push", "pushes with Git"],
+    ["git submodule foreach --recursive 'git push'", "pushes with Git"],
+    ["pnpm exec git push", "pushes with Git"],
+    ["yarn exec git push", "pushes with Git"],
+    ["npx sudo id", "changes privileges"],
+    ["bunx git push", "pushes with Git"],
+    ["uv run sudo id", "changes privileges"],
+    ["poetry run git push", "pushes with Git"],
+    ["nix develop -c git push", "pushes with Git"],
+    ["direnv exec . git push", "pushes with Git"],
+    ["parallel git push ::: a b", "pushes with Git"],
   ])("always asks for %s", (command, reason) => {
     expect(alwaysAsks(command, [DATA])).toBe(reason);
   });
@@ -103,6 +115,9 @@ describe("Auto mode's hard floor", () => {
     "cat README.md | grep -i shutdown",
     "rm -rf build 2>/dev/null",
     "rm -rf build # cleanup",
+    "command -v sudo",
+    "pnpm exec vitest run",
+    "uv run pytest",
   ])("leaves %s to the decision model", (command) => {
     expect(alwaysAsks(command, [DATA])).toBeUndefined();
   });
