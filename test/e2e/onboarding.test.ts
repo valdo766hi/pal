@@ -361,4 +361,42 @@ describe("isolated provider onboarding", () => {
     await page.getByRole("button", { name: "Back to chat" }).click();
     expect(errors).toEqual([]);
   });
+
+  it("reloads failed lazy-route stylesheets on retry so Settings renders with scoped styles", async () => {
+    const { page, errors } = await setup(1440);
+    await page.getByRole("button", { name: "Set up later" }).click();
+    await optionalTools(page);
+    await createProject(page);
+
+    // Fail Settings-*.css once, verify retry re-fetches it and applies scoped Settings styles.
+    let cssAttempts = 0;
+    await page.route("**/assets/Settings-*.css", async (route) => {
+      cssAttempts++;
+      if (cssAttempts === 1) await route.fulfill({ status: 500, body: "css failed" });
+      else await route.continue();
+    });
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    expect(cssAttempts).toBe(1);
+
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+    await page.unroute("**/assets/Settings-*.css");
+
+    expect(cssAttempts).toBe(2);
+    const styles = await page.evaluate(() => {
+      const nav = document.querySelector('nav[aria-label="Settings sections"]');
+      const h1 = nav?.querySelector("h1");
+      const link = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="Settings-"]');
+      return {
+        navDisplay: nav ? getComputedStyle(nav).display : null,
+        navWidth: nav ? getComputedStyle(nav).width : null,
+        h1FontSize: h1 ? getComputedStyle(h1).fontSize : null,
+        hasSheet: link?.sheet != null,
+      };
+    });
+    expect(styles).toEqual({ navDisplay: "flex", navWidth: "220px", h1FontSize: "15px", hasSheet: true });
+    expect(errors).toEqual([]);
+  });
 });
