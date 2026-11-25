@@ -84,7 +84,13 @@ export function createRequestListener({
     if (assets === undefined) {
       return sendJson(request, response, 404, { error: "web_not_built" });
     }
-    assets(request, response, () => sendJson(request, response, 404, { error: "not_found" }));
+    const assetRequest = Object.create(request, {
+      headers: {
+        value: { ...request.headers, "accept-encoding": negotiateAcceptEncoding(request.headers["accept-encoding"]) },
+        enumerable: true,
+      },
+    }) as IncomingMessage;
+    assets(assetRequest, response, () => sendJson(request, response, 404, { error: "not_found" }));
   };
 }
 
@@ -116,4 +122,45 @@ export async function startServer(options: ServerOptions & { host: string; port:
 function methodNotAllowed(response: ServerResponse): void {
   response.writeHead(405, { allow: "GET, HEAD", "content-type": "text/plain; charset=utf-8" });
   response.end("Method Not Allowed\n");
+}
+
+const QVALUE = /^(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?)$/;
+
+function parseEncodingEntry(part: string): readonly [string, number] | undefined {
+  const [rawCoding, ...params] = part.split(";");
+  const coding = rawCoding?.trim().toLowerCase() ?? "";
+  if (coding === "") return undefined;
+  let q = 1;
+  for (const param of params) {
+    const [key, value] = param.split("=").map((item) => item.trim());
+    if (key?.toLowerCase() !== "q") continue;
+    if (value === undefined || !QVALUE.test(value)) return undefined;
+    q = Number(value);
+  }
+  return [coding === "x-gzip" ? "gzip" : coding, q];
+}
+
+/**
+ * Parse RFC 9110 Accept-Encoding q-values so sirv's substring matcher respects q=0 rejections and client preference.
+ * Returns a normalized Accept-Encoding value for sirv ("br, gzip", "br", "gzip", or "").
+ */
+function negotiateAcceptEncoding(header: string | string[] | undefined): string {
+  const raw = Array.isArray(header) ? header.join(",") : header;
+  if (raw === undefined || raw.trim() === "") return "";
+  const weights = new Map<string, number>();
+  for (const part of raw.split(",")) {
+    const entry = parseEncodingEntry(part);
+    if (entry === undefined) continue;
+    const [coding, q] = entry;
+    const prev = weights.get(coding);
+    weights.set(coding, prev === 0 || q === 0 ? 0 : Math.max(prev ?? 0, q));
+  }
+  const wildcard = weights.get("*") ?? 0;
+  const brQ = weights.get("br") ?? wildcard;
+  const gzipQ = weights.get("gzip") ?? wildcard;
+  const floor = weights.get("identity") ?? 0;
+  const allowBr = brQ > 0 && brQ >= floor;
+  const allowGzip = gzipQ > 0 && gzipQ >= floor;
+  if (allowBr && (!allowGzip || brQ >= gzipQ)) return allowGzip ? "br, gzip" : "br";
+  return allowGzip ? "gzip" : "";
 }

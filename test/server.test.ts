@@ -217,6 +217,43 @@ describe("HTTP server", () => {
         expect(br.headers["content-type"]).toBe(identity.headers["content-type"]);
         expect(br.body.length).toBeLessThan(identity.body.length);
         expect(brotliDecompressSync(br.body)).toEqual(expected);
+
+        const rejectBr = await rawGet(path, "gzip, br;q=0");
+        expect(rejectBr.status).toBe(200);
+        expect(rejectBr.headers["content-encoding"]).toBe("gzip");
+        expect(rejectBr.headers["vary"]).toBe("Accept-Encoding");
+        expect(gunzipSync(rejectBr.body)).toEqual(expected);
+
+        const rejectBoth = await rawGet(path, "gzip;q=0, br;q=0");
+        expect(rejectBoth.status).toBe(200);
+        expect(rejectBoth.headers["content-encoding"]).toBeUndefined();
+        expect(rejectBoth.headers["vary"]).toBe("Accept-Encoding");
+        expect(rejectBoth.body).toEqual(expected);
+
+        const preferGzip = await rawGet(path, "br;q=0.5, gzip;q=1.0");
+        expect(preferGzip.status).toBe(200);
+        expect(preferGzip.headers["content-encoding"]).toBe("gzip");
+        expect(gunzipSync(preferGzip.body)).toEqual(expected);
+
+        const wildcardNoBr = await rawGet(path, "*, br;q=0");
+        expect(wildcardNoBr.status).toBe(200);
+        expect(wildcardNoBr.headers["content-encoding"]).toBe("gzip");
+        expect(gunzipSync(wildcardNoBr.body)).toEqual(expected);
+
+        const wildcardZero = await rawGet(path, "*;q=0");
+        expect(wildcardZero.status).toBe(200);
+        expect(wildcardZero.headers["content-encoding"]).toBeUndefined();
+        expect(wildcardZero.body).toEqual(expected);
+
+        const preferIdentity = await rawGet(path, "gzip;q=0.5, identity;q=1");
+        expect(preferIdentity.status).toBe(200);
+        expect(preferIdentity.headers["content-encoding"]).toBeUndefined();
+        expect(preferIdentity.body).toEqual(expected);
+
+        const nonMatchingSubstring = await rawGet(path, "deflate, x-br");
+        expect(nonMatchingSubstring.status).toBe(200);
+        expect(nonMatchingSubstring.headers["content-encoding"]).toBeUndefined();
+        expect(nonMatchingSubstring.body).toEqual(expected);
       }
 
       const index = await rawGet("/", "gzip, br");
