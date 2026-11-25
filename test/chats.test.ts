@@ -17,6 +17,7 @@ import {
   InputHeld,
   ProjectUnavailable,
 } from "../src/core/chats.ts";
+import { FileAccessError } from "../src/core/files.ts";
 import { MAX_INPUT_CHARS } from "../src/protocol/limits.ts";
 import { InvalidRequest, RequestConflict } from "../src/core/requests.ts";
 import { Uploads } from "../src/core/uploads.ts";
@@ -590,5 +591,105 @@ describe("chats", () => {
     await expect(pal.chats.withdraw(chat.id, "kept-input", context)).rejects.toBeInstanceOf(RequestConflict);
     expect(await pal.store.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
     expect(await pal.userMessages(chat.conversationId)).toBe(1);
+  });
+
+  it("lists chats with command mode, workspace validation, equal-timestamp ordering and unavailable-workspace null", async () => {
+    const dataRoot = await tempDir();
+    const { store, chats } = await open(dataRoot);
+    const db = store.database;
+    await db.run(
+      "INSERT INTO pal_projects (id, request_id, digest, name, mode, state, root, created_at) VALUES ('p-ready', 'rp-1', 'd', 'Ready', 'managed', 'ready', '/tmp/p-ready', 100)",
+    );
+    await db.run(
+      "INSERT INTO pal_projects (id, request_id, digest, name, mode, state, root, created_at) VALUES ('p-failed', 'rp-2', 'd', 'Failed', 'managed', 'failed', '/tmp/p-failed', 101)",
+    );
+    const insertChat =
+      "INSERT INTO pal_chats (id, request_id, digest, intent, state, conversation_id, created_at, project_id, title, deleted_at, command_mode) VALUES (?, ?, 'd', '{}', ?, ?, ?, ?, ?, ?, ?)";
+    await db.run(insertChat, "c-old", "rc-1", "ready", 1, 500, "p-ready", "Old", null, "ask");
+    await db.run(insertChat, "c-tie-1", "rc-2", "ready", 2, 600, "p-ready", "Tie 1", null, "auto");
+    await db.run(insertChat, "c-tie-2", "rc-3", "ready", 3, 600, "p-ready", "Tie 2", null, "full");
+    await db.run(insertChat, "c-deleted", "rc-4", "ready", 4, 700, "p-ready", "Deleted", 750, "ask");
+    await db.run(insertChat, "c-prov", "rc-5", "provisioning", null, 800, "p-ready", "Prov", null, "ask");
+    await db.run(insertChat, "c-failed", "rc-6", "ready", 5, 600, "p-failed", "Failed proj", null, "full");
+
+    await db.run(
+      "INSERT INTO pal_admissions (seq, chat_id, request_id, digest, intent, state, submission_id, created_at, blocked) VALUES (1, 'c-tie-1', 'ra-1', 'd', '{\"text\":\"retry me\"}', 'admitting', NULL, 610, 'missing file')",
+    );
+    const plan = JSON.stringify({
+      source: "/tmp/p-ready",
+      sourceIdentity: "id-s",
+      common: "/tmp/p-ready/.git",
+      commonIdentity: "id-c",
+      base: "a".repeat(40),
+      submodules: 2,
+    });
+    await db.run(
+      "INSERT INTO pal_workspaces (id, project_id, chat_id, mode, root, source, plan, identity, nonce, state, error) VALUES ('ws-wt', 'p-ready', 'c-tie-2', 'worktree', '/tmp/wt', '/tmp/p-ready', ?, 'id-w', 'n1', 'ready', NULL)",
+      plan,
+    );
+    await db.run(
+      "INSERT INTO pal_workspaces (id, project_id, chat_id, mode, root, source, plan, identity, nonce, state, error) VALUES ('ws-local', 'p-ready', 'c-tie-1', 'local', '/tmp/p-ready', '/tmp/p-ready', NULL, 'id-l', 'n2', 'ready', NULL)",
+    );
+    // Unavailable project with a corrupt plan must still return workspace: null rather than failing.
+    await db.run(
+      "INSERT INTO pal_workspaces (id, project_id, chat_id, mode, root, source, plan, identity, nonce, state, error) VALUES ('ws-failed', 'p-failed', 'c-failed', 'worktree', '/tmp/wt-f', '/tmp/p-failed', '{bad', NULL, 'n3', 'failed', 'broken')",
+    );
+
+    const ready = await chats.list("p-ready");
+    expect(ready.map((c) => c.id)).toEqual(["c-tie-2", "c-tie-1", "c-old"]);
+    expect(ready[0]).toMatchObject({
+      id: "c-tie-2",
+      commandMode: "full",
+      blocked: null,
+      workspace: {
+        id: "ws-wt",
+        projectId: "p-ready",
+        chatId: "c-tie-2",
+        mode: "worktree",
+        root: "/tmp/wt",
+        source: "/tmp/p-ready",
+        base: "a".repeat(40),
+        state: "ready",
+        submodules: 2,
+        error: null,
+      },
+    });
+    expect(ready[1]).toMatchObject({
+      id: "c-tie-1",
+      commandMode: "auto",
+      blocked: { requestId: "ra-1", text: "retry me", reason: "missing file" },
+      workspace: { id: "ws-local", mode: "local", base: null, submodules: 0, state: "ready" },
+    });
+    expect(ready[2]).toMatchObject({ id: "c-old", commandMode: "ask", workspace: null, blocked: null });
+
+    const failed = await chats.list("p-failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ id: "c-failed", commandMode: "full", workspace: null });
+
+    // A corrupt stored worktree plan on a ready project fails closed without stopping admission.
+    await db.run("UPDATE pal_workspaces SET plan = '{corrupt' WHERE id = 'ws-wt'");
+    await expect(chats.list("p-ready")).rejects.toBeInstanceOf(FileAccessError);
+    expect(chats.stopped).toBe(false);
+  });
+
+  it("stops admission when listing chats hits a storage error", async () => {
+    const dataRoot = await tempDir();
+    const { store, harness } = await open(dataRoot);
+    let stopped = 0;
+    const chats = await ChatService.open(
+      {
+        database: store.database,
+        harness,
+        agentFor: async () => undefined,
+        onStopped: () => {
+          stopped++;
+        },
+      },
+      context,
+    );
+    await store.close();
+    await expect(chats.list("project-1")).rejects.toBeInstanceOf(AdmissionStopped);
+    expect(chats.stopped).toBe(true);
+    expect(stopped).toBe(1);
   });
 });

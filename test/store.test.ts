@@ -377,6 +377,68 @@ describe("store", () => {
     expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
   });
 
+  it("adds project-list indexes in schema 27 without losing rows, and older builds refuse it unchanged", async () => {
+    const database = await openDatabase(join(await tempDir(), "pal.sqlite"));
+    cleanups.push(() => database.close());
+    await migrate(database, MIGRATIONS.slice(0, 26));
+    await database.run(
+      "INSERT INTO pal_projects (id, request_id, digest, name, mode, state, root, created_at) VALUES ('p1', 'rp1', 'd', 'One', 'managed', 'ready', '/tmp/p1', 100)",
+    );
+    await database.run(
+      "INSERT INTO pal_chats (id, request_id, digest, intent, state, conversation_id, created_at, project_id, title, deleted_at, command_mode) VALUES ('c1', 'rc1', 'd', '{}', 'ready', 1, 200, 'p1', 'First', NULL, 'auto')",
+    );
+    await database.run(
+      "INSERT INTO pal_admissions (seq, chat_id, request_id, digest, intent, state, submission_id, created_at, blocked) VALUES (1, 'c1', 'ra1', 'd', '{\"text\":\"wait\"}', 'admitting', NULL, 210, 'missing attachment')",
+    );
+    const beforeChats = await database.all("SELECT * FROM pal_chats ORDER BY id");
+    const beforeAdmissions = await database.all("SELECT * FROM pal_admissions ORDER BY seq");
+
+    await migrate(database);
+
+    expect(await database.all("SELECT * FROM pal_chats ORDER BY id")).toEqual(beforeChats);
+    expect(await database.all("SELECT * FROM pal_admissions ORDER BY seq")).toEqual(beforeAdmissions);
+    const indexes = (
+      await database.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name")
+    ).map((row) => row.name);
+    expect(indexes).toContain("pal_chats_project_ready");
+    expect(indexes).toContain("pal_admissions_pending");
+
+    const plan = await database.all<{ detail: string }>(
+      `EXPLAIN QUERY PLAN
+       SELECT c.id, c.title, c.conversation_id, c.created_at, c.intent, c.command_mode,
+         (SELECT json_object('requestId', a.request_id, 'text', json_extract(a.intent, '$.text'), 'reason', a.blocked)
+          FROM pal_admissions a WHERE a.chat_id = c.id AND a.state = 'admitting' AND a.blocked IS NOT NULL) AS blocked,
+         CASE WHEN p.id IS NOT NULL THEN w.id END AS workspace_id,
+         w.project_id AS workspace_project_id, w.mode AS workspace_mode, w.root AS workspace_root,
+         w.source AS workspace_source, w.plan AS workspace_plan, w.state AS workspace_state, w.error AS workspace_error
+       FROM pal_chats c
+       LEFT JOIN pal_workspaces w ON w.chat_id = c.id
+       LEFT JOIN pal_projects p ON p.id = w.project_id AND p.removed_at IS NULL AND p.state = 'ready'
+       WHERE c.project_id = ? AND c.state = 'ready' AND c.deleted_at IS NULL
+       ORDER BY c.created_at DESC, c.rowid DESC`,
+      "p1",
+    );
+    const details = plan.map((row) => row.detail).join("\n");
+    expect(details).toContain("pal_chats_project_ready");
+    expect(details).toContain("pal_admissions_pending");
+    expect(details).not.toMatch(/TEMP B-TREE/i);
+
+    const migrated = await Promise.all([
+      database.all("SELECT type, name, sql FROM sqlite_master ORDER BY type, name"),
+      database.all("SELECT version, name, applied_at FROM pal_migrations ORDER BY version"),
+    ]);
+    await expect(migrate(database, MIGRATIONS.slice(0, 26))).rejects.toThrow(
+      /migration 27 'project_list_indexes'.*does not know/,
+    );
+    expect(
+      await Promise.all([
+        database.all("SELECT type, name, sql FROM sqlite_master ORDER BY type, name"),
+        database.all("SELECT version, name, applied_at FROM pal_migrations ORDER BY version"),
+      ]),
+    ).toEqual(migrated);
+    expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
+  });
+
   it("numbers migrations consecutively from 1", () => {
     expect(MIGRATIONS.map(({ version }) => version)).toEqual(MIGRATIONS.map((_, index) => index + 1));
   });

@@ -569,7 +569,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           projects: await Promise.all(
             projects.map(async (project) => ({
               ...project,
-              chats: await Promise.all((await pal.chats.list(project.id)).map(describeChat)),
+              chats: await pal.chats.list(project.id),
             })),
           ),
         });
