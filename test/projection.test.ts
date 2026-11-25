@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CommandApproval, Entry, Message } from "../web/src/lib/chat.svelte.ts";
-import { build, place, type Item, type Row } from "../web/src/lib/projection.ts";
+import { build, group, place, type Item, type Row } from "../web/src/lib/projection.ts";
 
 const call = (id: string, code: string) => ({ type: "toolCall" as const, id, name: "codemode", arguments: { code } });
 const turn = (id: number, content: Message["content"], extra: Partial<Message> = {}): Entry => ({
@@ -86,5 +86,41 @@ describe("transcript projection", () => {
     const entry: Entry = { id: 1, kind: "pal.example" };
     const items = build([entry], undefined, [], (kind) => (kind === "pal.example" ? "missing" : undefined));
     expect(items).toEqual([{ kind: "plugin", id: "1", entry, piece: "missing" }]);
+  });
+
+  it("groups committed history identically to place without mutating inputs or cached history on live append", () => {
+    const entries: Entry[] = [
+      user(1, "go"),
+      turn(2, [call("c1", "a()")]),
+      result(3, "c1", "ok"),
+      { id: 4, kind: "pal.shell", data: { shell: { callId: "s1", status: "started", command: "ls", cwd: "/tmp" } } },
+      turn(5, [call("c2", "b()")], { stopReason: "error", errorMessage: "boom" }),
+      turn(6, [call("c3", "c()")], { stopReason: "aborted" }),
+      turn(7, "final answer"),
+    ];
+    const approvals = [approval("done", 2, "approved"), approval("wait", 5, "pending")];
+    const items = build(entries, undefined, approvals, none);
+    const snapshot = structuredClone(items);
+
+    for (const retried of [new Set<string>(), new Set(["5"])]) {
+      const expected = rows(items, retried);
+      const actual = group(items, retried);
+      expect(actual).toEqual(expected);
+      expect(items).toEqual(snapshot);
+    }
+
+    // Live append via place() onto cached historyRows must never mutate cached work.items arrays.
+    const committed = build([user(1, "go"), turn(2, [call("c1", "a()")])], undefined, [], none);
+    const historyRows = group(committed, new Set());
+    const work = historyRows.at(-1);
+    expect(work?.kind).toBe("work");
+    const cachedWorkItems = work?.kind === "work" ? [...work.items] : [];
+    const liveItems = build([], { role: "assistant", content: [call("c2", "live()")] }, [], none);
+    const combined = liveItems.reduce((all, item) => place(all, item, new Set()), [...historyRows]);
+
+    expect(work?.kind === "work" ? work.items : []).toEqual(cachedWorkItems);
+    const combinedWork = combined.at(-1);
+    expect(combinedWork?.kind).toBe("work");
+    expect(combinedWork?.kind === "work" ? combinedWork.items.length : 0).toBe(cachedWorkItems.length + 1);
   });
 });

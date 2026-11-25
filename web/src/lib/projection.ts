@@ -191,9 +191,33 @@ const works = (item: Item, retried: ReadonlySet<string>): item is Work =>
   item.kind === "helper" ||
   (item.kind === "approval" && item.approval.state !== "pending") ||
   (item.kind === "assistant" && (item.steps.length > 0 || retried.has(item.id)));
+const failedStep = (item: Item, retried: ReadonlySet<string>): item is Extract<Item, { kind: "assistant" }> =>
+  item.kind === "assistant" &&
+  item.steps.length > 0 &&
+  !retried.has(item.id) &&
+  (item.error !== undefined || item.stopped);
+
 /**
- * Adds `item` to `rows`: tool activity joins the run's line before it; what the owner reads or answers stands alone.
+ * Groups committed `items` into fresh display rows in linear time without mutating `items`.
  * `retried` names assistant turns whose failed attempts Pi retried.
+ */
+export function group(items: readonly Item[], retried: ReadonlySet<string>): Row[] {
+  const rows: Row[] = [];
+  for (const item of items) {
+    const last = rows.at(-1);
+    if (!works(item, retried)) rows.push(item);
+    else if (last?.kind === "work") last.items.push(item);
+    // Named for what precedes it, so the line stays the same one when its first live step commits.
+    else rows.push({ kind: "work", id: `work-${last?.id ?? "start"}`, items: [item] });
+    // A step's turn that failed or was stopped says so below its line.
+    if (failedStep(item, retried)) rows.push({ ...item, id: `${item.id}-end`, texts: [], steps: [] });
+  }
+  return rows;
+}
+
+/**
+ * Adds `item` to `rows` without mutating existing work groups' `items` arrays, so live appends never mutate cached
+ * committed history. `retried` names assistant turns whose failed attempts Pi retried.
  */
 export function place(rows: Row[], item: Item, retried: ReadonlySet<string>): Row[] {
   const last = rows.at(-1);
@@ -202,12 +226,6 @@ export function place(rows: Row[], item: Item, retried: ReadonlySet<string>): Ro
   // Named for what precedes it, so the line stays the same one when its first live step commits.
   else rows.push({ kind: "work", id: `work-${last?.id ?? "start"}`, items: [item] });
   // A step's turn that failed or was stopped says so below its line.
-  if (
-    item.kind === "assistant" &&
-    item.steps.length > 0 &&
-    !retried.has(item.id) &&
-    (item.error !== undefined || item.stopped)
-  )
-    rows.push({ ...item, id: `${item.id}-end`, texts: [], steps: [] });
+  if (failedStep(item, retried)) rows.push({ ...item, id: `${item.id}-end`, texts: [], steps: [] });
   return rows;
 }
