@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { ChatService } from "../src/core/chats.ts";
 import { migrate, MIGRATIONS } from "../src/storage/migrations.ts";
@@ -437,6 +438,80 @@ describe("store", () => {
       ]),
     ).toEqual(migrated);
     expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
+  });
+
+  it("refuses schema 27 migration while unfinished work is pending, leaving schema 26 intact for the retained build", async () => {
+    const dataRoot = await tempDir();
+    // Create a store at schema 26 with Pi's tables, then interrupt an input at the input-recorded barrier.
+    const initDb = await openDatabase(join(dataRoot, "pal.sqlite"));
+    await migrate(initDb, MIGRATIONS.slice(0, 26));
+    await initDb.close();
+
+    const openAt26 = async (barrier?: (point: string) => void) => {
+      const database = await openDatabase(join(dataRoot, "pal.sqlite"));
+      await migrate(database, MIGRATIONS.slice(0, 26));
+      const storage = await SqliteStorage.open(database, { prefix: "pi_" });
+      const faux = fauxProvider();
+      const models = createModels();
+      models.setProvider(faux.provider);
+      faux.setResponses([fauxAssistantMessage(fauxText("ok"))]);
+      const model = faux.getModel();
+      const harness = await Harness.open(storage, { models, registry: createRegistry() }, context);
+      const chats = await ChatService.open(
+        {
+          database,
+          harness,
+          agentFor: async () => ({ model: { provider: model.provider, modelId: model.id } }),
+          ...(barrier === undefined ? {} : { barrier }),
+        },
+        context,
+      );
+      return {
+        database,
+        harness,
+        chats,
+        close: async () => {
+          await harness.close(context);
+          await storage.close(context);
+        },
+      };
+    };
+
+    const stop = new Error("crash at input-recorded");
+    const first = await openAt26((point) => {
+      if (point === "input-recorded") throw stop;
+    });
+    const chat = await first.chats.createChat("req-chat-26", { projectId: "project-1" }, context);
+    await expect(first.chats.submit(chat.id, "req-input-26", { text: "finish me" }, context)).rejects.toBe(stop);
+    await first.close();
+
+    const beforeDb = await openDatabase(join(dataRoot, "pal.sqlite"));
+    const beforeSnapshot = await snapshot(beforeDb);
+    const beforeAdmissions = await beforeDb.all("SELECT * FROM pal_admissions ORDER BY seq");
+    expect(await beforeDb.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({ n: 26 });
+    expect(beforeAdmissions).toMatchObject([{ chat_id: chat.id, request_id: "req-input-26", state: "admitting" }]);
+    await beforeDb.close();
+
+    // Upgrading directly to schema 27 must refuse without changing the database.
+    await expect(openStore(dataRoot)).rejects.toThrow(/unfinished work needs its retained Pal release/);
+    const afterRefusal = await openDatabase(join(dataRoot, "pal.sqlite"));
+    expect(await snapshot(afterRefusal)).toEqual(beforeSnapshot);
+    expect(await afterRefusal.all("SELECT * FROM pal_admissions ORDER BY seq")).toEqual(beforeAdmissions);
+    await afterRefusal.close();
+
+    // The retained schema 26 build can still reopen and finish the interrupted input.
+    const retained = await openAt26();
+    const conversation = await retained.harness.conversation(chat.conversationId, context);
+    await conversation?.waitForIdle(context);
+    expect(await retained.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
+    await retained.close();
+
+    // Once idle, upgrading to schema 27 succeeds.
+    const upgraded = await openStore(dataRoot);
+    expect(await upgraded.database.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({
+      n: MIGRATIONS.at(-1)?.version,
+    });
+    await upgraded.close();
   });
 
   it("numbers migrations consecutively from 1", () => {

@@ -465,7 +465,9 @@ export const MIGRATIONS: readonly Migration[] = [
   {
     version: 27,
     name: "project_list_indexes",
+    // Older builds refuse schema 27, so unfinished work started under a retained release must finish there first.
     up: async (transaction) => {
+      await refuseUnfinishedWork(transaction);
       await transaction.exec(
         "CREATE INDEX IF NOT EXISTS pal_chats_project_ready ON pal_chats (project_id, created_at) WHERE state = 'ready' AND deleted_at IS NULL",
       );
