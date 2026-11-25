@@ -225,4 +225,154 @@ describe("project search", () => {
       ),
     ).toBe(false);
   });
+
+  it("lets a ready warm index bypass an unrelated project's blocked scan", async () => {
+    const rootA = await folder({ "a.txt": "alpha needle\n" });
+    const rootB = await folder({ "b.txt": "beta needle\n" });
+    let startedB!: () => void;
+    let releaseB!: () => void;
+    const bEntered = new Promise<void>((resolve) => (startedB = resolve));
+    const bGate = new Promise<void>((resolve) => (releaseB = resolve));
+    const search = new ProjectSearch([], publicFiles, (options) => {
+      const created = FileFinder.create(options);
+      if (created.ok && options.basePath === rootB) {
+        const wait = created.value.waitForScan.bind(created.value);
+        created.value.waitForScan = async (ms) => {
+          startedB();
+          await bGate;
+          return wait(ms);
+        };
+      }
+      return created;
+    });
+    cleanups.push(() => {
+      releaseB();
+      return search.close();
+    });
+
+    await search.search(rootA, "alpha", "text");
+    const pendingB = search.search(rootB, "beta", "text");
+    await bEntered;
+
+    // Project A must finish while project B's scan is still blocked.
+    const resultA = await search.search(rootA, "alpha", "text");
+    expect(resultA.indexing).toBe(false);
+    expect(resultA.hits.map((hit) => hit.path)).toEqual(["a.txt"]);
+
+    releaseB();
+    const resultB = await pendingB;
+    expect(resultB.indexing).toBe(false);
+    expect(resultB.hits.map((hit) => hit.path)).toEqual(["b.txt"]);
+  });
+
+  it("still serializes rescan recovery, forget/revocation, eviction and close races behind blocked scans", async () => {
+    const watcher = interruptedWatcher();
+    const rootA = await folder({ "a.txt": "alpha needle\n" });
+    const rootB = await folder({ "b.txt": "beta needle\n" });
+    const rootC = await folder({ "c.txt": "gamma needle\n" });
+    const rootD = await folder({ "d.txt": "delta needle\n" });
+
+    let releaseScan: (() => void) | undefined;
+    let enteredScan: (() => void) | undefined;
+    let blockedRoot: string | undefined;
+    const armBlock = (root: string) => {
+      blockedRoot = root;
+      const entered = new Promise<void>((resolve) => (enteredScan = resolve));
+      const gate = new Promise<void>((resolve) => (releaseScan = resolve));
+      return {
+        entered,
+        release: () => {
+          blockedRoot = undefined;
+          releaseScan?.();
+        },
+        gate,
+      };
+    };
+
+    let currentGate: Promise<void> | undefined;
+    const search = new ProjectSearch([], publicFiles, (options) => {
+      const created = FileFinder.create(options);
+      if (created.ok && options.basePath === blockedRoot) {
+        const gate = currentGate;
+        const wait = created.value.waitForScan.bind(created.value);
+        created.value.waitForScan = async (ms) => {
+          enteredScan?.();
+          await gate;
+          return wait(ms);
+        };
+      }
+      return created;
+    });
+    cleanups.push(() => {
+      releaseScan?.();
+      return search.close();
+    });
+
+    // Warm A, then mark A dirty via a watcher gap; A must NOT bypass B's blocked scan.
+    await search.search(rootA, "alpha", "text");
+    await writeFile(join(rootA, "a2.txt"), "alpha second\n");
+    watcher.gap(rootA);
+    const blockB = armBlock(rootB);
+    currentGate = blockB.gate;
+    const pendingB = search.search(rootB, "beta", "text");
+    await blockB.entered;
+
+    let aResolved = false;
+    const pendingA = search.search(rootA, "alpha", "text").then((res) => {
+      aResolved = true;
+      return res;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(aResolved).toBe(false);
+    blockB.release();
+    expect((await pendingB).hits).toHaveLength(1);
+    expect((await pendingA).hits.map((h) => h.path).sort()).toEqual(["a.txt", "a2.txt"]);
+
+    // Fill MAX_FINDERS = 3 (A, B, C), keep A freshest, then block on D which evicts oldest (B).
+    await search.search(rootC, "gamma", "text");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await search.search(rootA, "alpha", "text");
+    const blockD = armBlock(rootD);
+    currentGate = blockD.gate;
+    const pendingD = search.search(rootD, "delta", "text");
+    await blockD.entered;
+
+    // A and C stayed warm and answer immediately; evicted B must wait for D.
+    expect((await search.search(rootA, "alpha", "text")).hits).toHaveLength(2);
+    expect((await search.search(rootC, "gamma", "text")).hits).toHaveLength(1);
+    let bResolved = false;
+    const pendingB2 = search.search(rootB, "beta", "text").then((res) => {
+      bResolved = true;
+      return res;
+    });
+    // Forget C while D is blocked: C is revoked and must not use the fast path, and a queued lookup for C rejects if forgotten.
+    await search.forget(rootC);
+    let cSettled = false;
+    const pendingC = search.search(rootC, "gamma", "text").finally(() => {
+      cSettled = true;
+    });
+    // Yield so pendingC resolves realpath and enters the queue before forget revokes its ticket.
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(bResolved).toBe(false);
+    expect(cSettled).toBe(false);
+    await search.forget(rootC);
+
+    blockD.release();
+    await expect(pendingC).rejects.toThrow(/closed or its folder was released/);
+    expect((await pendingD).hits).toHaveLength(1);
+    expect((await pendingB2).hits).toHaveLength(1);
+
+    // Close race: closing while a scan is blocked rejects warm searches immediately and resolves cleanly.
+    await search.forget(rootD);
+    const blockD2 = armBlock(rootD);
+    currentGate = blockD2.gate;
+    const pendingD2 = search.search(rootD, "delta", "text");
+    await blockD2.entered;
+    const closing = search.close();
+    await expect(search.search(rootA, "alpha", "text")).rejects.toThrow(/closed or its folder was released/);
+    blockD2.release();
+    await expect(pendingD2).rejects.toThrow();
+    await closing;
+    expect(search.size).toBe(0);
+  });
 });

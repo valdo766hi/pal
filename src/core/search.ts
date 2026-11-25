@@ -179,7 +179,25 @@ export class ProjectSearch {
     for (const [root, index] of this.#indexes) if (index.used < before) this.#drop(root);
   }
 
+  #readyIndex(root: string): Index | undefined {
+    const existing = this.#indexes.get(root);
+    if (
+      existing === undefined ||
+      existing.finder.isDestroyed ||
+      !existing.scanned ||
+      existing.rescan ||
+      existing.unwatch === undefined ||
+      existing.pending !== undefined
+    )
+      return undefined;
+    existing.used = Date.now();
+    return existing;
+  }
+
   #index(root: string): Promise<Index> {
+    if (this.#stopped) return Promise.reject(new SearchError("search is closed or its folder was released"));
+    const ready = this.#readyIndex(root);
+    if (ready !== undefined) return Promise.resolve(ready);
     const ticket = { root, released: false };
     const task = this.#queue.then(() => this.#openIndex(ticket));
     this.#pending.add(ticket);
