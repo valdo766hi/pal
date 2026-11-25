@@ -1,3 +1,86 @@
+<script module lang="ts">
+  // Vite's preload cache and Chromium's ES module map outlive Workspace remounts (e.g. sign-out → sign-in),
+  // so failed asset URLs are tracked at module/document lifetime across both lazy routes.
+  let failedStylesheets: string[] = [];
+  let failedScripts: string[] = [];
+  let retryCounter = 0;
+
+  function isOwnAsset(href: string, suffix: ".js" | ".css"): URL | undefined {
+    const target = URL.parse(href);
+    if (target === null || target.origin !== location.origin) return undefined;
+    if (!target.pathname.startsWith("/assets/") || !target.pathname.endsWith(suffix)) return undefined;
+    return target;
+  }
+
+  function loadStylesheet(href: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.crossOrigin = "";
+      link.href = href;
+      const done = (event: Event) => {
+        link.removeEventListener("load", done);
+        link.removeEventListener("error", done);
+        if (event.type === "error") {
+          link.remove();
+          reject(new Error(`Unable to preload CSS for ${href}`));
+        } else {
+          resolve();
+        }
+      };
+      link.addEventListener("load", done);
+      link.addEventListener("error", done);
+      document.head.appendChild(link);
+    });
+  }
+
+  async function loadModule<T>(load: () => Promise<T>): Promise<T> {
+    if (failedStylesheets.length > 0) {
+      const pending = [...failedStylesheets];
+      await Promise.all(
+        pending.map(async (href) => {
+          await loadStylesheet(href);
+          failedStylesheets = failedStylesheets.filter((item) => item !== href);
+        }),
+      );
+    }
+    const onLinkError = (event: Event) => {
+      const target = event.target;
+      if (
+        target instanceof HTMLLinkElement &&
+        target.rel === "stylesheet" &&
+        isOwnAsset(target.href, ".css") !== undefined
+      ) {
+        if (!failedStylesheets.includes(target.href)) failedStylesheets.push(target.href);
+        target.remove();
+      }
+    };
+    document.head.addEventListener("error", onLinkError, true);
+    try {
+      return await load();
+    } catch (failure) {
+      // Chromium records failed ES module fetches in its module map per exact URL; on a retry of a previously
+      // failed same-origin built script, append a fresh query parameter without reloading the page.
+      const match = failure instanceof Error ? /https?:\/\/\S+\/assets\/[^\s"']+\.js/.exec(failure.message) : null;
+      const target = match === null ? undefined : isOwnAsset(match[0], ".js");
+      if (target !== undefined) {
+        if (!failedScripts.includes(target.href)) {
+          failedScripts.push(target.href);
+          throw failure;
+        }
+        const retryUrl = new URL(target.href);
+        retryUrl.searchParams.set("retry", String(++retryCounter));
+        const mod = (await import(/* @vite-ignore */ retryUrl.href)) as T;
+        failedScripts = failedScripts.filter((item) => item !== target.href);
+        return mod;
+      }
+      throw failure;
+    } finally {
+      document.head.removeEventListener("error", onLinkError, true);
+    }
+  }
+</script>
+
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, ApiError, type ChatSummary, requestId, type WorkspaceMode } from "../lib/api.ts";
@@ -45,84 +128,9 @@
   let settingsFailed = false;
   let onboardingFailed = false;
 
-  let settingsAttempt = 0;
-  let onboardingAttempt = 0;
-  const settingsFailedCss = new Set<string>();
-  const onboardingFailedCss = new Set<string>();
-
-  function isOwnAsset(href: string, suffix: ".js" | ".css"): URL | undefined {
-    const target = URL.parse(href);
-    if (target === null || target.origin !== location.origin) return undefined;
-    if (!target.pathname.startsWith("/assets/") || !target.pathname.endsWith(suffix)) return undefined;
-    return target;
-  }
-
-  function loadStylesheet(href: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      link.crossOrigin = "";
-      link.href = href;
-      const done = (event: Event) => {
-        link.removeEventListener("load", done);
-        link.removeEventListener("error", done);
-        if (event.type === "error") {
-          link.remove();
-          reject(new Error(`Unable to preload CSS for ${href}`));
-        } else {
-          resolve();
-        }
-      };
-      link.addEventListener("load", done);
-      link.addEventListener("error", done);
-      document.head.appendChild(link);
-    });
-  }
-
-  async function loadModule<T>(load: () => Promise<T>, attempt: number, failedCss: Set<string>): Promise<T> {
-    // Vite 8 records failed CSS preloads with `seen[href] = undefined`, so `href in seen` stays true and skips
-    // re-fetching on retry. Reload any previously failed stylesheets before retrying the route module.
-    if (failedCss.size > 0) {
-      await Promise.all(
-        [...failedCss].map(async (href) => {
-          await loadStylesheet(href);
-          failedCss.delete(href);
-        }),
-      );
-    }
-    const onLinkError = (event: Event) => {
-      const target = event.target;
-      if (
-        target instanceof HTMLLinkElement &&
-        target.rel === "stylesheet" &&
-        isOwnAsset(target.href, ".css") !== undefined
-      ) {
-        failedCss.add(target.href);
-        target.remove();
-      }
-    };
-    document.head.addEventListener("error", onLinkError, true);
-    try {
-      return await load();
-    } catch (failure) {
-      if (attempt === 0) throw failure;
-      // Chromium records failed ES module fetches in its module map per exact URL; retrying with a query
-      // parameter on the same-origin built asset forces a fresh fetch without reloading the page.
-      const match = failure instanceof Error ? /https?:\/\/\S+\/assets\/[^\s"']+\.js/.exec(failure.message) : null;
-      const target = match === null ? undefined : isOwnAsset(match[0], ".js");
-      if (target !== undefined) {
-        target.searchParams.set("retry", String(attempt));
-        return (await import(/* @vite-ignore */ target.href)) as T;
-      }
-      throw failure;
-    } finally {
-      document.head.removeEventListener("error", onLinkError, true);
-    }
-  }
-
   function loadSettings() {
     settingsFailed = false;
-    const promise = loadModule(() => import("./Settings.svelte"), settingsAttempt++, settingsFailedCss);
+    const promise = loadModule(() => import("./Settings.svelte"));
     promise.catch(() => {
       if (settingsLoad === promise) settingsFailed = true;
     });
@@ -130,7 +138,7 @@
   }
   function loadOnboarding() {
     onboardingFailed = false;
-    const promise = loadModule(() => import("./Onboarding.svelte"), onboardingAttempt++, onboardingFailedCss);
+    const promise = loadModule(() => import("./Onboarding.svelte"));
     promise.catch(() => {
       if (onboardingLoad === promise) onboardingFailed = true;
     });

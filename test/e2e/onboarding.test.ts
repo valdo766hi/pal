@@ -399,4 +399,57 @@ describe("isolated provider onboarding", () => {
     expect(styles).toEqual({ navDisplay: "flex", navWidth: "220px", h1FontSize: "15px", hasSheet: true });
     expect(errors).toEqual([]);
   });
+
+  it("reloads failed lazy-route stylesheets after Workspace remounts on sign-out and sign-in", async () => {
+    const { page, errors } = await setup(1440);
+    await page.getByRole("button", { name: "Set up later" }).click();
+    await optionalTools(page);
+    await createProject(page);
+
+    let cssAttempts = 0;
+    await page.route("**/assets/Settings-*.css", async (route) => {
+      cssAttempts++;
+      if (cssAttempts === 1) await route.fulfill({ status: 500, body: "css failed" });
+      else await route.continue();
+    });
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    expect(cssAttempts).toBe(1);
+
+    // Trigger 401 signed_out so App unmounts Workspace without reloading the page.
+    let expireOnce = true;
+    await page.route("**/api/projects", async (route) => {
+      if (expireOnce) {
+        expireOnce = false;
+        await route.fulfill({ status: 401, json: { error: "signed_out", message: "sign in to Pal first" } });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByRole("button", { name: "Sign in" }).waitFor();
+    await page.unroute("**/api/projects");
+
+    // Sign back in without reloading: the fresh Workspace must still reload the failed Settings CSS.
+    await page.getByLabel("Passphrase", { exact: true }).fill("correct horse battery");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+    await page.unroute("**/assets/Settings-*.css");
+
+    expect(cssAttempts).toBe(2);
+    const styles = await page.evaluate(() => {
+      const nav = document.querySelector('nav[aria-label="Settings sections"]');
+      const h1 = nav?.querySelector("h1");
+      const link = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="Settings-"]');
+      return {
+        navDisplay: nav ? getComputedStyle(nav).display : null,
+        navWidth: nav ? getComputedStyle(nav).width : null,
+        h1FontSize: h1 ? getComputedStyle(h1).fontSize : null,
+        hasSheet: link?.sheet != null,
+      };
+    });
+    expect(styles).toEqual({ navDisplay: "flex", navWidth: "220px", h1FontSize: "15px", hasSheet: true });
+    expect(errors).toEqual([]);
+  });
 });
