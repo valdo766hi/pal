@@ -54,15 +54,15 @@
           {#if schedule.state === "active"}
             <button class="b sm" disabled={busy !== undefined} onclick={() => change(schedule, "pause")}>Pause</button>
           {:else if notice !== undefined}
-            <button class="b sm" disabled={busy !== undefined} onclick={() => change(schedule, "resume")}
-              >Resume with current settings</button
-            >
+            <button class="b sm" disabled={busy !== undefined} onclick={() => change(schedule, "resume")}>
+              Resume with current settings
+            </button>
           {:else}
             <span class="fine">Resume it from its chat's Add menu, after reviewing the current cost and effects.</span>
           {/if}
-          <button class="b sm dz" disabled={busy !== undefined} onclick={() => change(schedule, "cancel")}
-            >Cancel</button
-          >
+          <button class="b sm dz" disabled={busy !== undefined} onclick={() => change(schedule, "cancel")}>
+            Cancel
+          </button>
         </div>
       {/if}
       <details>

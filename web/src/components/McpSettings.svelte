@@ -298,8 +298,10 @@
         onclick={() => {
           adding = false;
           draft = emptyDraft();
-        }}><Icon name="x" /></button
+        }}
       >
+        <Icon name="x" />
+      </button>
     </div>
     <fieldset class="form" disabled={busy.save}>
       <div class="fields">
@@ -312,15 +314,19 @@
               role="radio"
               aria-checked={draft.transport === "http"}
               disabled={editing !== undefined || busy.save}
-              onclick={() => transport("http")}>Streamable HTTP</button
+              onclick={() => transport("http")}
             >
+              Streamable HTTP
+            </button>
             <button
               class="segb"
               role="radio"
               aria-checked={draft.transport === "stdio"}
               disabled={editing !== undefined || busy.save}
-              onclick={() => transport("stdio")}>Local stdio</button
+              onclick={() => transport("stdio")}
             >
+              Local stdio
+            </button>
           </div>
         </div>
       </div>
@@ -329,49 +335,50 @@
           Local programs run as the Pal host user, not in a sandbox. They can access files and network beyond their
           working folder. Save first, inspect and approve the exact program, then test and select its tools.
         </p>
-        <label class="fl"
-          >Command<input
+        <label class="fl">
+          Command<input
             class="f mono"
             bind:value={draft.command}
             maxlength="4096"
             placeholder="/nix/store/…-server/bin/server"
             autocomplete="off"
             spellcheck="false"
-          /></label
-        >
+          />
+        </label>
         <p class="sub">
           Use an executable already provided by Nix. Pal never installs a package, evaluates a flake, loads .envrc or
           imports repository MCP configuration automatically.
         </p>
-        <label class="fl"
-          >Working folder on this server<input
+        <label class="fl">
+          Working folder on this server<input
             class="f mono"
             bind:value={draft.cwd}
             maxlength="4096"
             autocomplete="off"
             spellcheck="false"
-          /></label
-        >
+          />
+        </label>
         <p class="sub">
           Choose an existing folder outside Pal's private data and installation. This is separate from device uploads or
           a chat's working folder.
         </p>
         {#each draft.args as arg, index (arg.id)}
           <div class="fields">
-            <label class="fl wide"
-              >Argument {index + 1}<textarea
+            <label class="fl wide">
+              Argument {index + 1}<textarea
                 class="f mono"
                 rows="2"
                 maxlength="4096"
                 bind:value={arg.value}
-                spellcheck="false"></textarea></label
-            >
+                spellcheck="false"></textarea>
+            </label>
             <button
               class="b sm q"
               aria-label={`Remove argument ${index + 1}`}
               onclick={() => (draft.args = draft.args.filter((item) => item.id !== arg.id))}
-              ><Icon name="x" />Remove</button
             >
+              <Icon name="x" />Remove
+            </button>
           </div>
         {/each}
         <div>
@@ -379,24 +386,25 @@
             class="b sm q"
             disabled={draft.args.length >= 32}
             onclick={() => (draft.args = [...draft.args, { id: requestId(), value: "" }])}
-            ><Icon name="plus" />Add argument</button
           >
+            <Icon name="plus" />Add argument
+          </button>
         </div>
         <p class="sub">
           Each row is one exact argument; no shell splitting or expansion. Arguments may name mutable data or code you
           also trust. Do not put keys in arguments.
         </p>
       {:else}
-        <label class="fl wide"
-          >URL<input
+        <label class="fl wide">
+          URL<input
             class="f mono"
             bind:value={draft.url}
             placeholder="https://tools.example.com/mcp"
             maxlength="2048"
             autocomplete="off"
             spellcheck="false"
-          /></label
-        >
+          />
+        </label>
       {/if}
       <div class="fields">
         <label class="fl">
@@ -407,33 +415,27 @@
             {:else}<option value="header">API key header</option><option value="bearer">Bearer token</option>{/if}
           </select>
         </label>
-        {#if draft.auth === "header"}<label class="fl"
-            >Header name<input class="f mono" bind:value={draft.header} autocomplete="off" spellcheck="false" /></label
-          >{/if}
-        {#if draft.auth === "env"}<label class="fl"
-            >Key variable<input
+        {#if draft.auth === "header"}<label class="fl">
+            Header name<input class="f mono" bind:value={draft.header} autocomplete="off" spellcheck="false" />
+          </label>{/if}
+        {#if draft.auth === "env"}<label class="fl">
+            Key variable<input
               class="f mono"
               bind:value={draft.variable}
               maxlength="64"
               autocomplete="off"
               spellcheck="false"
-            /></label
-          >{/if}
-        {#if draft.auth !== "none"}<label class="fl wide"
-            >Key<input
-              class="f mono"
-              type="password"
-              bind:value={draft.key}
-              maxlength="4096"
-              autocomplete="off"
-            /></label
-          >{/if}
+            />
+          </label>{/if}
+        {#if draft.auth !== "none"}<label class="fl wide">
+            Key<input class="f mono" type="password" bind:value={draft.key} maxlength="4096" autocomplete="off" />
+          </label>{/if}
       </div>
       {#if draft.transport === "http"}
-        <label class="flr"
-          ><input type="checkbox" bind:checked={draft.private} />Private endpoint: allow a local or private-network
-          address (and plain HTTP). Only for servers you run.</label
-        >
+        <label class="flr">
+          <input type="checkbox" bind:checked={draft.private} />Private endpoint: allow a local or private-network
+          address (and plain HTTP). Only for servers you run.
+        </label>
       {:else}
         <p class="sub">
           Only the dedicated key variable is injected; the host's environment, model provider credentials and other
@@ -515,8 +517,10 @@
             <button
               class="b sm"
               disabled={busy[server.id] || (server.stdio != null && !server.stdio.approved)}
-              onclick={() => act(server.id, () => api.mcpTest(server.id))}>Retry</button
+              onclick={() => act(server.id, () => api.mcpTest(server.id))}
             >
+              Retry
+            </button>
           </div>
         </div>
       {/if}
@@ -534,17 +538,18 @@
                   class="b sm"
                   disabled={busy[server.id]}
                   onclick={() => act(server.id, () => api.mcpProgram(server.id, server.stdio?.digest ?? "", false))}
-                  >Revoke program approval</button
                 >
-              {:else}<button class="b sm" disabled={busy[server.id]} onclick={() => (programReview = server)}
-                  >Review local program…</button
-                >{/if}
+                  Revoke program approval
+                </button>
+              {:else}<button class="b sm" disabled={busy[server.id]} onclick={() => (programReview = server)}>
+                  Review local program…
+                </button>{/if}
             </div>
           {/if}
           {#if server.preset === null}<div>
-              <button class="b sm q" disabled={busy[server.id] || adding} onclick={() => begin(server)}
-                >Edit connection</button
-              >
+              <button class="b sm q" disabled={busy[server.id] || adding} onclick={() => begin(server)}>
+                Edit connection
+              </button>
             </div>{/if}
           {#if server.auth.kind !== "none"}
             <div class="fields">
@@ -568,12 +573,14 @@
                     const saved = await api.mcpKey(server.id, keys[server.id] ?? "");
                     keys[server.id] = "";
                     return saved;
-                  })}>Save key</button
+                  })}
               >
+                Save key
+              </button>
               {#if server.keyConfigured}
-                <button class="b sm q" onclick={() => act(server.id, () => api.mcpKey(server.id, null))}
-                  >Remove key</button
-                >
+                <button class="b sm q" onclick={() => act(server.id, () => api.mcpKey(server.id, null))}>
+                  Remove key
+                </button>
               {/if}
             </div>
           {/if}
@@ -583,8 +590,10 @@
               disabled={busy[server.id] ||
                 (server.stdio != null &&
                   (!server.stdio.approved || (server.auth.kind === "env" && !server.keyConfigured)))}
-              onclick={() => act(server.id, () => api.mcpTest(server.id))}>Test connection</button
+              onclick={() => act(server.id, () => api.mcpTest(server.id))}
             >
+              Test connection
+            </button>
           </div>
           <p class="sub">
             Testing connects and lists tools. It never calls one. Local tests start the approved program; startup
@@ -616,9 +625,9 @@
               <summary>Previously reviewed catalog and selection</summary>
               <pre class="program mono">{JSON.stringify(previous[server.id], null, 2)}</pre>
             </details>
-            <button class="b sm" disabled={busy[server.id] || server.catalog === null} onclick={() => reviewed(server)}
-              >I reviewed the current catalog</button
-            >
+            <button class="b sm" disabled={busy[server.id] || server.catalog === null} onclick={() => reviewed(server)}>
+              I reviewed the current catalog
+            </button>
           {/if}
           {#if server.catalog === null}
             <p class="sub">Test the connection before approving tools for its current configuration.</p>
@@ -658,16 +667,18 @@
               <button
                 class="b sm p"
                 disabled={busy[server.id] || server.catalog === null || previous[server.id] !== undefined}
-                onclick={() => approveTools(server)}>Approve selected tools</button
+                onclick={() => approveTools(server)}
               >
+                Approve selected tools
+              </button>
             </div>
           {/if}
           {#if server.preset === null}
             <div class="row-buttons divider">
               {#if confirmRemove === server.id}
-                <span class="grow small"
-                  >Remove {server.name}? Its tools stop at once and its stored key is deleted.</span
-                >
+                <span class="grow small">
+                  Remove {server.name}? Its tools stop at once and its stored key is deleted.
+                </span>
                 <button class="b sm" onclick={() => (confirmRemove = undefined)}>Cancel</button>
                 <button class="b sm dz" onclick={() => remove(server.id)}>Remove</button>
               {:else}

@@ -118,11 +118,11 @@
             disabled={busy || (option.disabled && mode !== option.mode)}
             onclick={() => choose(option.mode)}
           >
-            <span class="row"
-              ><Icon name={option.icon} /><span class="grow">{option.title}</span>{#if mode === option.mode}<Icon
+            <span class="row">
+              <Icon name={option.icon} /><span class="grow">{option.title}</span>{#if mode === option.mode}<Icon
                   name="check"
-                />{/if}</span
-            >
+                />{/if}
+            </span>
             <span class="optd">{option.detail}</span>
           </button>
         {/each}

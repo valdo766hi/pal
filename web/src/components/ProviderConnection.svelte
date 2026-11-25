@@ -48,9 +48,9 @@
 
 <div class="fold" role="group" aria-label={custom ? "OpenAI-compatible endpoint" : provider.name}>
   <div class="line">
-    <strong>{provider.name}</strong><span class="pill"
-      >{custom ? "Custom endpoint" : plugin ? "Plugin" : "API key"}</span
-    >
+    <strong>{provider.name}</strong><span class="pill">
+      {custom ? "Custom endpoint" : plugin ? "Plugin" : "API key"}
+    </span>
     {#if provider.enabled}<span class="pill ok">Enabled</span>
     {:else if ready}<span class="pill">Ready · off</span>
     {:else}<span class="pill wa">Not set up</span>{/if}
@@ -79,16 +79,16 @@
   <div class="buttons">
     {#if !keyless}<button class="b" disabled={busy || draft.trim() === ""} onclick={save}>Save key</button>{/if}
     {#if provider.hasKey}
-      <button class="b q" disabled={busy} onclick={() => act(() => api.providerKey(provider.id, null))}
-        >Remove key</button
-      >
+      <button class="b q" disabled={busy} onclick={() => act(() => api.providerKey(provider.id, null))}>
+        Remove key
+      </button>
     {/if}
     {#if provider.checkable && ready}
       <button class="b q" disabled={busy} onclick={verify}>{checkLabel}</button>
     {/if}
-    {#if provider.keys !== null}<a class="b q" href={provider.keys} target="_blank" rel="noopener noreferrer"
-        >Get a key</a
-      >{/if}
+    {#if provider.keys !== null}<a class="b q" href={provider.keys} target="_blank" rel="noopener noreferrer">
+        Get a key
+      </a>{/if}
   </div>
   {#if ready && check === undefined && !plugin}
     <div class="setd">

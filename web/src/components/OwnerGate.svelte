@@ -85,9 +85,9 @@
         />
       {/if}
       {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
-      <button class="b p" type="submit" disabled={busy || passphrase === ""}
-        >{session.owner ? "Sign in" : "Create owner"}</button
-      >
+      <button class="b p" type="submit" disabled={busy || passphrase === ""}>
+        {session.owner ? "Sign in" : "Create owner"}
+      </button>
     </form>
   {/if}
   <p class="foot">{location.host} · self-hosted · beta</p>

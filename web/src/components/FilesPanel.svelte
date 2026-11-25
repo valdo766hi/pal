@@ -241,9 +241,9 @@
       disabled={busy}
       onchange={(event) => selectFolder(event.currentTarget.value)}
     >
-      {#each grants as folder (folder.id)}<option value={folder.id}
-          >{folder.id === "primary" ? "Primary workspace" : folder.root}</option
-        >{/each}
+      {#each grants as folder (folder.id)}<option value={folder.id}>
+          {folder.id === "primary" ? "Primary workspace" : folder.root}
+        </option>{/each}
     </select>
     <ReferenceFolders {project} {workspace} disabled={busy} onChanged={acceptGrants} />
   </div>
@@ -256,22 +256,22 @@
       <input class="f" type="search" aria-label="Search files" placeholder="Search the project" bind:value={query} />
       <div class="seg" role="radiogroup" aria-label="Search mode">
         {#each [["text", "Text"], ["regex", "Regex"], ["files", "Names"]] as const as [value, label] (value)}
-          <button type="button" class="segb" role="radio" aria-checked={mode === value} onclick={() => (mode = value)}
-            >{label}</button
-          >
+          <button type="button" class="segb" role="radio" aria-checked={mode === value} onclick={() => (mode = value)}>
+            {label}
+          </button>
         {/each}
       </div>
-      <button class="b sm" type="submit" disabled={busy || active?.indexed === false || query.trim() === ""}
-        >Search</button
-      >
+      <button class="b sm" type="submit" disabled={busy || active?.indexed === false || query.trim() === ""}>
+        Search
+      </button>
     </form>
     {#if found !== undefined}
       <div class="results-head">
-        <span
-          >{found.hits.length === 0
+        <span>
+          {found.hits.length === 0
             ? "No matches"
-            : `${found.hits.length} ${found.hits.length === 1 ? "match" : "matches"}`}</span
-        >
+            : `${found.hits.length} ${found.hits.length === 1 ? "match" : "matches"}`}
+        </span>
         {#if found.truncated}<span class="warning">More matches exist; narrow the search.</span>{/if}
         {#if found.indexing}<span class="warning">Index still building; results may be incomplete.</span>{/if}
         <button class="b sm q" onclick={() => (found = undefined)}>Back to folders</button>
@@ -283,12 +283,12 @@
               <span class="mono hitpath">{hit.path}{hit.line === undefined ? "" : `:${hit.line}`}</span>
               {#if hit.text !== undefined}
                 {@const ranges = hit.ranges ?? []}
-                <span class="mono hittext"
-                  >{#each ranges as [start, end], at (at)}{hit.text.slice(
+                <span class="mono hittext">
+                  {#each ranges as [start, end], at (at)}{hit.text.slice(
                       at === 0 ? 0 : (ranges[at - 1]?.[1] ?? 0),
                       start,
-                    )}<mark>{hit.text.slice(start, end)}</mark>{/each}{hit.text.slice(ranges.at(-1)?.[1] ?? 0)}</span
-                >
+                    )}<mark>{hit.text.slice(start, end)}</mark>{/each}{hit.text.slice(ranges.at(-1)?.[1] ?? 0)}
+                </span>
               {/if}
             </button>
           </li>
@@ -306,32 +306,34 @@
         aria-label="Back to files"
         data-tip="Back to files"
         bind:this={back}
-        onclick={close}><Icon name="chevL" /></button
+        onclick={close}
       >
-      <span class="mono path" title={preview.path}
-        ><span class="dim">{preview.path.slice(0, slash + 1)}</span>{preview.path.slice(slash + 1)}</span
-      >
+        <Icon name="chevL" />
+      </button>
+      <span class="mono path" title={preview.path}>
+        <span class="dim">{preview.path.slice(0, slash + 1)}</span>{preview.path.slice(slash + 1)}
+      </span>
       <span class="pill"><Icon name="lock" />Read-only</span>
     </div>
     <div class="actions">
-      <button class="b sm" onclick={() => preview && onAttach(`${source}: \`${preview.path}\``)}
-        ><Icon name="clip" />Attach file</button
-      >
+      <button class="b sm" onclick={() => preview && onAttach(`${source}: \`${preview.path}\``)}>
+        <Icon name="clip" />Attach file
+      </button>
       {#if preview.kind === "text"}
-        <button class="b sm" onclick={attachLines} disabled={selection === undefined}
-          >{selection === undefined
+        <button class="b sm" onclick={attachLines} disabled={selection === undefined}>
+          {selection === undefined
             ? "Attach lines"
             : selection.from === selection.to
               ? `Attach line ${selection.from}`
-              : `Attach lines ${selection.from}–${selection.to}`}</button
-        >
-        {#if selection !== undefined}<button class="b sm q" onclick={() => (selection = undefined)}
-            >Clear selection</button
-          >{/if}
+              : `Attach lines ${selection.from}–${selection.to}`}
+        </button>
+        {#if selection !== undefined}<button class="b sm q" onclick={() => (selection = undefined)}>
+            Clear selection
+          </button>{/if}
       {/if}
-      {#if selected === "primary"}<button class="b sm q" onclick={() => preview && onViewDiff(preview.path)}
-          >View diff</button
-        >{/if}
+      {#if selected === "primary"}<button class="b sm q" onclick={() => preview && onViewDiff(preview.path)}>
+          View diff
+        </button>{/if}
     </div>
     {#if preview.kind === "text"}
       <p class="hint">Select lines: choose a line number, then another to extend the range.</p>
@@ -352,8 +354,10 @@
                 class="number"
                 aria-pressed={chosen}
                 aria-label={`Select line ${number}`}
-                onclick={() => pick(number)}>{number}</button
-              ><span class="text">{line}</span>
+                onclick={() => pick(number)}
+              >
+                {number}
+              </button><span class="text">{line}</span>
             </div>
           {/each}
         </div>

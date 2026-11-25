@@ -139,9 +139,9 @@
 <div class="context">
   <div class="toolbar">
     <span class="mono grow">{workspace?.root ?? project.root}</span>
-    <button class="b sm q" onclick={refresh} disabled={busy || inspecting}
-      ><Icon name="refresh" />Refresh context</button
-    >
+    <button class="b sm q" onclick={refresh} disabled={busy || inspecting}>
+      <Icon name="refresh" />Refresh context
+    </button>
   </div>
   {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
   {#if info === undefined}<p class="sub" role="status">Loading context…</p>
@@ -158,9 +158,9 @@
       </details>
       <div class="row">
         <strong class="sub grow">Pinned for this chat · revision {info.pinned.revision}</strong>
-        <span class="sub"
-          >{info.pinned.estimatedTokens.toLocaleString()} estimated tokens · {info.pinned.bytes} bytes</span
-        >
+        <span class="sub">
+          {info.pinned.estimatedTokens.toLocaleString()} estimated tokens · {info.pinned.bytes} bytes
+        </span>
       </div>
       {#if info.pinned.text !== ""}<pre class="mono" aria-label="Saved pinned instructions">{info.pinned
             .text}</pre>{/if}
@@ -180,13 +180,13 @@
           }}
         >
           <fieldset disabled={busy}>
-            <label class="fl"
-              >Instructions pinned for this chat<textarea class="f" rows="5" maxlength="6144" bind:value={pinDraft.text}
-              ></textarea></label
-            >
-            <span class="sub"
-              >Draft: {pinBytes.toLocaleString()} / {info.budgets.pinnedBytes.toLocaleString()} UTF-8 bytes</span
-            >
+            <label class="fl">
+              Instructions pinned for this chat<textarea class="f" rows="5" maxlength="6144" bind:value={pinDraft.text}
+              ></textarea>
+            </label>
+            <span class="sub">
+              Draft: {pinBytes.toLocaleString()} / {info.budgets.pinnedBytes.toLocaleString()} UTF-8 bytes
+            </span>
             {#if pinStale}<p class="callout wa">
                 Your draft is retained. Review the current saved instructions above before choosing to replace them.
               </p>
@@ -198,10 +198,12 @@
                 onclick={() => {
                   pinDraft = undefined;
                   pinStale = false;
-                }}>Cancel instruction edit</button
-              ><button class="b sm p" type="submit" disabled={pinStale || pinBytes > info.budgets.pinnedBytes}
-                >Save pinned instructions</button
+                }}
               >
+                Cancel instruction edit
+              </button><button class="b sm p" type="submit" disabled={pinStale || pinBytes > info.budgets.pinnedBytes}>
+                Save pinned instructions
+              </button>
             </div>
           </fieldset>
         </form>{/if}
@@ -251,9 +253,9 @@
     <section aria-label="Last prepared context">
       <div class="row">
         <h3 class="h3 grow">Last prepared context</h3>
-        <button class="b sm q" onclick={() => inspectPrompt()} disabled={busy || inspecting || info.prepared === null}
-          >{inspecting ? "Inspecting…" : "Inspect prepared prompt"}</button
-        >
+        <button class="b sm q" onclick={() => inspectPrompt()} disabled={busy || inspecting || info.prepared === null}>
+          {inspecting ? "Inspecting…" : "Inspect prepared prompt"}
+        </button>
       </div>
       <p class="sub">
         Native Pi context at its recorded preparation boundary, before provider serialization. Preparation is not proof
@@ -270,15 +272,17 @@
       {#if prompt !== undefined}
         <div class="lookup">
           <strong>{prompt.request.model.modelId} · {prompt.request.thinkingLevel}</strong><time
-            datetime={new Date(prompt.request.at).toISOString()}>{new Date(prompt.request.at).toLocaleString()}</time
-          ><span class="sub"
-            >{prompt.request.estimatedTokens.toLocaleString()} estimated context tokens · {prompt.request.messages} messages
-            · cutoff #{prompt.request.cutoff}</span
-          ><span class="sub"
-            >Model context window: {prompt.request.contextWindow?.toLocaleString() ?? "Unknown"} tokens. Pi default compaction
-            reserve: {prompt.request.reserveTokens.toLocaleString()} tokens for output/tool space. Estimates may differ from
-            actual usage.</span
+            datetime={new Date(prompt.request.at).toISOString()}
           >
+            {new Date(prompt.request.at).toLocaleString()}
+          </time><span class="sub">
+            {prompt.request.estimatedTokens.toLocaleString()} estimated context tokens · {prompt.request.messages} messages
+            · cutoff #{prompt.request.cutoff}
+          </span><span class="sub">
+            Model context window: {prompt.request.contextWindow?.toLocaleString() ?? "Unknown"} tokens. Pi default compaction
+            reserve: {prompt.request.reserveTokens.toLocaleString()} tokens for output/tool space. Estimates may differ from
+            actual usage.
+          </span>
         </div>
         <h4>Effective named sections</h4>
         {#each prompt.sections as section (section.name)}<details>
@@ -296,10 +300,11 @@
           not altered.
         </p>
         <div class="row">
-          <button class="b sm" onclick={previousPrompt} disabled={inspecting || pages.length === 0}
-            >Previous messages</button
-          ><button class="b sm" onclick={nextPrompt} disabled={inspecting || prompt.next === null}>Next messages</button
-          >
+          <button class="b sm" onclick={previousPrompt} disabled={inspecting || pages.length === 0}>
+            Previous messages
+          </button><button class="b sm" onclick={nextPrompt} disabled={inspecting || prompt.next === null}>
+            Next messages
+          </button>
         </div>
       {/if}
     </section>
@@ -311,8 +316,9 @@
       </p>
       {#if info.attachments.length === 0}<p class="sub">No uploaded attachment in these recent entries.</p>{/if}
       {#each info.attachments as item (item.id)}<div class="folder">
-          <strong>{item.name}</strong><span class="mono sub">{item.mediaType} · {item.size.toLocaleString()} bytes</span
-          >
+          <strong>{item.name}</strong><span class="mono sub">
+            {item.mediaType} · {item.size.toLocaleString()} bytes
+          </span>
         </div>{/each}
       <p class="sub">
         Retention: original history, uploads and instruction revisions are retained; compaction changes model context,
@@ -327,11 +333,11 @@
         search and retained-memory search are separate.
       </p>
       {#each folders as folder (folder.id)}<div class="folder">
-          <span class="mono">{folder.root}</span><span class="sub"
-            >{folder.access === "write" ? "Writable" : "Read-only"} · {folder.indexed
+          <span class="mono">{folder.root}</span><span class="sub">
+            {folder.access === "write" ? "Writable" : "Read-only"} · {folder.indexed
               ? "File search on demand"
-              : "File indexing off"}</span
-          >
+              : "File indexing off"}
+          </span>
         </div>{/each}
       {#if info.moreHistory}<p class="sub">Older chat history exists beyond this bounded inspection.</p>{/if}
     </section>

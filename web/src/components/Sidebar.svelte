@@ -65,13 +65,13 @@
     <PalMark size={22} cutout="var(--side)" />
     <span class="wordmark">pal</span>
     {#if onClose !== undefined}
-      <button class="b i q tip end" aria-label="Close projects" data-tip="Close" onclick={onClose}
-        ><Icon name="x" /></button
-      >
+      <button class="b i q tip end" aria-label="Close projects" data-tip="Close" onclick={onClose}>
+        <Icon name="x" />
+      </button>
     {:else if onCollapse !== undefined}
-      <button class="b i q tip" aria-label="Collapse sidebar" data-tip="Collapse sidebar" onclick={onCollapse}
-        ><Icon name="sidebar" /></button
-      >
+      <button class="b i q tip" aria-label="Collapse sidebar" data-tip="Collapse sidebar" onclick={onCollapse}>
+        <Icon name="sidebar" />
+      </button>
     {/if}
   </div>
   <button class="item" onclick={() => target && onNewChat(target.id)} disabled={target === undefined}>
@@ -81,9 +81,9 @@
     <nav aria-label="Projects">
       <div class="navhead">
         <span class="lbl">Projects</span>
-        <button class="b i q sm tip" aria-label="New project" data-tip="New project" onclick={onCreateProject}
-          ><Icon name="plus" size={14} /></button
-        >
+        <button class="b i q sm tip" aria-label="New project" data-tip="New project" onclick={onCreateProject}>
+          <Icon name="plus" size={14} />
+        </button>
       </div>
       {#if app.projects.length === 0}<p class="none">No projects yet.</p>{/if}
       {#each app.projects as project (project.id)}
@@ -105,15 +105,18 @@
               aria-label={`New chat in ${project.name}`}
               data-tip="New chat"
               onclick={() => onNewChat(project.id)}
-              disabled={project.state !== "ready"}><Icon name="plus" size={14} /></button
+              disabled={project.state !== "ready"}
             >
+              <Icon name="plus" size={14} />
+            </button>
             <button
               class="b i q sm tip end"
               aria-label={`Remove project ${project.name}`}
               data-tip="Remove project"
               onclick={() => (removing = { kind: "project", id: project.id, name: project.name })}
-              ><Icon name="trash" size={14} /></button
             >
+              <Icon name="trash" size={14} />
+            </button>
           </span>
         </div>
         {#if open}
@@ -132,15 +135,18 @@
                     class="b i q sm tip"
                     aria-label={`Rename chat ${chat.title ?? "New chat"}`}
                     data-tip="Rename"
-                    onclick={() => onRenameChat(chat)}><Icon name="edit" size={14} /></button
+                    onclick={() => onRenameChat(chat)}
                   >
+                    <Icon name="edit" size={14} />
+                  </button>
                   <button
                     class="b i q sm tip end"
                     aria-label={`Delete chat ${chat.title ?? "New chat"}`}
                     data-tip="Delete"
                     onclick={() => (removing = { kind: "chat", id: chat.id, name: chat.title ?? "New chat" })}
-                    ><Icon name="trash" size={14} /></button
                   >
+                    <Icon name="trash" size={14} />
+                  </button>
                 </span>
               </li>
             {/each}
@@ -174,8 +180,10 @@
       aria-label="Settings"
       data-tip="Settings"
       aria-current={app.route.view === "settings"}
-      onclick={() => navigate({ view: "settings", tab: "general" })}><Icon name="settings" /></button
+      onclick={() => navigate({ view: "settings", tab: "general" })}
     >
+      <Icon name="settings" />
+    </button>
   </div>
 </aside>
 

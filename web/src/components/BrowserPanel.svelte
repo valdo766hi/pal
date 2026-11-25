@@ -271,9 +271,9 @@
       <p>
         A Chromium browser for this project, with its own profile. Site logins stay for next time until you clear them.
       </p>
-      <button class="b p" disabled={status === "checking" || busy} onclick={start}
-        ><Icon name="globe" />Open browser</button
-      >
+      <button class="b p" disabled={status === "checking" || busy} onclick={start}>
+        <Icon name="globe" />Open browser
+      </button>
       {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
     </div>
   {:else}
@@ -283,22 +283,28 @@
         aria-label="Back"
         data-tip="Back"
         disabled={!view?.control}
-        onclick={() => send({ type: "back" })}><Icon name="chevL" /></button
+        onclick={() => send({ type: "back" })}
       >
+        <Icon name="chevL" />
+      </button>
       <button
         class="b i q tip"
         aria-label="Forward"
         data-tip="Forward"
         disabled={!view?.control}
-        onclick={() => send({ type: "forward" })}><Icon name="chevR" /></button
+        onclick={() => send({ type: "forward" })}
       >
+        <Icon name="chevR" />
+      </button>
       <button
         class="b i q tip"
         aria-label="Reload"
         data-tip="Reload"
         disabled={!view?.control}
-        onclick={() => send({ type: "reload" })}><Icon name="refresh" /></button
+        onclick={() => send({ type: "reload" })}
       >
+        <Icon name="refresh" />
+      </button>
       <label for="browser-address" class="sr">Address</label>
       <input
         id="browser-address"
@@ -321,14 +327,18 @@
             role="tab"
             aria-selected={tab.active}
             disabled={!view?.control}
-            onclick={() => send({ type: "selectTab", id: tab.id })}>{titles[tab.id] || tab.url || "New tab"}</button
+            onclick={() => send({ type: "selectTab", id: tab.id })}
           >
+            {titles[tab.id] || tab.url || "New tab"}
+          </button>
           <button
             class="x"
             aria-label={`Close tab ${titles[tab.id] || tab.url || "New tab"}`}
             disabled={!view?.control}
-            onclick={() => send({ type: "closeTab", id: tab.id })}><Icon name="x" size={12} /></button
+            onclick={() => send({ type: "closeTab", id: tab.id })}
           >
+            <Icon name="x" size={12} />
+          </button>
         </span>
       {/each}
       <button
@@ -336,21 +346,19 @@
         aria-label="New tab"
         data-tip="New tab"
         disabled={!view?.control}
-        onclick={() => send({ type: "newTab" })}><Icon name="plus" /></button
+        onclick={() => send({ type: "newTab" })}
       >
+        <Icon name="plus" />
+      </button>
     </div>
     <div class="status">
       {#if view?.mode === "private-login"}<span class="pill wa">Private login · only you</span>{/if}
       {#if view?.control}<span class="pill ok">You control this browser</span>
-      {:else}<span class="pill"
-          >{view?.mode === "agent"
-            ? "Pal controls this browser"
-            : view?.mode === "paused"
-              ? "Paused"
-              : "View only"}</span
-        ><button class="b sm" onclick={() => send({ type: "take" })}>Take control</button>{/if}
-      <label class="size"
-        ><span class="sr">Page size</span>
+      {:else}<span class="pill">
+          {view?.mode === "agent" ? "Pal controls this browser" : view?.mode === "paused" ? "Paused" : "View only"}
+        </span><button class="b sm" onclick={() => send({ type: "take" })}>Take control</button>{/if}
+      <label class="size">
+        <span class="sr">Page size</span>
         <select
           class="f"
           disabled={!view?.control}
@@ -360,26 +368,34 @@
             if (size !== undefined) send({ type: "viewport", width: size.width, height: size.height });
           }}
         >
-          {#each sizes as size (size.label)}<option value={size.label}>{size.label} {size.width}×{size.height}</option
-            >{/each}
-        </select></label
-      >
+          {#each sizes as size (size.label)}<option value={size.label}>
+              {size.label}
+              {size.width}×{size.height}
+            </option>{/each}
+        </select>
+      </label>
     </div>
     <div class="row">
-      <button class="b sm q" disabled={view === undefined} onclick={() => send({ type: "mode", mode: "paused" })}
-        >Pause</button
+      <button class="b sm q" disabled={view === undefined} onclick={() => send({ type: "mode", mode: "paused" })}>
+        Pause
+      </button>
+      <button
+        class="b sm q"
+        disabled={view === undefined}
+        onclick={() => send({ type: "mode", mode: "private-login" })}
       >
-      <button class="b sm q" disabled={view === undefined} onclick={() => send({ type: "mode", mode: "private-login" })}
-        >Private login</button
-      >
+        Private login
+      </button>
       <button
         class="b sm"
         disabled={!view?.control || active === undefined || !active.url.startsWith("http")}
         onclick={() => {
           if (view !== undefined && active !== undefined)
             handoff = { epoch: view.epoch, url: active.url, chat: chatId };
-        }}>Hand to Pal…</button
+        }}
       >
+        Hand to Pal…
+      </button>
     </div>
     {#if view?.busy}<p class="fine" role="status">
         Finishing a browser action. Inspect the page before continuing.
@@ -401,11 +417,13 @@
           <button
             class="b sm p"
             disabled={!view.control}
-            onclick={() => send({ type: "dialog", accept: true, text: answer })}>OK</button
+            onclick={() => send({ type: "dialog", accept: true, text: answer })}
           >
-          <button class="b sm" disabled={!view.control} onclick={() => send({ type: "dialog", accept: false })}
-            >Cancel</button
-          >
+            OK
+          </button>
+          <button class="b sm" disabled={!view.control} onclick={() => send({ type: "dialog", accept: false })}>
+            Cancel
+          </button>
         </div>
       </div>
     {/if}
@@ -452,12 +470,16 @@
           onclick={() => {
             send({ type: "text", text: typing });
             typing = "";
-          }}>Type</button
+          }}
         >
+          Type
+        </button>
         {#each ["Enter", "Backspace", "Tab"] as name (name)}<button
             class="b sm q"
-            onclick={() => send({ type: "key", key: name })}>{name}</button
-          >{/each}
+            onclick={() => send({ type: "key", key: name })}
+          >
+            {name}
+          </button>{/each}
       </div>
     {/if}
     <div class="row">

@@ -143,9 +143,9 @@
             <span class="what">
               <span class="line">
                 <strong>{entry.name}</strong><span class="method">{entry.method}</span>
-                {#if entry.status !== undefined}<span class="status" class:ok={entry.status !== "Ready · off"}
-                    >{entry.status}</span
-                  >{/if}
+                {#if entry.status !== undefined}<span class="status" class:ok={entry.status !== "Ready · off"}>
+                    {entry.status}
+                  </span>{/if}
               </span>
               <span class="billing">{entry.billing}</span>
             </span>
@@ -198,9 +198,9 @@
       <DefaultModel provider={chosen} />
       <div class="nav">
         <button class="b q" onclick={() => go("connect")}><Icon name="chevL" />Back</button>
-        <button class="b p" disabled={!modelChosen} onclick={() => go(reviewed ? "project" : "internet")}
-          >Continue</button
-        >
+        <button class="b p" disabled={!modelChosen} onclick={() => go(reviewed ? "project" : "internet")}>
+          Continue
+        </button>
       </div>
     {:else if step === "internet"}
       <McpSettings

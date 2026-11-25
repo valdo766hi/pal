@@ -106,30 +106,30 @@
         }}
       >
         <fieldset disabled={saving}>
-          <label class="fl"
-            >Global instructions file on the host
+          <label class="fl">
+            Global instructions file on the host
             <input class="f mono" maxlength="4096" bind:value={globalFile} />
           </label>
           <p class="sub">
             Leave empty to disable global instructions for this project. ~/.agents/AGENTS.md is the default; ~/AGENTS.md
             is used only when explicitly configured. There is no fallback to a different file.
           </p>
-          <label class="sub"
-            ><input type="checkbox" bind:checked={draft.project} /> Load project and nested AGENTS.md files</label
-          >
+          <label class="sub">
+            <input type="checkbox" bind:checked={draft.project} /> Load project and nested AGENTS.md files
+          </label>
           {#each info.current.sources as source (source.path)}
-            <label class="sub"
-              ><input
+            <label class="sub">
+              <input
                 type="checkbox"
                 checked={draft.disabled.includes(source.path)}
                 onchange={(event) => disable(source.path, event.currentTarget.checked)}
               />
-              Disable {source.path}</label
-            >
+              Disable {source.path}
+            </label>
           {/each}
           {#if draft.disabled.some((path) => !info?.current.sources.some((source) => source.path === path))}
-            <label class="fl"
-              >Disabled source paths (one absolute path per line)
+            <label class="fl">
+              Disabled source paths (one absolute path per line)
               <textarea
                 class="f mono"
                 rows="3"
@@ -145,8 +145,10 @@
               type="button"
               onclick={() => {
                 draft = undefined;
-              }}>Cancel source edit</button
+              }}
             >
+              Cancel source edit
+            </button>
             <button class="b sm q" type="button" onclick={edit}>Reload current source settings</button>
             <button class="b sm p" type="submit">Save instruction sources</button>
           </div>

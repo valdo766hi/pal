@@ -72,9 +72,9 @@
 <div class="settings" class:narrow>
   <nav aria-label="Settings sections">
     <div class="title">
-      <button class="b i q tip start" aria-label="Back to chat" data-tip="Back to chat" onclick={() => history.back()}
-        ><Icon name="chevL" /></button
-      >
+      <button class="b i q tip start" aria-label="Back to chat" data-tip="Back to chat" onclick={() => history.back()}>
+        <Icon name="chevL" />
+      </button>
       <h1>Settings</h1>
     </div>
     {#each tabs as item (item.id)}
@@ -118,8 +118,10 @@
                   data-theme-option={id}
                   aria-checked={app.theme === id}
                   tabindex={app.theme === id ? 0 : -1}
-                  onclick={() => chooseTheme(id)}>{label}</button
+                  onclick={() => chooseTheme(id)}
                 >
+                  {label}
+                </button>
               {/each}
             </div>
           </div>
@@ -138,9 +140,9 @@
                 contents.
               </div>
             </div>
-            <button class="b" disabled={diagnostics === "copying"} onclick={copyDiagnostics}
-              >{diagnostics === "copied" ? "Copied" : "Copy diagnostics"}</button
-            >
+            <button class="b" disabled={diagnostics === "copying"} onclick={copyDiagnostics}>
+              {diagnostics === "copied" ? "Copied" : "Copy diagnostics"}
+            </button>
           </div>
           {#if diagnosticsError !== undefined}
             <div class="callout er" role="alert">Couldn't copy diagnostics: {diagnosticsError}</div>

@@ -77,17 +77,19 @@
 </script>
 
 {#if row}
-  <button class="b t" aria-label="Project internet tools" disabled={busy !== undefined && !open} onclick={show}
-    >{names || "None enabled"}<Icon name="chevR" size={14} /></button
-  >
+  <button class="b t" aria-label="Project internet tools" disabled={busy !== undefined && !open} onclick={show}>
+    {names || "None enabled"}<Icon name="chevR" size={14} />
+  </button>
 {:else}
   <button
     class="b i q tip end"
     aria-label="Project internet tools"
     data-tip={names ? `Internet tools · ${names}` : "Internet tools · none enabled"}
     disabled={busy !== undefined && !open}
-    onclick={show}><Icon name="plug" /></button
+    onclick={show}
   >
+    <Icon name="plug" />
+  </button>
 {/if}
 
 {#if open}
@@ -109,8 +111,10 @@
         aria-label="Close project internet tools"
         data-tip="Close"
         disabled={busy !== undefined}
-        onclick={() => dialog?.close()}><Icon name="x" /></button
+        onclick={() => dialog?.close()}
       >
+        <Icon name="x" />
+      </button>
     </div>
     <p class="sub">
       Inherit owner defaults or select fewer approved tools. A project cannot enable a globally disabled connection or
@@ -121,17 +125,19 @@
       actions before retrying.
     </p>
     <div class="buttons">
-      <button class="b sm" disabled={busy !== undefined} onclick={refresh}
-        ><Icon name="refresh" />Refresh permissions</button
-      >
+      <button class="b sm" disabled={busy !== undefined} onclick={refresh}>
+        <Icon name="refresh" />Refresh permissions
+      </button>
       <button
         class="b sm q"
         disabled={busy !== undefined}
         onclick={() => {
           dialog?.close();
           navigate({ view: "settings", tab: "mcp" });
-        }}>Manage connections</button
+        }}
       >
+        Manage connections
+      </button>
     </div>
     <p class="small">
       This is a snapshot. Refresh discards unsaved selections; the host checks permissions again for every call.
@@ -146,8 +152,8 @@
             <span class="pill">{server.enabled ? "Owner enabled" : "Owner disabled"}</span>
           </div>
           <p class="endpoint mono">{server.url}</p>
-          <label class="fl"
-            >Permissions for {server.name}
+          <label class="fl">
+            Permissions for {server.name}
             <select class="f" bind:value={modes[server.id]} disabled={busy !== undefined}>
               <option value="inherit">Inherit owner defaults</option>
               <option value="subset">Select tools for this project</option>
@@ -169,11 +175,13 @@
                 disabled={busy !== undefined || mode === "inherit" || ((!tool.approved || tool.changed) && !selected)}
                 onchange={(event) => select(server.id, tool.name, event.currentTarget.checked)}
               />
-              <span
-                ><strong class="mono">{tool.name}</strong><span class="description">{tool.description}</span
-                >{#if !tool.approved || tool.changed}<span class="warning">Needs owner approval</span
-                  >{:else if tool.stale}<span class="warning">Project review required</span>{/if}</span
-              >
+              <span>
+                <strong class="mono">{tool.name}</strong><span class="description">
+                  {tool.description}
+                </span>{#if !tool.approved || tool.changed}<span class="warning">
+                    Needs owner approval
+                  </span>{:else if tool.stale}<span class="warning">Project review required</span>{/if}
+              </span>
             </label>
           {/each}
           {#if mode === "subset"}<p class="small">
@@ -185,10 +193,11 @@
               aria-label={`Save ${server.name} project permissions`}
               disabled={busy !== undefined}
               onclick={() => save(server)}
-              >{server.authorityStale || server.tools.some((tool) => tool.stale)
-                ? "Review and save permissions"
-                : "Save permissions"}</button
             >
+              {server.authorityStale || server.tools.some((tool) => tool.stale)
+                ? "Review and save permissions"
+                : "Save permissions"}
+            </button>
           </div>
         </section>
       {/each}

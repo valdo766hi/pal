@@ -60,8 +60,9 @@
           aria-label={`${workspace.pending ? "Retry deleting" : "Delete workspace"} ${workspace.name}`}
           disabled={loading || workspace.identity === null}
           onclick={() => (removing = { ...workspace })}
-          >{workspace.pending ? "Retry deletion…" : "Delete workspace…"}</button
         >
+          {workspace.pending ? "Retry deletion…" : "Delete workspace…"}
+        </button>
       </div>
     {/each}
     {#if truncated}<p class="sub">

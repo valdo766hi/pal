@@ -173,8 +173,8 @@
           {#each info.current.catalog as item (item.id)}
             {#if item.name && item.revision}
               {@const checked = selection.skills.some((choice) => choice.id === item.id)}
-              <label class="sub"
-                ><input
+              <label class="sub">
+                <input
                   type="checkbox"
                   aria-label={`Select ${item.name} from ${item.scope}`}
                   {checked}
@@ -183,15 +183,15 @@
                     if (item.revision) choose(item.id, item.revision, event.currentTarget.checked);
                   }}
                 />
-                {item.name} · {item.scope} · {item.state}</label
-              >
+                {item.name} · {item.scope} · {item.state}
+              </label>
             {/if}
           {/each}
           {#each selection.skills.filter((choice) => !info?.current.catalog.some((item) => item.id === choice.id && item.name && item.revision)) as item (item.id)}
-            <label class="sub"
-              ><input type="checkbox" checked onchange={() => choose(item.id, item.revision, false)} /> Remove
-              unavailable selection {item.id}</label
-            >
+            <label class="sub">
+              <input type="checkbox" checked onchange={() => choose(item.id, item.revision, false)} /> Remove
+              unavailable selection {item.id}
+            </label>
           {/each}
           <div class="row end">
             <button class="b sm q" type="button" onclick={() => (selection = undefined)}>Cancel skill selection</button>
@@ -219,39 +219,44 @@
           {#each ["global", "project"] as kind (kind)}
             {@const scope = kind as "global" | "project"}
             {#each settings[scope] as root, index (root)}
-              <label class="fl"
-                >{scope === "global" ? "Global skill root on the host" : "Project skill root relative to workspace"}
+              <label class="fl">
+                {scope === "global" ? "Global skill root on the host" : "Project skill root relative to workspace"}
                 {index + 1}
                 <input class="f mono" required maxlength="1024" bind:value={root.path} />
               </label>
               <div class="row">
-                <label class="sub"
-                  ><input type="checkbox" bind:checked={root.enabled} /> Enable {scope} root {index + 1}</label
-                >
+                <label class="sub">
+                  <input type="checkbox" bind:checked={root.enabled} /> Enable {scope} root {index + 1}
+                </label>
                 <button
                   class="b sm q"
                   type="button"
                   onclick={() => {
                     if (settings) settings[scope] = settings[scope].filter((item) => item !== root);
-                  }}>Remove {scope} root {index + 1}</button
+                  }}
                 >
+                  Remove {scope} root {index + 1}
+                </button>
               </div>
             {/each}
             <button
               class="b sm q"
               type="button"
               disabled={settings[scope].length >= info.limits.roots}
-              onclick={() => settings?.[scope].push({ path: "", enabled: true })}>Add {scope} skill root</button
+              onclick={() => settings?.[scope].push({ path: "", enabled: true })}
             >
+              Add {scope} skill root
+            </button>
           {/each}
-          <label class="fl"
-            >Disabled skill names for this project
+          <label class="fl">
+            Disabled skill names for this project
             <textarea class="f" rows="3" maxlength="10240" bind:value={disabled}></textarea>
           </label>
           <p class="sub">One name per line. A disabled global skill stays available to other projects.</p>
           <div class="row end">
-            <button class="b sm q" type="button" onclick={() => (settings = undefined)}>Cancel skill source edit</button
-            >
+            <button class="b sm q" type="button" onclick={() => (settings = undefined)}>
+              Cancel skill source edit
+            </button>
             <button class="b sm q" type="button" onclick={editSettings}>Reload current skill settings</button>
             <button class="b sm p" type="submit">Save skill sources</button>
           </div>

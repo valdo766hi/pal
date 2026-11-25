@@ -84,9 +84,9 @@
 <section aria-label="Controlled releases">
   <div class="heading">
     <h3 class="h3">Controlled releases</h3>
-    <button class="b sm" disabled={loading || busy} onclick={load}
-      >{loading ? "Refreshing…" : "Refresh releases"}</button
-    >
+    <button class="b sm" disabled={loading || busy} onclick={load}>
+      {loading ? "Refreshing…" : "Refresh releases"}
+    </button>
   </div>
   <p class="sub">
     Review tested contributions, approve their exact digest, then ask the host to restart. No automatic self-deployment.
@@ -110,8 +110,10 @@
         disabled={locked}
         onclick={() => {
           if (view?.available && view.previous) confirmation = { digest: view.previous.digest, rollback: true };
-        }}>Roll back previous release…</button
+        }}
       >
+        Roll back previous release…
+      </button>
     {/if}
     <details>
       <summary>Check a candidate on the Pal host</summary>
@@ -136,9 +138,9 @@
           ).toLocaleString()}
         </div>
         <div class="fine hash mono">{candidate.candidate}</div>
-        <button class="b sm" disabled={locked} onclick={() => review(candidate.digest)}
-          >Review candidate {candidate.digest.slice(0, 12)}</button
-        >
+        <button class="b sm" disabled={locked} onclick={() => review(candidate.digest)}>
+          Review candidate {candidate.digest.slice(0, 12)}
+        </button>
       </div>
     {:else}<p class="sub">
         No checked candidates under this evaluator. Check a host worktree first, then refresh.
@@ -167,24 +169,26 @@
         {#if selected.approved}
           <p class="fine">Approval recorded for this digest; source and fixed gates are revalidated before restart.</p>
         {:else}
-          <label class="consent"
-            ><input
+          <label class="consent">
+            <input
               type="checkbox"
               bind:checked={trust}
               disabled={locked || reviews.length !== selected.changes.length || reviews.length === 0}
-            /> I reviewed all changes, including any truncated full source, and trust this exact digest as application code.</label
-          >
-          <button class="b" disabled={locked || !trust || reviews.length === 0} onclick={approve}
-            >Approve exact digest</button
-          >
+            /> I reviewed all changes, including any truncated full source, and trust this exact digest as application code.
+          </label>
+          <button class="b" disabled={locked || !trust || reviews.length === 0} onclick={approve}>
+            Approve exact digest
+          </button>
         {/if}
         <button
           class="b p"
           disabled={locked || !selected.approved || selected.digest === view.current.digest}
           onclick={() => {
             if (selected) confirmation = { digest: selected.digest, rollback: false };
-          }}>Activate approved release…</button
+          }}
         >
+          Activate approved release…
+        </button>
       </section>
     {/if}
   {:else if view}<div class="callout">
