@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { link, mkdir, mkdtemp, readFile, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -299,6 +299,48 @@ it("validates native CRLF and long-line previews at their byte offsets", async (
     expect(result.truncated).toBe(false);
   } finally {
     await search?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("detects newly created, renamed and replaced private hardlinks and fails closed on stat errors", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "pal-private-parallel-")));
+  try {
+    const data = join(root, "private");
+    const project = join(root, "project");
+    await mkdir(data);
+    await mkdir(project);
+    const startupKey = join(data, "credentials.key");
+    const laterWal = join(data, "pal.sqlite-wal");
+    const nestedDir = join(data, "nested");
+    const nestedSecret = join(nestedDir, "secret");
+    await mkdir(nestedDir);
+    await writeFile(startupKey, "startup-secret");
+    const privateFiles = await PrivateFiles.open([startupKey, laterWal, nestedSecret]);
+
+    // Rename startup file, replace it at the original path, and create the previously absent file.
+    const moved = join(data, "moved.key");
+    await rename(startupKey, moved);
+    await writeFile(startupKey, "replacement-secret");
+    await writeFile(laterWal, "wal-secret");
+    await writeFile(join(project, "ordinary.txt"), "public");
+    await link(moved, join(project, "moved-link.txt"));
+    await link(startupKey, join(project, "replaced-link.txt"));
+    await link(laterWal, join(project, "wal-link.txt"));
+
+    expect(await privateFiles.contains(await stat(join(project, "moved-link.txt")))).toBe(true);
+    expect(await privateFiles.contains(await stat(join(project, "replaced-link.txt")))).toBe(true);
+    expect(await privateFiles.contains(await stat(join(project, "wal-link.txt")))).toBe(true);
+    expect(await privateFiles.contains(await stat(join(project, "ordinary.txt")))).toBe(false);
+
+    // Replace nestedDir with a regular file so stat(nestedSecret) fails with ENOTDIR: ordinary files fail closed,
+    // while matching private hardlinks are still identified as private.
+    await rm(nestedDir, { recursive: true, force: true });
+    await writeFile(nestedDir, "not a directory");
+    expect(await privateFiles.contains(await stat(join(project, "moved-link.txt")))).toBe(true);
+    expect(await privateFiles.contains(await stat(join(project, "replaced-link.txt")))).toBe(true);
+    await expect(privateFiles.contains(await stat(join(project, "ordinary.txt")))).rejects.toThrow(/ENOTDIR/);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
