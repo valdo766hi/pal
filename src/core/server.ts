@@ -43,6 +43,8 @@ export function createRequestListener({
       ? undefined
       : sirv(webRoot, {
           single: true,
+          gzip: true,
+          brotli: true,
           setHeaders: (response, pathname) => {
             let cache = "no-cache";
             if (pathname.startsWith("/assets/")) cache = "public, max-age=31536000, immutable";

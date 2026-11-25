@@ -1,9 +1,11 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import type { Server } from "node:http";
+import { type IncomingHttpHeaders, request as httpRequest, type Server } from "node:http";
 import { type AddressInfo, connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { compressAssets } from "../scripts/compress-assets.ts";
 import { startServer } from "../src/core/server.ts";
 import { releaseHealth } from "../src/core/supervise.ts";
 
@@ -134,5 +136,102 @@ describe("HTTP server", () => {
     const page = await fetch(`${base}/`);
     expect(page.status).toBe(404);
     expect(await page.json()).toEqual({ error: "web_not_built" });
+  });
+
+  it("serves precompressed Brotli and gzip JS/CSS assets while keeping HTML no-cache and SSE unbuffered", async () => {
+    const compressedDir = await mkdtemp(join(tmpdir(), "pal-compressed-test-"));
+    try {
+      const html = '<!doctype html><title>Pal</title><script src="/assets/app-abc123.js"></script>';
+      const js = `export const payload = ${JSON.stringify("pal-static-asset-".repeat(200))};\n`;
+      const css = `.pal-shell { color: var(--fg); }\n`.repeat(150);
+      await writeFile(join(compressedDir, "index.html"), html);
+      await mkdir(join(compressedDir, "assets"));
+      await writeFile(join(compressedDir, "assets", "app-abc123.js"), js);
+      await writeFile(join(compressedDir, "assets", "app-abc123.css"), css);
+      expect(await compressAssets(compressedDir)).toBe(2);
+
+      const server = await startServer({
+        host: "127.0.0.1",
+        port: 0,
+        version: "1.2.3",
+        webRoot: compressedDir,
+        api: async (_req, response, url) => {
+          if (url.pathname !== "/api/sse") return void response.writeHead(404).end();
+          response.writeHead(200, {
+            "content-type": "text/event-stream; charset=utf-8",
+            "cache-control": "no-cache",
+          });
+          response.write("data: first\n\n");
+          response.end("data: second\n\n");
+        },
+      });
+      servers.push(server);
+      const { port } = server.address() as AddressInfo;
+
+      const rawGet = (path: string, acceptEncoding?: string) =>
+        new Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              hostname: "127.0.0.1",
+              port,
+              path,
+              headers: acceptEncoding === undefined ? {} : { "accept-encoding": acceptEncoding },
+            },
+            (res) => {
+              const chunks: Buffer[] = [];
+              res.on("data", (chunk: Buffer) => chunks.push(chunk));
+              res.on("end", () =>
+                resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks) }),
+              );
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        });
+
+      for (const [path, expected] of [
+        ["/assets/app-abc123.js", Buffer.from(js)],
+        ["/assets/app-abc123.css", Buffer.from(css)],
+      ] as const) {
+        const identity = await rawGet(path, "identity");
+        expect(identity.status).toBe(200);
+        expect(identity.headers["content-encoding"]).toBeUndefined();
+        expect(identity.headers["vary"]).toBe("Accept-Encoding");
+        expect(identity.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+        expect(identity.body).toEqual(expected);
+
+        const gzip = await rawGet(path, "gzip");
+        expect(gzip.status).toBe(200);
+        expect(gzip.headers["content-encoding"]).toBe("gzip");
+        expect(gzip.headers["vary"]).toBe("Accept-Encoding");
+        expect(gzip.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+        expect(gzip.headers["content-type"]).toBe(identity.headers["content-type"]);
+        expect(gzip.body.length).toBeLessThan(identity.body.length);
+        expect(gunzipSync(gzip.body)).toEqual(expected);
+
+        const br = await rawGet(path, "gzip, br");
+        expect(br.status).toBe(200);
+        expect(br.headers["content-encoding"]).toBe("br");
+        expect(br.headers["vary"]).toBe("Accept-Encoding");
+        expect(br.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+        expect(br.headers["content-type"]).toBe(identity.headers["content-type"]);
+        expect(br.body.length).toBeLessThan(identity.body.length);
+        expect(brotliDecompressSync(br.body)).toEqual(expected);
+      }
+
+      const index = await rawGet("/", "gzip, br");
+      expect(index.status).toBe(200);
+      expect(index.headers["content-encoding"]).toBeUndefined();
+      expect(index.headers["cache-control"]).toBe("no-cache");
+      expect(index.body.toString("utf8")).toBe(html);
+
+      const sse = await rawGet("/api/sse", "gzip, br");
+      expect(sse.status).toBe(200);
+      expect(sse.headers["content-encoding"]).toBeUndefined();
+      expect(sse.headers["content-type"]).toContain("text/event-stream");
+      expect(sse.body.toString("utf8")).toBe("data: first\n\ndata: second\n\n");
+    } finally {
+      await rm(compressedDir, { recursive: true, force: true });
+    }
   });
 });
