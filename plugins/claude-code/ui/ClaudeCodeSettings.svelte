@@ -66,9 +66,11 @@
   Before enabling it, read Anthropic's <a
     href="https://code.claude.com/docs/en/legal-and-compliance"
     target="_blank"
-    rel="noopener noreferrer">legal and compliance terms</a
-  >: subscription logins are for ordinary use of Claude Code, and Anthropic may treat these requests as third-party use
-  and charge them to usage credits.
+    rel="noopener noreferrer"
+  >
+    legal and compliance terms
+  </a>: subscription logins are for ordinary use of Claude Code, and Anthropic may treat these requests as third-party
+  use and charge them to usage credits.
 </div>
 {#if failure !== undefined}
   <p class="callout er" role="alert">Couldn't load the settings: {failure}</p>
@@ -99,23 +101,23 @@
   </section>
   <section aria-labelledby="claude-command">
     <h3 class="h3" id="claude-command">Command</h3>
-    <label class="fl key"
-      >Claude Code command or absolute path<input
+    <label class="fl key">
+      Claude Code command or absolute path<input
         class="f mono"
         autocomplete="off"
         spellcheck="false"
         bind:value={command}
-      /></label
-    >
-    <label class="fl key"
-      >Config directory (optional)<input
+      />
+    </label>
+    <label class="fl key">
+      Config directory (optional)<input
         class="f mono"
         autocomplete="off"
         spellcheck="false"
         placeholder="Claude Code's default"
         bind:value={configDir}
-      /></label
-    >
+      />
+    </label>
     <div class="setrow">
       <label for="claude-credits">
         <div class="setl">Allow usage credits</div>

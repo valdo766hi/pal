@@ -351,16 +351,16 @@
               retarget = undefined;
             }}
           >
-            <span class="name"
-              ><span class="base">{candidate.path.slice(slash + 1)}</span>
-              <span class="dir"
-                >{candidate.path.slice(0, Math.max(slash, 0))}{candidate.status === "A"
+            <span class="name">
+              <span class="base">{candidate.path.slice(slash + 1)}</span>
+              <span class="dir">
+                {candidate.path.slice(0, Math.max(slash, 0))}{candidate.status === "A"
                   ? " new"
                   : candidate.status === "D"
                     ? " deleted"
-                    : ""}</span
-              ></span
-            >
+                    : ""}
+              </span>
+            </span>
             {#if candidate.ignored}<span class="flag wa">ignored</span>{/if}
             {#if candidate.problem}<Icon name="warn" />{/if}
             {#if candidate.reviewed}<span class="flag">reviewed</span>
@@ -374,28 +374,28 @@
     </ul>
   {/if}
   <details class="details">
-    <summary title={root}
-      ><span class="mono"
-        >{changes === undefined
+    <summary title={root}>
+      <span class="mono">
+        {changes === undefined
           ? "Baseline"
           : changes.state === "unavailable"
             ? "Baseline unavailable"
-            : `Baseline ${changes.base?.slice(0, 12) ?? "empty tree"}`}</span
-      >
+            : `Baseline ${changes.base?.slice(0, 12) ?? "empty tree"}`}
+      </span>
       · {workspace?.mode ?? (project.mode === "managed" ? "managed" : "host folder")} · Details<Icon
         name="chevR"
         size={12}
-      /></summary
-    >
+      />
+    </summary>
     <p class="mono">{root}</p>
     {#if changes !== undefined}<p>{changes.note}</p>{/if}
-    <label
-      ><input
+    <label>
+      <input
         type="checkbox"
         checked={includeIgnored}
         onchange={(event) => changeScope(event.currentTarget.checked)}
-      />Include ignored files for review</label
-    >
+      />Include ignored files for review
+    </label>
     <p>
       Ignored files may contain secrets. This local review choice does not change agent folder or shell access. Excerpts
       reach chat only when you choose Send feedback.
@@ -441,12 +441,14 @@
                   class="ln lnb"
                   aria-label={`Comment on line ${line}`}
                   aria-pressed={draftVisible && composing?.line === line}
-                  onclick={() => open(target, line, row.text)}>{line}</button
+                  onclick={() => open(target, line, row.text)}
                 >
+                  {line}
+                </button>
               {/if}
-              <span class="sg">{row.kind === "add" ? "+" : row.kind === "del" ? "-" : " "}</span><span class="tx"
-                >{row.text}</span
-              >
+              <span class="sg">{row.kind === "add" ? "+" : row.kind === "del" ? "-" : " "}</span><span class="tx">
+                {row.text}
+              </span>
             </div>
             {#if row.line !== undefined}
               {@const line = row.line}
@@ -471,23 +473,24 @@
           aria-pressed={file.reviewed}
           disabled={busy || file.problem !== undefined}
           onclick={review}
-          ><span class="box" aria-hidden="true"
-            >{#if file.reviewed}<Icon name="check" size={12} />{/if}</span
-          >{file.reviewed ? "Reviewed" : "Mark reviewed"}</button
         >
+          <span class="box" aria-hidden="true">
+            {#if file.reviewed}<Icon name="check" size={12} />{/if}
+          </span>{file.reviewed ? "Reviewed" : "Mark reviewed"}
+        </button>
         <button
           class="b t"
           title={`Revision ${file.revision.slice(0, 12) || "unavailable"}`}
           disabled={busy || file.problem !== undefined}
-          onclick={() => (discarding = file)}>Discard…</button
+          onclick={() => (discarding = file)}
         >
+          Discard…
+        </button>
       {/if}
       <span class="grow"></span>
-      {#if onFeedback}<button class="b" disabled={busy || pending.length === 0} onclick={feedback}
-          >{copied ? "Copy feedback again" : "Send feedback to chat"}{pending.length > 0
-            ? ` (${pending.length})`
-            : ""}</button
-        >{/if}
+      {#if onFeedback}<button class="b" disabled={busy || pending.length === 0} onclick={feedback}>
+          {copied ? "Copy feedback again" : "Send feedback to chat"}{pending.length > 0 ? ` (${pending.length})` : ""}
+        </button>{/if}
     </div>
   {/if}
 </div>
@@ -522,8 +525,10 @@
               composing = retarget;
               retarget = undefined;
               error = undefined;
-            }}>Retarget draft</button
+            }}
           >
+            Retarget draft
+          </button>
         </div>
       </div>
     {/if}
@@ -537,13 +542,13 @@
 {#snippet card(comment: ChangeComment, detached = false)}
   <div class="cm" class:out={detached}>
     <div class="cmhead">
-      <span title={`Revision ${comment.revision.slice(0, 12)}`}
-        >You · {comment.path === file?.path ? "" : `${comment.path} · `}line {comment.line}</span
-      >
+      <span title={`Revision ${comment.revision.slice(0, 12)}`}>
+        You · {comment.path === file?.path ? "" : `${comment.path} · `}line {comment.line}
+      </span>
       {#if comment.outdated}<span class="warning">Outdated</span>{/if}
-      <span>·</span><span
-        >{comment.sent ? "Admitted to chat" : composed?.(comment.id) ? "In composer · not admitted" : "Not sent"}</span
-      >
+      <span>·</span><span>
+        {comment.sent ? "Admitted to chat" : composed?.(comment.id) ? "In composer · not admitted" : "Not sent"}
+      </span>
       <span class="grow"></span>
       <button
         class="b i q sm tip end"
@@ -551,8 +556,9 @@
         aria-label={`Delete comment on line ${comment.line}`}
         data-tip="Delete comment"
         onclick={() => act(() => api.uncomment(project.id, comment.id, workspace?.id))}
-        ><Icon name="trash" size={14} /></button
       >
+        <Icon name="trash" size={14} />
+      </button>
     </div>
     {#if detached}<code class="mono quote" class:gone={comment.outdated}>{comment.lineText.trim()}</code>{/if}
     <p>{comment.body}</p>

@@ -91,35 +91,35 @@
         Scheduled messages are off. Turn them on in Settings → General to send this chat messages at set times.
       </div>
     {:else}
-      <label class="fl"
-        >Message<textarea class="f" rows="3" maxlength="4000" required disabled={busy} bind:value={text}
-        ></textarea></label
-      >
+      <label class="fl">
+        Message<textarea class="f" rows="3" maxlength="4000" required disabled={busy} bind:value={text}></textarea>
+      </label>
       <div class="seg" role="radiogroup" aria-label="Repeat">
         {#each kinds as [id, label] (id)}
-          <button type="button" class="segb" role="radio" aria-checked={kind === id} onclick={() => (kind = id)}
-            >{label}</button
-          >
+          <button type="button" class="segb" role="radio" aria-checked={kind === id} onclick={() => (kind = id)}>
+            {label}
+          </button>
         {/each}
       </div>
       {#if kind === "weekly"}
         <fieldset class="days">
           <legend class="fine">Days</legend>
           {#each WEEKDAYS as label, day (label)}
-            <label class="flr"
-              ><input
+            <label class="flr">
+              <input
                 type="checkbox"
                 checked={days.includes(day)}
                 onchange={(event) =>
                   (days = event.currentTarget.checked ? [...days, day] : days.filter((item) => item !== day))}
-              />{label}</label
-            >
+              />{label}
+            </label>
           {/each}
         </fieldset>
       {/if}
       <div class="when">
-        {#if kind === "once"}<label class="fl">Date<input class="f" type="date" required bind:value={date} /></label
-          >{/if}
+        {#if kind === "once"}<label class="fl">
+            Date<input class="f" type="date" required bind:value={date} />
+          </label>{/if}
         <label class="fl">Time<input class="f" type="time" required bind:value={time} /></label>
         <label class="fl">Time zone<input class="f" list="schedule-zones" required bind:value={timezone} /></label>
         <datalist id="schedule-zones">
@@ -129,20 +129,14 @@
       <fieldset>
         <legend class="fine">If Pal isn't running at that time</legend>
         <label class="flr"><input type="radio" name="missed" value="skip" bind:group={missed} />Skip it</label>
-        <label class="flr"
-          ><input type="radio" name="missed" value="run-once" bind:group={missed} />Send it once when Pal is back</label
-        >
+        <label class="flr">
+          <input type="radio" name="missed" value="run-once" bind:group={missed} />Send it once when Pal is back
+        </label>
       </fieldset>
       {#if kind !== "once"}
-        <label class="fl"
-          >Stop after this many runs (optional)<input
-            class="f"
-            type="number"
-            min="1"
-            max="1000"
-            bind:value={limit}
-          /></label
-        >
+        <label class="fl">
+          Stop after this many runs (optional)<input class="f" type="number" min="1" max="1000" bind:value={limit} />
+        </label>
       {/if}
       <div class="callout wa notice" role="note">
         <strong>Before you schedule</strong>
@@ -168,8 +162,10 @@
           onclick={() => {
             dialog.close();
             navigate({ view: "settings", tab: "general" });
-          }}>Open Settings</button
+          }}
         >
+          Open Settings
+        </button>
       {/if}
       <button class="b" type="button" disabled={busy} onclick={() => dialog.close()}>Close</button>
       {#if loaded?.enabled}
@@ -179,8 +175,10 @@
           disabled={busy ||
             text.trim() === "" ||
             loaded.notice.model === null ||
-            (kind === "weekly" && days.length === 0)}>{busy ? "Scheduling…" : "Schedule"}</button
+            (kind === "weekly" && days.length === 0)}
         >
+          {busy ? "Scheduling…" : "Schedule"}
+        </button>
       {/if}
     </div>
   </form>

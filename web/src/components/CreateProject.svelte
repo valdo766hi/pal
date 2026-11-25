@@ -120,9 +120,9 @@
           <button class="b sm q mono" onclick={() => open("/")}>/</button>
           {#each crumbs as crumb, index (crumb.path)}
             {#if index > 0}<span aria-hidden="true" class="sep">/</span>{/if}
-            <button class="b sm q mono" aria-current={crumb.path === listing?.path} onclick={() => open(crumb.path)}
-              >{crumb.label}</button
-            >
+            <button class="b sm q mono" aria-current={crumb.path === listing?.path} onclick={() => open(crumb.path)}>
+              {crumb.label}
+            </button>
           {/each}
         </nav>
       </div>
@@ -166,21 +166,23 @@
           onclick={() => {
             folder = listing?.path;
             picking = false;
-          }}>Select folder</button
+          }}
         >
+          Select folder
+        </button>
       </div>
     </div>
   {:else}
     <div class="body">
-      <label class="fl"
-        >Project name<input
+      <label class="fl">
+        Project name<input
           class="f"
           bind:this={nameInput}
           bind:value={name}
           placeholder="e.g. Platform"
           maxlength="120"
-        /></label
-      >
+        />
+      </label>
       <fieldset>
         <legend>Where the project's files live</legend>
         <label class="choice">
@@ -194,9 +196,9 @@
           <input type="radio" name="mode" value="existing" bind:group={mode} />
           <span>
             <span class="cname">Use existing folder on this server</span>
-            <span class="optd"
-              >The project points at a folder that already exists here. Pal doesn't copy or move it.</span
-            >
+            <span class="optd">
+              The project points at a folder that already exists here. Pal doesn't copy or move it.
+            </span>
           </span>
         </label>
       </fieldset>
@@ -221,8 +223,10 @@
       <button
         class="b p"
         onclick={create}
-        disabled={busy || name.trim() === "" || (mode === "existing" && folder === undefined)}>Create project</button
+        disabled={busy || name.trim() === "" || (mode === "existing" && folder === undefined)}
       >
+        Create project
+      </button>
     </div>
   {/if}
 </dialog>

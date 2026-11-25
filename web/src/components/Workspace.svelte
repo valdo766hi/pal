@@ -245,8 +245,10 @@
           class="b i q tip start"
           aria-label="Projects and chats"
           data-tip="Projects and chats"
-          onclick={() => (drawerRoute = app.route)}><Icon name="menu" /></button
+          onclick={() => (drawerRoute = app.route)}
         >
+          <Icon name="menu" />
+        </button>
         <div class="phonetitle">
           <div class="t">{located?.chat.title ?? (located ? "New chat" : "Pal")}</div>
           {#if located}<div class="s" title={located.chat.workspace?.root ?? located.project.root}>
@@ -259,9 +261,9 @@
             aria-label="Workspace tools"
             data-tip="Workspace tools"
             onclick={() => chatView?.openTools()}
-            ><Icon name="grid" />{#if (changeStatus?.files ?? 0) > 0}<span class="dot" aria-hidden="true"
-              ></span>{/if}</button
           >
+            <Icon name="grid" />{#if (changeStatus?.files ?? 0) > 0}<span class="dot" aria-hidden="true"></span>{/if}
+          </button>
         {:else}<span class="toolsbtn" aria-hidden="true"></span>{/if}
       </header>
     {/if}
@@ -298,17 +300,21 @@
                   class="b i q tip start"
                   aria-label="Projects and chats"
                   data-tip="Projects and chats"
-                  onclick={() => (drawerRoute = app.route)}><Icon name="menu" /></button
-                >{:else if size === "desktop" && !sidebarShown}<button
+                  onclick={() => (drawerRoute = app.route)}
+                >
+                  <Icon name="menu" />
+                </button>{:else if size === "desktop" && !sidebarShown}<button
                   class="b i q tip"
                   aria-label="Show sidebar"
                   data-tip="Show sidebar"
-                  onclick={openSidebar}><Icon name="sidebar" /></button
-                >{/if}
-              <h1 class="title">
-                <button aria-haspopup="dialog" onclick={() => (renaming = { ...located.chat })}
-                  ><span>{located.chat.title ?? "New chat"}</span><Icon name="chevD" size={14} /></button
+                  onclick={openSidebar}
                 >
+                  <Icon name="sidebar" />
+                </button>{/if}
+              <h1 class="title">
+                <button aria-haspopup="dialog" onclick={() => (renaming = { ...located.chat })}>
+                  <span>{located.chat.title ?? "New chat"}</span><Icon name="chevD" size={14} />
+                </button>
               </h1>
               <span class="where" title={root}>{located.project.name} · {located.chat.workspace?.mode ?? "local"}</span>
               <div class="tools">
@@ -321,9 +327,9 @@
                       data-tip={changed > 0 ? `Changes · ${changed} ${changed === 1 ? "file" : "files"}` : item.id}
                       aria-expanded={panel && panelView === item.id}
                       onclick={() => togglePanel(item.id)}
-                      ><Icon name={item.icon} />{#if changed > 0}<span class="dot" aria-hidden="true"
-                        ></span>{/if}</button
                     >
+                      <Icon name={item.icon} />{#if changed > 0}<span class="dot" aria-hidden="true"></span>{/if}
+                    </button>
                   {/if}
                 {/each}
                 <span class="sep" aria-hidden="true"></span>
@@ -378,13 +384,13 @@
                 {#if panelView !== "Terminal"}<div class="panelhead">
                     <h2>{panelView}</h2>
                     {#if panelView === "Changes" && changeStatus?.files !== undefined}
-                      <span class="count"
-                        >{changeStatus.files}
+                      <span class="count">
+                        {changeStatus.files}
                         {changeStatus.files === 1 ? "file" : "files"}{changeStatus.files > 0
                           ? " · "
                           : ""}{#if changeStatus.files > 0}<span class="add">+{changeStatus.add}</span>
-                          <span class="del">−{changeStatus.del}</span>{/if}</span
-                      >
+                          <span class="del">−{changeStatus.del}</span>{/if}
+                      </span>
                     {/if}
                     <span class="grow"></span>
                     {#if panelView === "Changes"}
@@ -393,15 +399,19 @@
                         aria-label="Refresh"
                         data-tip="Refresh"
                         disabled={changeStatus?.busy !== false}
-                        onclick={() => changesView?.refresh()}><Icon name="refresh" /></button
+                        onclick={() => changesView?.refresh()}
                       >
+                        <Icon name="refresh" />
+                      </button>
                     {/if}
                     <button
                       class="b i q tip end"
                       aria-label="Close panel"
                       data-tip="Close"
-                      onclick={() => (panelRoute = undefined)}><Icon name="x" /></button
+                      onclick={() => (panelRoute = undefined)}
                     >
+                      <Icon name="x" />
+                    </button>
                   </div>{/if}
                 {#key located.chat.workspace?.id ?? located.project.id}
                   {@const statusKey = located.chat.workspace?.id ?? located.project.id}
@@ -484,9 +494,9 @@
               {/if}
               <h1>{chatId === undefined ? "Pick a chat" : lookedUp === chatId ? "Chat not found" : "Loading chat…"}</h1>
               <p>Choose a chat in a project, or start a new one.</p>
-              {#if ready}<button class="b p" onclick={() => newChat(ready.id)}
-                  ><Icon name="plus" />New chat in {ready.name}</button
-                >{/if}
+              {#if ready}<button class="b p" onclick={() => newChat(ready.id)}>
+                  <Icon name="plus" />New chat in {ready.name}
+                </button>{/if}
             </div>
           </div>
         {/if}

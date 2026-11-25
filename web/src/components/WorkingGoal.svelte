@@ -166,16 +166,18 @@
     {/if}
     {#if draft === undefined}
       <div class="row">
-        <button class="b sm q" onclick={edit} disabled={loading || saving || allowanceDraft !== undefined}
-          >Edit working goal</button
-        >
+        <button class="b sm q" onclick={edit} disabled={loading || saving || allowanceDraft !== undefined}>
+          Edit working goal
+        </button>
         {#if info.goal.text !== ""}<button
             class="b sm q"
             disabled={loading || saving || stale || allowanceDraft !== undefined}
             onclick={() => {
               if (info) void save({ revision: info.goal.revision, text: "", constraints: [], acceptance: [] });
-            }}>Clear current goal</button
-          >{/if}
+            }}
+          >
+            Clear current goal
+          </button>{/if}
       </div>
     {:else}
       <form
@@ -185,16 +187,17 @@
         }}
       >
         <fieldset disabled={saving || loading}>
-          <label class="fl">Goal<textarea class="f" rows="3" maxlength="2000" bind:value={draft.text}></textarea></label
-          >
-          <label class="fl"
-            >Constraints (one per line)<textarea class="f" rows="3" maxlength="1607" bind:value={draft.constraints}
-            ></textarea></label
-          >
-          <label class="fl"
-            >Acceptance checks (one per line)<textarea class="f" rows="3" maxlength="1607" bind:value={draft.acceptance}
-            ></textarea></label
-          >
+          <label class="fl">
+            Goal<textarea class="f" rows="3" maxlength="2000" bind:value={draft.text}></textarea>
+          </label>
+          <label class="fl">
+            Constraints (one per line)<textarea class="f" rows="3" maxlength="1607" bind:value={draft.constraints}
+            ></textarea>
+          </label>
+          <label class="fl">
+            Acceptance checks (one per line)<textarea class="f" rows="3" maxlength="1607" bind:value={draft.acceptance}
+            ></textarea>
+          </label>
           <p class="sub">
             Up to eight entries per list, 200 characters each. {bytes.toLocaleString()} / {info.limits.goalBytes.toLocaleString()}
             UTF-8 bytes; {info.limits.goalTokens.toLocaleString()} estimated-token limit. Clear all fields to remove the goal.
@@ -211,8 +214,10 @@
                   stale = false;
                   error = undefined;
                 }
-              }}>Use current goal revision for my draft</button
+              }}
             >
+              Use current goal revision for my draft
+            </button>
           {/if}
           <div class="row end">
             <button
@@ -222,11 +227,13 @@
                 draft = undefined;
                 stale = false;
                 error = undefined;
-              }}>Cancel goal edit</button
+              }}
             >
-            <button class="b sm p" type="submit" disabled={stale || bytes > info.limits.goalBytes}
-              >Save working goal</button
-            >
+              Cancel goal edit
+            </button>
+            <button class="b sm p" type="submit" disabled={stale || bytes > info.limits.goalBytes}>
+              Save working goal
+            </button>
           </div>
         </fieldset>
       </form>
@@ -266,12 +273,14 @@
             <button
               class="b sm q"
               disabled={loading || saving || draft !== undefined || info.goal.text === ""}
-              onclick={editAllowance}>Set execution allowance</button
+              onclick={editAllowance}
             >
+              Set execution allowance
+            </button>
             {#if info.allowance.limits}
-              <button class="b sm q" disabled={loading || saving || draft !== undefined} onclick={disableAllowance}
-                >Disable execution allowance</button
-              >
+              <button class="b sm q" disabled={loading || saving || draft !== undefined} onclick={disableAllowance}>
+                Disable execution allowance
+              </button>
             {/if}
           </div>
         {:else}
@@ -282,8 +291,8 @@
             }}
           >
             <fieldset disabled={saving || loading}>
-              <label class="fl"
-                >Model steps<input
+              <label class="fl">
+                Model steps<input
                   class="f"
                   type="number"
                   min="1"
@@ -291,10 +300,10 @@
                   step="1"
                   required
                   bind:value={allowanceDraft.steps}
-                /></label
-              >
-              <label class="fl"
-                >Tool attempts<input
+                />
+              </label>
+              <label class="fl">
+                Tool attempts<input
                   class="f"
                   type="number"
                   min="1"
@@ -302,8 +311,8 @@
                   step="1"
                   required
                   bind:value={allowanceDraft.calls}
-                /></label
-              >
+                />
+              </label>
               <p class="sub">
                 Starting or renewing resets these counters. It does not send a message, resume stopped work or change
                 tool grants. These are not spending, token or time caps.
@@ -321,8 +330,10 @@
                       allowanceDraft.goalRevision = info.goal.revision;
                       error = undefined;
                     }
-                  }}>Use current allowance revision for my draft</button
+                  }}
                 >
+                  Use current allowance revision for my draft
+                </button>
               {/if}
               <div class="row end">
                 <button
@@ -331,16 +342,20 @@
                   onclick={() => {
                     allowanceDraft = undefined;
                     error = undefined;
-                  }}>Cancel allowance edit</button
+                  }}
                 >
+                  Cancel allowance edit
+                </button>
                 <button
                   class="b sm p"
                   type="submit"
                   disabled={allowanceStale ||
                     allowanceDraft.steps === undefined ||
                     allowanceDraft.calls === undefined ||
-                    info.goal.text === ""}>Start or renew execution allowance</button
+                    info.goal.text === ""}
                 >
+                  Start or renew execution allowance
+                </button>
               </div>
             </fieldset>
           </form>
@@ -420,8 +435,10 @@
             onclick={() => {
               const digest = info?.verification.reviewDigest;
               if (digest) void change((id) => api.acceptWorkingChecks(id, digest));
-            }}>Accept checks and complete goal</button
+            }}
           >
+            Accept checks and complete goal
+          </button>
         {/if}
         <details>
           <summary>Verification scope and limits</summary>

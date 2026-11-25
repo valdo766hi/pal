@@ -59,8 +59,10 @@
     aria-haspopup="menu"
     aria-expanded={open}
     onclick={() => (open ? close(false) : show())}
-    onkeydown={onOpenerKey}><Icon name="plus" /></button
+    onkeydown={onOpenerKey}
   >
+    <Icon name="plus" />
+  </button>
   <input
     bind:this={input}
     class="sr"

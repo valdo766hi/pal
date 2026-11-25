@@ -61,9 +61,9 @@
     </div>
     {#if attempt.authUrl}
       <div>
-        <a class="b p" href={attempt.authUrl} target="_blank" rel="noopener noreferrer"
-          ><Icon name="globe" />Open ChatGPT sign-in</a
-        >
+        <a class="b p" href={attempt.authUrl} target="_blank" rel="noopener noreferrer">
+          <Icon name="globe" />Open ChatGPT sign-in
+        </a>
       </div>
     {/if}
     <label class="fl paste">
@@ -77,9 +77,13 @@
       />
     </label>
     <div class="buttons">
-      <button class="b" onclick={() => act(() => api.chatgptPaste(paste.trim()))} disabled={busy || paste.trim() === ""}
-        >Submit address</button
+      <button
+        class="b"
+        onclick={() => act(() => api.chatgptPaste(paste.trim()))}
+        disabled={busy || paste.trim() === ""}
       >
+        Submit address
+      </button>
       <button class="b q" onclick={() => act(api.chatgptCancel)} disabled={busy}>Cancel</button>
     </div>
   {:else if attempt?.state === "verifying"}

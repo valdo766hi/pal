@@ -70,9 +70,9 @@
     <label class="setrow model" class:off={!model.supported}>
       <span>
         <span class="setl">{model.name}</span>
-        <span class="setd mono"
-          >{model.id}{model.supported ? "" : " · Pal doesn't know this model's capabilities yet"}</span
-        >
+        <span class="setd mono">
+          {model.id}{model.supported ? "" : " · Pal doesn't know this model's capabilities yet"}
+        </span>
       </span>
       <input
         type="radio"

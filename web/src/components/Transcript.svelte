@@ -264,12 +264,14 @@
           {#if tool?.taskId !== undefined}
             {#each stream?.nested.filter((call) => call.parentTaskId === tool.taskId) ?? [] as call (call.callId)}
               <div class="steprow">
-                {#if call.status !== "done"}<span class="ring spin" aria-hidden="true"></span><span class="sr"
-                    >Running</span
-                  >
+                {#if call.status !== "done"}<span class="ring spin" aria-hidden="true"></span><span class="sr">
+                    Running
+                  </span>
                 {:else if call.summary?.isError !== false}<span class="tick er" aria-hidden="true">✕</span><span
-                    class="sr">Failed</span
+                    class="sr"
                   >
+                    Failed
+                  </span>
                 {:else}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span>{/if}
                 <span>{toolLabel(call.name)}</span>
               </div>
@@ -280,18 +282,14 @@
         {#each step.result?.calls ?? [] as call (call.id)}
           <div class="steprow">
             {#if call.status === "ok"}<span class="tick ok" aria-hidden="true">✓</span><span class="sr">Done</span>
-            {:else}<span class="tick" class:er={call.status !== "running"} aria-hidden="true"
-                >{call.status === "running" ? "–" : "✕"}</span
-              >{/if}
+            {:else}<span class="tick" class:er={call.status !== "running"} aria-hidden="true">
+                {call.status === "running" ? "–" : "✕"}
+              </span>{/if}
             <span>{toolLabel(call.name)}</span>
             <span class="args">{call.args}</span>
-            {#if call.status !== "ok"}<span class="state"
-                >{call.status === "running"
-                  ? "Interrupted"
-                  : call.status === "cancelled"
-                    ? "Cancelled"
-                    : "Failed"}</span
-              >{/if}
+            {#if call.status !== "ok"}<span class="state">
+                {call.status === "running" ? "Interrupted" : call.status === "cancelled" ? "Cancelled" : "Failed"}
+              </span>{/if}
           </div>
           {#if call.error}<div class="dim small">{call.error}</div>{/if}
         {/each}
@@ -308,9 +306,9 @@
     <button class="row" aria-expanded={open} onclick={() => (openSteps[key] = !open)}>
       {#if running !== undefined}<span class="ring spin" aria-hidden="true"></span>{/if}
       <span class="obj mono">{receipt.command}</span>
-      <span class={["st", (receipt.timedOut || (receipt.exitCode ?? 0) !== 0) && "er"]}
-        >{receiptState(receipt, running !== undefined)}</span
-      >
+      <span class={["st", (receipt.timedOut || (receipt.exitCode ?? 0) !== 0) && "er"]}>
+        {receiptState(receipt, running !== undefined)}
+      </span>
       <Icon name={open ? "chevD" : "chevR"} size={13} />
     </button>
     {#if open}
@@ -345,9 +343,9 @@
   {/if}
   {#if stream?.older != null}
     <div class="older">
-      <button class="b sm" disabled={stream.loadingOlder} onclick={showOlder}
-        >{stream.loadingOlder ? "Loading earlier messages…" : "Show earlier messages"}</button
-      >
+      <button class="b sm" disabled={stream.loadingOlder} onclick={showOlder}>
+        {stream.loadingOlder ? "Loading earlier messages…" : "Show earlier messages"}
+      </button>
     </div>
   {/if}
   {#if olderError !== undefined}<div class="callout er" role="alert">{olderError}</div>{/if}
@@ -360,11 +358,11 @@
           {#if item.attachments.length > 0}
             <div class="chips end">
               {#each item.attachments as attachment (attachment.id)}
-                <span class="chip plain"
-                  ><Icon name="file" />{attachment.name}<span class="dim"
-                    >{size(attachment.size)}{received(attachment)}</span
-                  ></span
-                >
+                <span class="chip plain">
+                  <Icon name="file" />{attachment.name}<span class="dim">
+                    {size(attachment.size)}{received(attachment)}
+                  </span>
+                </span>
               {/each}
             </div>
           {/if}
@@ -434,10 +432,10 @@
                     <span class="obj">{part.purpose}</span>
                     <span class={["st", status.failed && "er"]}>{status.text}</span>
                     {#if view !== undefined && view.unknownEffects.length > 0}
-                      <span class="st er wide"
-                        >Outcome unknown for {view.unknownEffects.map((effect) => effect.tool).join(", ")}; check before
-                        repeating.</span
-                      >
+                      <span class="st er wide">
+                        Outcome unknown for {view.unknownEffects.map((effect) => effect.tool).join(", ")}; check before
+                        repeating.
+                      </span>
                     {/if}
                   </li>
                 {:else}
@@ -475,9 +473,9 @@
               {escalation(approval.advice)}
             </p>{/if}
           <div class="acts">
-            <button class="b p" disabled={deciding !== undefined} onclick={() => onDecide(approval, "approve")}
-              >Approve once</button
-            >
+            <button class="b p" disabled={deciding !== undefined} onclick={() => onDecide(approval, "approve")}>
+              Approve once
+            </button>
             <button class="b" disabled={deciding !== undefined} onclick={() => onDecide(approval, "deny")}>Deny</button>
           </div>
         </div>

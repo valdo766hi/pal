@@ -205,9 +205,9 @@
 <section aria-label="Curated memory">
   <div class="row">
     <h3 class="h3 grow">Curated memory</h3>
-    <button class="b sm" onclick={() => begin()} disabled={busy || draft !== undefined}
-      ><Icon name="plus" />Add memory</button
-    >
+    <button class="b sm" onclick={() => begin()} disabled={busy || draft !== undefined}>
+      <Icon name="plus" />Add memory
+    </button>
   </div>
   <p class="sub">
     Source-linked facts for this project. Searchable on demand through Code Mode, not automatically added to prompts.
@@ -225,47 +225,52 @@
       <fieldset disabled={busy}>
         <legend>{editing === undefined ? "New memory" : `Correct revision ${editing.revision}`}</legend>
         <label class="fl">Memory title<input class="f" maxlength="120" required bind:value={draft.title} /></label>
-        <label class="fl"
-          >Memory fact<textarea class="f" rows="4" maxlength="2000" required bind:value={draft.body}></textarea></label
-        >
-        <label class="fl"
-          >Source type<select class="f" bind:value={draft.kind}
-            ><option value="owner">Owner note (this form)</option><option value="chat">Chat message</option><option
-              value="file">File revision</option
-            ></select
-          ></label
-        >
+        <label class="fl">
+          Memory fact<textarea class="f" rows="4" maxlength="2000" required bind:value={draft.body}></textarea>
+        </label>
+        <label class="fl">
+          Source type<select class="f" bind:value={draft.kind}>
+            <option value="owner">Owner note (this form)</option><option value="chat">Chat message</option><option
+              value="file"
+            >
+              File revision
+            </option>
+          </select>
+        </label>
         {#if draft.kind === "chat"}
-          <label class="fl"
-            >Source message<select class="f" bind:value={draft.entry}>
+          <label class="fl">
+            Source message<select class="f" bind:value={draft.entry}>
               <option value={0}>Choose a retained message</option>
               {#if savedEntry !== undefined && !info.sources.some((source) => source.entry === savedEntry)}<option
-                  value={savedEntry}>Saved source #{savedEntry}</option
-                >{/if}
-              {#each info.sources as source (source.entry)}<option value={source.entry}
-                  >#{source.entry} · {source.text.slice(0, 75)}</option
-                >{/each}
-            </select></label
-          >
+                  value={savedEntry}
+                >
+                  Saved source #{savedEntry}
+                </option>{/if}
+              {#each info.sources as source (source.entry)}<option value={source.entry}>
+                  #{source.entry} · {source.text.slice(0, 75)}
+                </option>{/each}
+            </select>
+          </label>
           <p class="sub">
             Up to 20 recent transcript entries are inspected. Existing saved sources remain linked after compaction.
           </p>
         {:else if draft.kind === "file"}
-          <label class="fl"
-            >Source folder<select
+          <label class="fl">
+            Source folder<select
               class="f"
               bind:value={draft.folder}
               onchange={() => {
                 if (draft) draft.sha256 = "";
                 filePreview = undefined;
               }}
-              >{#each folders as folder (folder.id)}<option value={folder.id}
-                  >{folder.id === "primary" ? "Working folder" : "Read-only reference"} · {folder.root}</option
-                >{/each}</select
-            ></label
-          >
-          <label class="fl"
-            >Source file<input
+            >
+              {#each folders as folder (folder.id)}<option value={folder.id}>
+                  {folder.id === "primary" ? "Working folder" : "Read-only reference"} · {folder.root}
+                </option>{/each}
+            </select>
+          </label>
+          <label class="fl">
+            Source file<input
               class="f mono"
               maxlength="1024"
               bind:value={draft.path}
@@ -274,14 +279,14 @@
                 filePreview = undefined;
               }}
               placeholder="docs/decision.md"
-            /></label
-          >
+            />
+          </label>
           {#if filePreview !== undefined}<pre class="mono" aria-label="Verified source preview">{filePreview}</pre>
             <p class="sub">Preview: up to 4,000 characters. The saved hash covers the complete file.</p>{/if}
           <div class="row">
-            <button class="b sm" type="button" onclick={readSource} disabled={draft.path === ""}
-              >Verify source file</button
-            ><span class="sub">{draft.sha256 === "" ? "Not verified" : "Full-file hash verified"}</span>
+            <button class="b sm" type="button" onclick={readSource} disabled={draft.path === ""}>
+              Verify source file
+            </button><span class="sub">{draft.sha256 === "" ? "Not verified" : "Full-file hash verified"}</span>
           </div>
         {:else}<p class="sub">This is your statement, not a citation to an external document.</p>{/if}
         <div class="row end">
@@ -291,10 +296,16 @@
             onclick={() => {
               draft = undefined;
               editing = undefined;
-            }}>Cancel memory edit</button
-          ><button class="b sm p" type="submit" disabled={draft.title.trim() === "" || draft.body.trim() === ""}
-            >{busy ? "Saving…" : "Save memory"}</button
+            }}
           >
+            Cancel memory edit
+          </button><button
+            class="b sm p"
+            type="submit"
+            disabled={draft.title.trim() === "" || draft.body.trim() === ""}
+          >
+            {busy ? "Saving…" : "Save memory"}
+          </button>
         </div>
       </fieldset>
     </form>
@@ -306,26 +317,33 @@
         <h4>{item.title}</h4>
         <p class="fact">{item.body}</p>
         <div class="row sub">
-          <span class="pill">Revision {item.revision}</span><span class="grow">{sourceLabel(item)}</span
-          >{#if item.state === "changed"}<span class="pill wa">Source changed · retrieval off</span>{/if}
+          <span class="pill">Revision {item.revision}</span><span class="grow">
+            {sourceLabel(item)}
+          </span>{#if item.state === "changed"}<span class="pill wa">Source changed · retrieval off</span>{/if}
         </div>
         <div class="row">
           <button
             class="b sm q"
             aria-label={`View source for ${item.title}`}
             onclick={() => viewSource(item)}
-            disabled={busy}>View source</button
-          ><span class="grow"></span><button
+            disabled={busy}
+          >
+            View source
+          </button><span class="grow"></span><button
             class="b sm q"
             aria-label={`Correct ${item.title}`}
             onclick={() => begin(item)}
-            disabled={busy || draft !== undefined}>Correct</button
-          ><button
+            disabled={busy || draft !== undefined}
+          >
+            Correct
+          </button><button
             class="b sm q d"
             aria-label={`Forget ${item.title}`}
             onclick={() => (forgetting = item)}
-            disabled={busy}>Forget…</button
+            disabled={busy}
           >
+            Forget…
+          </button>
         </div>
         {#if previewId === item.id && preview !== undefined}<div
             class="source"
@@ -342,9 +360,9 @@
     {/each}
   </ul>
   <div class="row">
-    <button class="b sm q" onclick={rebuild} disabled={rebuilding}
-      >{rebuilding ? "Rebuilding…" : "Rebuild memory search"}</button
-    >{#if rebuilt}<span class="sub" role="status">Memory search rebuilt.</span>{/if}
+    <button class="b sm q" onclick={rebuild} disabled={rebuilding}>
+      {rebuilding ? "Rebuilding…" : "Rebuild memory search"}
+    </button>{#if rebuilt}<span class="sub" role="status">Memory search rebuilt.</span>{/if}
   </div>
   <p class="sub">
     Forgetting stops future lookups. Earlier transcripts, retained revisions and backups are not erased. Limits: 200
@@ -360,9 +378,9 @@
   </p>
   {#if info.lookups.length === 0}<p class="sub">No memory lookup in the latest 20 entries.</p>{/if}
   {#each info.lookups as lookup (lookup.entry)}<div class="lookup">
-      <strong>{lookup.query}</strong><time datetime={new Date(lookup.at).toISOString()}
-        >{new Date(lookup.at).toLocaleString()}</time
-      >
+      <strong>{lookup.query}</strong><time datetime={new Date(lookup.at).toISOString()}>
+        {new Date(lookup.at).toLocaleString()}
+      </time>
       <p class="sub">{lookup.candidates.length} candidates{lookup.truncated ? " · limited" : ""}</p>
       {#each lookup.candidates as item (item.id)}<div class="mono sub">
           {item.id} · revision {item.revision}

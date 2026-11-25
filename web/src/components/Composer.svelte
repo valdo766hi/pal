@@ -85,13 +85,14 @@
             class="chipx"
             aria-label={`Remove ${attachment.name}`}
             onclick={() => (writing.attachments = writing.attachments.filter((kept) => kept.id !== attachment.id))}
-            ><Icon name="x" size={12} /></button
           >
+            <Icon name="x" size={12} />
+          </button>
         </span>
       {/each}
-      {#if writing.uploading > 0}<span class="chip plain"
-          ><span class="ring spin" aria-hidden="true"></span>Uploading…</span
-        >{/if}
+      {#if writing.uploading > 0}<span class="chip plain">
+          <span class="ring spin" aria-hidden="true"></span>Uploading…
+        </span>{/if}
     </div>
   {/if}
   <label for="composer" class="sr">Message</label>

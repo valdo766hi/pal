@@ -33,49 +33,59 @@
       <li>
         {#if part.items !== undefined}
           <details>
-            <summary class="row"
-              ><span class="key" style:background={part.ink}></span><span class="name">{part.label}</span><span
-                class="num">{tokens(part.tokens)}</span
-              ><span class="num pct">{amount(part.tokens)}</span></summary
-            >
+            <summary class="row">
+              <span class="key" style:background={part.ink}></span><span class="name">{part.label}</span><span
+                class="num"
+              >
+                {tokens(part.tokens)}
+              </span><span class="num pct">{amount(part.tokens)}</span>
+            </summary>
             <ul class="items">
               {#each part.items as item (item.label)}<li class="row">
                   <span class="name mono">{item.label}</span><span class="num">{tokens(item.tokens)}</span><span
-                    class="num pct">{amount(item.tokens)}</span
+                    class="num pct"
                   >
+                    {amount(item.tokens)}
+                  </span>
                 </li>{/each}
               {#if part.more}<li class="row dim">and {part.more} more</li>{/if}
             </ul>
           </details>
         {:else}
           <div class="row">
-            <span class="key" style:background={part.ink}></span><span class="name">{part.label}</span><span class="num"
-              >{part.tokens > 0 && part.id === "reported" ? "+" : ""}{tokens(part.tokens)}</span
-            ><span class="num pct">{amount(part.tokens)}</span>
+            <span class="key" style:background={part.ink}></span><span class="name">{part.label}</span><span
+              class="num"
+            >
+              {part.tokens > 0 && part.id === "reported" ? "+" : ""}{tokens(part.tokens)}
+            </span><span class="num pct">{amount(part.tokens)}</span>
           </div>
         {/if}
       </li>
     {/each}
     {#if limit !== null}
       <li class="row">
-        <span class="key hollow reserve"></span><span class="name">Reserved for summarizing</span><span class="num"
-          >{tokens(usage.reserveTokens)}</span
-        ><span class="num pct">{amount(usage.reserveTokens)}</span>
+        <span class="key hollow reserve"></span><span class="name">Reserved for summarizing</span><span class="num">
+          {tokens(usage.reserveTokens)}
+        </span><span class="num pct">{amount(usage.reserveTokens)}</span>
       </li>
       <li class="row">
         <span class="key hollow"></span><span class="name">Free space</span><span class="num">{tokens(free)}</span><span
-          class="num pct">{amount(free)}</span
+          class="num pct"
         >
+          {amount(free)}
+        </span>
       </li>
     {/if}
     {#each usage.unloaded as group (group.id)}
       <li>
         <details>
-          <summary class="row"
-            ><span class="key none"></span><span class="name">{group.label} tools not in the request</span><span
-              class="num">{group.count}</span
-            ><span class="num pct" title="Reachable through discovery; not counted">—</span></summary
-          >
+          <summary class="row">
+            <span class="key none"></span><span class="name">{group.label} tools not in the request</span><span
+              class="num"
+            >
+              {group.count}
+            </span><span class="num pct" title="Reachable through discovery; not counted">—</span>
+          </summary>
           <ul class="items">
             {#each group.items as name (name)}<li class="row"><span class="name mono">{name}</span></li>{/each}
             {#if group.count > group.items.length}<li class="row dim">

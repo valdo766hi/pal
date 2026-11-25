@@ -94,8 +94,10 @@
         aria-label="Close project folders"
         data-tip="Close"
         disabled={busy}
-        onclick={() => dialog?.close()}><Icon name="x" /></button
+        onclick={() => dialog?.close()}
       >
+        <Icon name="x" />
+      </button>
     </div>
     <p class="sub">
       References grant read-only file access. Search indexing is separate and off by default. Nothing is copied or
@@ -110,9 +112,9 @@
     {#each folders as folder (folder.id)}
       <section class="fold" aria-label={folder.id === "primary" ? "Primary workspace" : `Reference ${folder.root}`}>
         <div class="row">
-          <span class="mono path">{folder.root}</span><span class="pill"
-            >{folder.id === "primary" ? "Primary" : "Read-only"}</span
-          >
+          <span class="mono path">{folder.root}</span><span class="pill">
+            {folder.id === "primary" ? "Primary" : "Read-only"}
+          </span>
         </div>
         <div class="row">
           <span class="sub">{folder.indexed ? "Search on demand" : "Indexing off"} · Instructions untrusted</span>
@@ -123,8 +125,10 @@
                 run(async () => {
                   await api.removeFolder(project.id, folder.id);
                   await refresh();
-                })}>Remove access</button
-            >{/if}
+                })}
+            >
+              Remove access
+            </button>{/if}
         </div>
       </section>
     {/each}
@@ -135,8 +139,8 @@
         void browse();
       }}
     >
-      <label class="fl"
-        >Folder on this server<input
+      <label class="fl">
+        Folder on this server<input
           class="f mono"
           bind:value={path}
           oninput={() => {
@@ -147,16 +151,18 @@
           autocomplete="off"
           spellcheck="false"
           disabled={busy}
-        /></label
-      >
+        />
+      </label>
       <div class="row">
         <button class="b sm" disabled={busy} type="submit">Browse server folders</button>
         {#if listing?.parent}<button
             class="b sm q"
             disabled={busy}
             type="button"
-            onclick={() => browse(listing?.parent)}>Parent folder</button
-          >{/if}
+            onclick={() => browse(listing?.parent)}
+          >
+            Parent folder
+          </button>{/if}
       </div>
     </form>
     {#if listing}
@@ -171,15 +177,16 @@
             class="frow"
             disabled={busy}
             onclick={() => browse(entry.path)}
-            ><Icon name="folder" /><span class="mono path">{entry.name}</span><Icon name="chevR" /></button
-          >{/each}
+          >
+            <Icon name="folder" /><span class="mono path">{entry.name}</span><Icon name="chevR" />
+          </button>{/each}
         {#if listing.truncated}<p class="sub">Showing the first 500 folders. Type a path to go further.</p>{/if}
       </div>
     {/if}
-    <label class="check"
-      ><input type="checkbox" bind:checked={indexed} onchange={() => (key = requestId())} disabled={busy} />Allow search
-      indexing for this reference</label
-    >
+    <label class="check">
+      <input type="checkbox" bind:checked={indexed} onchange={() => (key = requestId())} disabled={busy} />Allow search
+      indexing for this reference
+    </label>
     <p class="sub">
       With indexing off, individual files can still be browsed and read. To change indexing later, remove and re-add the
       grant; existing runs never gain extra access.
@@ -193,8 +200,10 @@
           listing.problem !== undefined ||
           listing.path !== path ||
           folders.length >= 9}
-        onclick={add}>Grant read-only access</button
+        onclick={add}
       >
+        Grant read-only access
+      </button>
     </div>
   </dialog>
 {/if}

@@ -94,8 +94,8 @@
   {#if selected !== undefined}
     <section aria-labelledby="jev-key">
       <h3 class="h3" id="jev-key">{selected.label} API key</h3>
-      <label class="fl key"
-        >{selected.keySet ? "Replace the key" : "Key"}
+      <label class="fl key">
+        {selected.keySet ? "Replace the key" : "Key"}
         <input
           class="f mono"
           type="password"
@@ -103,8 +103,8 @@
           spellcheck="false"
           placeholder={selected.keySet ? "Saved key hidden" : "Paste your key"}
           bind:value={draft}
-        /></label
-      >
+        />
+      </label>
       <p class="setd">Stored sealed on this server and never shown again.</p>
       <div class="buttons">
         <button
@@ -114,8 +114,10 @@
             act(async () => {
               await api.plugin("jev", "PUT", `keys/${selected.id}`, { key: draft });
               draft = "";
-            })}>Save key</button
+            })}
         >
+          Save key
+        </button>
         {#if selected.keySet}
           <button
             class="b q"
@@ -124,13 +126,17 @@
               act(
                 () => api.plugin("jev", "POST", `keys/${selected.id}/check`),
                 (result) => (result as { detail: string }).detail,
-              )}>{selected.id === "typesafe" ? "Check key (one billed test)" : "Check key"}</button
+              )}
           >
+            {selected.id === "typesafe" ? "Check key (one billed test)" : "Check key"}
+          </button>
           <button
             class="b q d"
             disabled={busy}
-            onclick={() => act(() => api.plugin("jev", "DELETE", `keys/${selected.id}`))}>Remove</button
+            onclick={() => act(() => api.plugin("jev", "DELETE", `keys/${selected.id}`))}
           >
+            Remove
+          </button>
         {/if}
       </div>
       {#if notice !== undefined}<p class="callout" role="status">{notice}</p>{/if}
@@ -139,10 +145,10 @@
 
   <section aria-labelledby="jev-threshold">
     <h3 class="h3" id="jev-threshold">Threshold</h3>
-    <label class="fl key"
-      >Run without asking only when Jev is at least this sure
-      <span class="buttons"
-        ><input
+    <label class="fl key">
+      Run without asking only when Jev is at least this sure
+      <span class="buttons">
+        <input
           type="range"
           min="0.5"
           max="0.99"
@@ -151,9 +157,9 @@
           disabled={busy}
           onchange={(event) =>
             act(() => api.plugin("jev", "PUT", "threshold", { threshold: Number(event.currentTarget.value) }))}
-        /><span class="mono">{percent(status.threshold)}</span></span
-      ></label
-    >
+        /><span class="mono">{percent(status.threshold)}</span>
+      </span>
+    </label>
   </section>
 
   <section aria-labelledby="jev-sent">
@@ -177,12 +183,12 @@
       {#each status.recent as item, index (index)}
         <li>
           <code class="mono">{item.command}</code>
-          <span class="note"
-            >{item.error === undefined
+          <span class="note">
+            {item.error === undefined
               ? `${item.verdict === "run" ? "Run" : "Ask"} · ${percent(item.confidence ?? 0)} sure`
               : `No decision: ${item.error}`} · {item.connection === "typesafe" ? "TypeSafe" : "OpenRouter"} · {item.latencyMs}
-            ms</span
-          >
+            ms
+          </span>
         </li>
       {/each}
     </ul>

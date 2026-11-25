@@ -547,9 +547,9 @@
 {/snippet}
 
 {#snippet diagnosticsButton()}
-  <button class="b sm" disabled={diagnostics === "copying"} onclick={copyDiagnostics}
-    >{diagnostics === "copied" ? "Copied" : "Copy diagnostics"}</button
-  >
+  <button class="b sm" disabled={diagnostics === "copying"} onclick={copyDiagnostics}>
+    {diagnostics === "copied" ? "Copied" : "Copy diagnostics"}
+  </button>
 {/snippet}
 
 {#snippet busySwitch()}
@@ -558,14 +558,18 @@
       class="segb"
       role="radio"
       aria-checked={writing.whenBusy === "steer"}
-      onclick={() => (writing.whenBusy = "steer")}>Steer</button
+      onclick={() => (writing.whenBusy = "steer")}
     >
+      Steer
+    </button>
     <button
       class="segb"
       role="radio"
       aria-checked={writing.whenBusy === "followUp"}
-      onclick={() => (writing.whenBusy = "followUp")}>Queue</button
+      onclick={() => (writing.whenBusy = "followUp")}
     >
+      Queue
+    </button>
   </div>
 {/snippet}
 
@@ -634,9 +638,9 @@
       {#if !ready}
         <div class="callout wa" role="status">
           {workspace?.error ?? "Preparing this chat's working folder. Messages stay disabled until it is ready."}
-          {#if workspace?.state === "provisioning"}<button class="b sm" disabled={preparing} onclick={prepare}
-              >{preparing ? "Checking…" : "Check workspace"}</button
-            >{/if}
+          {#if workspace?.state === "provisioning"}<button class="b sm" disabled={preparing} onclick={prepare}>
+              {preparing ? "Checking…" : "Check workspace"}
+            </button>{/if}
         </div>
       {/if}
       {#if !hydrated}
@@ -660,10 +664,10 @@
         </div>
       {:else if effective !== null && !usable}
         <div class="callout wa nowrap" role="status">
-          <span class="grow"
-            ><strong>{providerName ?? effective.provider} isn't enabled.</strong> Enable it in Settings or choose another
-            model; Pal won't send this chat anywhere else on its own.</span
-          >
+          <span class="grow">
+            <strong>{providerName ?? effective.provider} isn't enabled.</strong> Enable it in Settings or choose another model;
+            Pal won't send this chat anywhere else on its own.
+          </span>
           <button class="b sm" onclick={() => navigate({ view: "settings", tab: "models" })}>Settings</button>
         </div>
       {/if}
@@ -706,21 +710,19 @@
           {#if awaiting}<span class="dot" aria-hidden="true"></span>
           {:else if activeWork === undefined && stream.partial === undefined}<span class="ring spin" aria-hidden="true"
             ></span>{/if}
-          <span class="grow ellipsis"
-            >{awaiting ? "Waiting for your approval" : "Running"}
-            <span class="dim"
-              >· {modelName}{providerName !== undefined && effective?.provider !== "openai"
-                ? ` · ${providerName}`
-                : ""}</span
-            ></span
-          >
+          <span class="grow ellipsis">
+            {awaiting ? "Waiting for your approval" : "Running"}
+            <span class="dim">
+              · {modelName}{providerName !== undefined && effective?.provider !== "openai" ? ` · ${providerName}` : ""}
+            </span>
+          </span>
           <button class="b t sm" disabled={stopping} onclick={stop}>Stop</button>
         </div>
         {#if stopError !== undefined}
           <div class="callout er" role="alert">
-            <span class="grow"
-              >Stop didn't reach Pal: {stopError} The run may still be going; press Stop to try again.</span
-            >
+            <span class="grow">
+              Stop didn't reach Pal: {stopError} The run may still be going; press Stop to try again.
+            </span>
             {@render diagnosticsButton()}
           </div>
         {/if}
@@ -739,34 +741,34 @@
       {#if error !== undefined}<div class="callout er" role="alert">{error}</div>{/if}
       {#if chat.blocked !== null}
         <div class="callout er" role="alert">
-          <span class="grow"
-            ><strong>A message couldn't be sent.</strong>
-            {chat.blocked.reason} Later messages in this chat wait until you retry or withdraw it.</span
-          >
+          <span class="grow">
+            <strong>A message couldn't be sent.</strong>
+            {chat.blocked.reason} Later messages in this chat wait until you retry or withdraw it.
+          </span>
           <button class="b sm" disabled={resolving} onclick={() => resolveBlocked("retry")}>Retry</button>
           <button class="b sm" disabled={resolving} onclick={() => resolveBlocked("withdraw")}>Withdraw</button>
         </div>
         <details class="activity">
-          <summary class="acth" title={`Request ${chat.blocked.requestId}`}
-            >Blocked message<Icon name="chevR" size={13} /></summary
-          >
+          <summary class="acth" title={`Request ${chat.blocked.requestId}`}>
+            Blocked message<Icon name="chevR" size={13} />
+          </summary>
           <pre class="out">{chat.blocked.text}</pre>
         </details>
         {#if resolveError !== undefined}<div class="callout er" role="alert">{resolveError}</div>{/if}
       {/if}
       {#if writing.pending !== undefined && !writing.sending && !writing.recovered && writing.pending.requestId !== chat.blocked?.requestId}
         <div class="callout wa" role="alert">
-          <span class="grow"
-            >This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.
-            <span class="mono dim">Request {writing.pending.requestId}</span></span
-          >
+          <span class="grow">
+            This send isn't confirmed. {writing.error} Retry its saved message and destination before sending another.
+            <span class="mono dim">Request {writing.pending.requestId}</span>
+          </span>
           {@render diagnosticsButton()}
           <button class="b sm" onclick={retrySaved}>Retry saved send</button>
         </div>
         <details class="activity">
-          <summary class="acth" title={`Request ${writing.pending.requestId}`}
-            >Saved message · {writing.pending.body.attachments.length} attached<Icon name="chevR" size={13} /></summary
-          >
+          <summary class="acth" title={`Request ${writing.pending.requestId}`}>
+            Saved message · {writing.pending.body.attachments.length} attached<Icon name="chevR" size={13} />
+          </summary>
           <pre class="out">{writing.pending.body.text}</pre>
         </details>
       {:else if writing.error !== undefined}<div class="callout er" role="alert">{writing.error}</div>{/if}
@@ -825,19 +827,24 @@
             sheet?.close();
             onPanel(item.id);
           }}
-          ><Icon name={item.icon} />{item.id}{#if item.id === "Changes" && changeCount}<span
-              class="n"
-              aria-hidden="true">{changeCount}</span
-            >{/if}</button
         >
+          <Icon name={item.icon} />{item.id}{#if item.id === "Changes" && changeCount}<span
+              class="n"
+              aria-hidden="true"
+            >
+              {changeCount}
+            </span>{/if}
+        </button>
       {/each}
       <button
         class="tile"
         onclick={() => {
           sheet?.close();
           navigate({ view: "settings", tab: "general" });
-        }}><Icon name="settings" />Settings</button
+        }}
       >
+        <Icon name="settings" />Settings
+      </button>
     </div>
     <div class="list">
       <div class="li"><span class="lab">Model</span>{@render modelControl()}</div>

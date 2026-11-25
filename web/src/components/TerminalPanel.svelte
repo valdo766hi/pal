@@ -328,38 +328,43 @@
   {#if phone}
     <!-- Full screen on a phone: back to the chat, the folder, a shell picker and sharing the selection. -->
     <div class="phonebar">
-      <button class="b i q tip start" aria-label="Back to chat" data-tip="Back to chat" onclick={onClose}
-        ><Icon name="chevL" /></button
-      >
+      <button class="b i q tip start" aria-label="Back to chat" data-tip="Back to chat" onclick={onClose}>
+        <Icon name="chevL" />
+      </button>
       <div class="where">
         <h2>Terminal</h2>
         <div class="mono" title={root}>{root}</div>
       </div>
       {#if terminals.length > 0}
-        <label class="picker"
-          ><span class="dot" class:ended={active?.ended} aria-hidden="true"></span><select
+        <label class="picker">
+          <span class="dot" class:ended={active?.ended} aria-hidden="true"></span><select
             aria-label="Shell"
             bind:value={selected}
           >
-            {#each terminals as terminal, index (terminal.id)}<option value={terminal.id}>Shell {index + 1}</option
-              >{/each}
-          </select><Icon name="chevD" size={14} /></label
-        >
+            {#each terminals as terminal, index (terminal.id)}<option value={terminal.id}>
+                Shell {index + 1}
+              </option>{/each}
+          </select><Icon name="chevD" size={14} />
+        </label>
       {/if}
       <button
         class="b i q tip"
         aria-label="New host terminal"
         data-tip="New shell"
         disabled={busy || !trust || (workspace != null && workspace.state !== "ready")}
-        onclick={create}><Icon name="plus" /></button
+        onclick={create}
       >
+        <Icon name="plus" />
+      </button>
       {#if active}<button
           class="b i q tip end"
           aria-label="Send selection to composer"
           data-tip="Send selection"
           disabled={!selection || bytes(selection) > 16 * 1024}
-          onclick={() => onSelection(selection)}><Icon name="comment" /></button
-        >{/if}
+          onclick={() => onSelection(selection)}
+        >
+          <Icon name="comment" />
+        </button>{/if}
     </div>
   {:else}
     <div class="bar">
@@ -367,15 +372,17 @@
       <div class="sessions" role="group" aria-label="Terminal sessions">
         {#each terminals as terminal, index (terminal.id)}
           <span class="session" class:on={selected === terminal.id}>
-            <button class="tab" aria-pressed={selected === terminal.id} onclick={() => (selected = terminal.id)}
-              ><span class="dot" class:ended={terminal.ended}></span>Shell {index + 1}</button
-            >
+            <button class="tab" aria-pressed={selected === terminal.id} onclick={() => (selected = terminal.id)}>
+              <span class="dot" class:ended={terminal.ended}></span>Shell {index + 1}
+            </button>
             <button
               class="close"
               aria-label={`Close terminal ${index + 1}`}
               disabled={busy}
-              onclick={() => close(terminal.id)}><Icon name="x" size={12} /></button
+              onclick={() => close(terminal.id)}
             >
+              <Icon name="x" size={12} />
+            </button>
           </span>
         {/each}
         <button
@@ -383,14 +390,18 @@
           aria-label="New host terminal"
           data-tip="New shell"
           disabled={busy || !trust || (workspace != null && workspace.state !== "ready")}
-          onclick={create}><Icon name="plus" size={14} /></button
+          onclick={create}
         >
+          <Icon name="plus" size={14} />
+        </button>
       </div>
       {#if active}<button
           class="b t sm"
           disabled={!selection || bytes(selection) > 16 * 1024}
-          onclick={() => onSelection(selection)}>Send selection to composer</button
-        >{/if}
+          onclick={() => onSelection(selection)}
+        >
+          Send selection to composer
+        </button>{/if}
       {#if dock !== undefined}
         <div class="dock" role="radiogroup" aria-label="Terminal position" tabindex="-1" onkeydown={dockKeys}>
           {#each [["bottom", "Bottom", "dockBottom", "Dock at bottom"], ["side", "Side", "dockSide", "Dock at side"]] as const as [where, label, icon, tip] (where)}
@@ -401,30 +412,32 @@
               data-tip={tip}
               aria-checked={dock === where}
               tabindex={dock === where ? 0 : -1}
-              onclick={() => onDock(where)}><Icon name={icon} /></button
+              onclick={() => onDock(where)}
             >
+              <Icon name={icon} />
+            </button>
           {/each}
         </div>
       {/if}
-      <button class="b i q sm tip up end" aria-label="Close panel" data-tip="Close" onclick={onClose}
-        ><Icon name="x" /></button
-      >
+      <button class="b i q sm tip up end" aria-label="Close panel" data-tip="Close" onclick={onClose}>
+        <Icon name="x" />
+      </button>
     </div>
   {/if}
   <div class="trust" class:ok={trust || terminals.length > 0}>
     {#if trust || terminals.length > 0}
-      <span class="warn" aria-hidden="true"></span><span class="grow ellipsis" title={root}
-        >Host shell, not a sandbox · new sessions start in <span class="mono">{root}</span></span
-      >
+      <span class="warn" aria-hidden="true"></span><span class="grow ellipsis" title={root}>
+        Host shell, not a sandbox · new sessions start in <span class="mono">{root}</span>
+      </span>
     {:else}
-      <span
-        >Host shell, not a sandbox. New sessions start in <span class="mono">{root}</span>. Existing sessions keep their
-        own directories. The agent never types here; only text you select enters the composer.</span
-      >
+      <span>
+        Host shell, not a sandbox. New sessions start in <span class="mono">{root}</span>. Existing sessions keep their
+        own directories. The agent never types here; only text you select enters the composer.
+      </span>
     {/if}
-    <label
-      ><input type="checkbox" bind:checked={trust} />I understand this shell has the Pal host user's authority.</label
-    >
+    <label>
+      <input type="checkbox" bind:checked={trust} />I understand this shell has the Pal host user's authority.
+    </label>
   </div>
   {#if error}<div class="callout er" role="alert">{error}</div>{/if}
   {#if !active}<p class="empty">No terminal sessions. A new shell starts only when you request it.</p>{/if}
@@ -448,37 +461,42 @@
         class:live={connection === "connected" && control && !active.ended}
         class:watch={connection === "connected" && !control && !active.ended}
         role="status"
-        ><span class="dot"></span>{active.ended
+      >
+        <span class="dot"></span>{active.ended
           ? `Session ended. ${active.reason ?? ""}`
           : connection === "connected"
             ? control
               ? "You control this shell"
               : "Observing; another view may control input"
-            : `${connection}; displayed screen may be stale`}</span
-      >
+            : `${connection}; displayed screen may be stale`}
+      </span>
       {#if connection === "disconnected"}<button
           class="b sm"
           onclick={() => {
             error = undefined;
             reconnect++;
-          }}>Reconnect</button
-        >{/if}
+          }}
+        >
+          Reconnect
+        </button>{/if}
       {#if connection === "connected" && !control && !active.ended}<button
           class="b sm"
-          onclick={() => send({ type: "take" })}>Take control</button
-        >{/if}
+          onclick={() => send({ type: "take" })}
+        >
+          Take control
+        </button>{/if}
       <span class="grow"></span>
       <button class="b sm t" onclick={() => runtime?.terminal.selectAll()}>Select output</button>
-      <label class="sr-mode"
-        ><input
+      <label class="sr-mode">
+        <input
           type="checkbox"
           checked={screenReader}
           onchange={(event) => {
             screenReader = event.currentTarget.checked;
             if (runtime) runtime.terminal.options.screenReaderMode = screenReader;
           }}
-        />Screen reader mode</label
-      >
+        />Screen reader mode
+      </label>
       <details>
         <summary>Limits</summary>
         <p>

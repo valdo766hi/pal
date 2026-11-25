@@ -143,9 +143,9 @@
     {disabled}
     onclick={() => (open ? close(false) : show("effort"))}
   >
-    <span class="name">{modelName}</span>{#if current !== undefined && steps.length > 1}<span class="level"
-        >{levelName(effort)}</span
-      >{/if}<Icon name="chevD" size={12} />
+    <span class="name">{modelName}</span>{#if current !== undefined && steps.length > 1}<span class="level">
+        {levelName(effort)}
+      </span>{/if}<Icon name="chevD" size={12} />
   </button>
   {#if open}
     <div
@@ -205,9 +205,9 @@
         </p>
         <div class="defaults">
           {#if isDefault}<span class="optd">New chats start with this model.</span>
-          {:else}<button class="b sm" disabled={disabled || effective === null || !usable} onclick={onDefault}
-              >Use for new chats</button
-            >{/if}
+          {:else}<button class="b sm" disabled={disabled || effective === null || !usable} onclick={onDefault}>
+              Use for new chats
+            </button>{/if}
         </div>
       {:else}
         <div class="listhead">
@@ -215,8 +215,10 @@
             class="b i q sm tip start"
             aria-label="Back to reasoning"
             data-tip="Back"
-            onclick={() => show("effort")}><Icon name="chevL" /></button
+            onclick={() => show("effort")}
           >
+            <Icon name="chevL" />
+          </button>
           <span>Choose model</span>
         </div>
         {#if searchable}

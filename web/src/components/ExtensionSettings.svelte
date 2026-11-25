@@ -66,9 +66,9 @@
     <div class="extension">
       <div class="details">
         <div class="heading">
-          <strong>{item.name}</strong><span class="mono dim">v{item.version}</span><span class="pill"
-            >Built-in · trusted code</span
-          >
+          <strong>{item.name}</strong><span class="mono dim">v{item.version}</span><span class="pill">
+            Built-in · trusted code
+          </span>
         </div>
         <p>{item.description}</p>
         {#if item.available === false}<span class="pill wa">Not in this build</span>{/if}
