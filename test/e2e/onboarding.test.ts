@@ -431,9 +431,12 @@ describe("isolated provider onboarding", () => {
     await page.getByRole("button", { name: "Sign in" }).waitFor();
     await page.unroute("**/api/projects");
 
-    // Sign back in without reloading: the fresh Workspace must still reload the failed Settings CSS.
+    // Sign back in without reloading: the fresh Workspace must not render unstyled Settings; Try again reloads cleanly.
     await page.getByLabel("Passphrase", { exact: true }).fill("correct horse battery");
     await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
     await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
     await page.unroute("**/assets/Settings-*.css");
 
@@ -450,6 +453,36 @@ describe("isolated provider onboarding", () => {
       };
     });
     expect(styles).toEqual({ navDisplay: "flex", navWidth: "220px", h1FontSize: "15px", hasSheet: true });
+    expect(errors).toEqual([]);
+  });
+
+  it("recovers from a failed shared dependency chunk when opening Settings", async () => {
+    const { page, errors } = await setup(1440);
+    await page.getByRole("button", { name: "Set up later" }).click();
+    await optionalTools(page);
+    await createProject(page);
+
+    let sharedAttempts = 0;
+    await page.route("**/assets/WorkspaceCleanup-*.js", async (route) => {
+      sharedAttempts++;
+      if (sharedAttempts === 1) await route.fulfill({ status: 500, body: "shared chunk failed" });
+      else await route.continue();
+    });
+
+    // Reload so the shared chunk is not already cached in the module map from Onboarding.
+    await page.reload();
+    await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
+    expect(sharedAttempts).toBe(0);
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    expect(sharedAttempts).toBe(1);
+
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+    await page.unroute("**/assets/WorkspaceCleanup-*.js");
+
+    expect(sharedAttempts).toBe(2);
     expect(errors).toEqual([]);
   });
 });
