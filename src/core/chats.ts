@@ -224,8 +224,8 @@ export class ChatService {
     const title = body.title.trim();
     if (title === "") throw new InvalidRequest("enter a chat name");
     const renamed = await this.#guard((db) =>
-      db.get<Omit<ChatSummary, "extensions" | "blocked" | "workspace"> & { intent: string }>(
-        "UPDATE pal_chats SET title = ? WHERE id = ? AND state = 'ready' AND deleted_at IS NULL AND title IS ? RETURNING id, project_id AS projectId, conversation_id AS conversationId, title, created_at AS createdAt, command_mode AS commandMode, intent",
+      db.get<{ id: string }>(
+        "UPDATE pal_chats SET title = ? WHERE id = ? AND state = 'ready' AND deleted_at IS NULL AND title IS ? RETURNING id",
         title,
         chatId,
         body.expectedTitle,
@@ -233,14 +233,8 @@ export class ChatService {
     );
     if (renamed !== undefined) {
       const current = await this.get(chatId);
-      if (current !== undefined) return current;
-      const { intent, ...chat } = renamed;
-      return {
-        ...chat,
-        extensions: selectedExtensions(extensionScope(intent)),
-        blocked: null,
-        workspace: null,
-      };
+      if (current === undefined) throw new ChatNotFound("no such chat");
+      return current;
     }
     if ((await this.get(chatId)) === undefined) throw new ChatNotFound("no such chat");
     throw new RequestConflict("The chat name changed. Close and reopen this dialog before trying again.");
