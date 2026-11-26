@@ -462,6 +462,20 @@ export const MIGRATIONS: readonly Migration[] = [
       await transaction.exec("CREATE INDEX pal_command_approvals_chat ON pal_command_approvals (chat_id, created_at)");
     },
   },
+  {
+    version: 27,
+    name: "project_list_indexes",
+    // Older builds refuse schema 27, so unfinished work started under a retained release must finish there first.
+    up: async (transaction) => {
+      await refuseUnfinishedWork(transaction);
+      await transaction.exec(
+        "CREATE INDEX IF NOT EXISTS pal_chats_project_ready ON pal_chats (project_id, created_at) WHERE state = 'ready' AND deleted_at IS NULL",
+      );
+      await transaction.exec(
+        "CREATE INDEX IF NOT EXISTS pal_admissions_pending ON pal_admissions (chat_id) WHERE state = 'admitting'",
+      );
+    },
+  },
 ];
 
 /**

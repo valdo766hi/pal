@@ -60,6 +60,7 @@ let
     (root + "/src")
     (root + "/plugins")
     (root + "/web")
+    (root + "/scripts/compress-assets.ts")
     (root + "/scripts/release-manifest.ts")
   ];
   releaseSource = lib.fileset.toSource {

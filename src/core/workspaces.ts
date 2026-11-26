@@ -334,7 +334,12 @@ function decodePlan(raw: string): WorktreePlan {
     throw new FileAccessError("the stored worktree intent is corrupt; no mutation was retried");
   }
 }
-function view(row: Row): Workspace {
+export type WorkspaceViewRow = Pick<
+  Row,
+  "id" | "project_id" | "chat_id" | "mode" | "root" | "source" | "plan" | "state" | "error"
+>;
+
+export function workspaceView(row: WorkspaceViewRow): Workspace {
   const plan = row.plan === null ? undefined : decodePlan(row.plan);
   return {
     id: row.id,
@@ -349,3 +354,5 @@ function view(row: Row): Workspace {
     error: row.error,
   };
 }
+
+const view = workspaceView;

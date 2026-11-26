@@ -265,4 +265,224 @@ describe("isolated provider onboarding", () => {
     ]);
     expect(errors).toEqual([]);
   });
+
+  it("loads Onboarding and Settings chunks on demand, skips them on chat load, and recovers from chunk errors", async () => {
+    const chatgpt = await startOpenAIFixture();
+    cleanups.push(chatgpt.close);
+    const provider = await startProviderFixture();
+    cleanups.push(provider.close);
+    const root = await realpath(await mkdtemp(join(tmpdir(), "pal-lazy-")));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const pal = await openPal(
+      {
+        dataRoot: join(root, "data"),
+        installRoot: "/nonexistent-install",
+        endpoints: chatgpt.endpoints,
+        providerOrigin: provider.origin,
+        guidanceHome: join(root, "host-home"),
+      },
+      context,
+    );
+    cleanups.push(() => pal.close());
+    const server = await startServer({
+      host: "127.0.0.1",
+      port: 0,
+      version: "test",
+      webRoot: join(import.meta.dirname, "../../dist/public"),
+      api: createApi(pal),
+    });
+    cleanups.push(() => {
+      server.closeAllConnections();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    cleanups.push(() => page.close());
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    // Fail the first Onboarding chunk request, verify retry succeeds without losing owner session.
+    let failOnboarding = true;
+    await page.route("**/assets/Onboarding-*.js", async (route) => {
+      if (failOnboarding) {
+        failOnboarding = false;
+        await route.fulfill({ status: 500, body: "chunk failed" });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto(`${base}/#setup=${pal.owner.setupToken}`);
+    await page.getByLabel("Passphrase", { exact: true }).fill("correct horse battery");
+    await page.getByLabel("Confirm passphrase").fill("correct horse battery");
+    await page.getByRole("button", { name: "Create owner" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load setup:" }).waitFor();
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("heading", { name: "Connect a model provider" }).waitFor();
+    await page.unroute("**/assets/Onboarding-*.js");
+
+    // Finish onboarding so the user now has a project and chat.
+    await page.getByRole("button", { name: "Set up later" }).click();
+    await optionalTools(page);
+    await createProject(page);
+
+    // Reloading into an existing user's chat must not fetch Onboarding or Settings chunks.
+    const chatAssets: string[] = [];
+    const recordAsset = (req: { url(): string }) => {
+      const url = new URL(req.url());
+      if (url.pathname.startsWith("/assets/")) chatAssets.push(url.pathname);
+    };
+    page.on("request", recordAsset);
+    await page.reload();
+    await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
+    page.off("request", recordAsset);
+    expect(chatAssets.some((path) => /\/assets\/(?:Onboarding|Settings)-/.test(path))).toBe(false);
+
+    // Fail the first Settings chunk request, retry, then navigate tabs without losing Settings state.
+    let failSettings = true;
+    await page.route("**/assets/Settings-*.js", async (route) => {
+      if (failSettings) {
+        failSettings = false;
+        await route.fulfill({ status: 500, body: "chunk failed" });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+    await page.unroute("**/assets/Settings-*.js");
+
+    // Navigate between Settings tabs and back to chat.
+    await page.getByRole("button", { name: "Models" }).click();
+    await page.getByRole("button", { name: "MCP servers" }).click();
+    await page.getByRole("button", { name: "General" }).click();
+    await page.getByRole("heading", { name: "General", level: 2 }).waitFor();
+    await page.getByRole("button", { name: "Back to chat" }).click();
+    expect(errors).toEqual([]);
+  });
+
+  it("reloads failed lazy-route stylesheets on retry so Settings renders with scoped styles", async () => {
+    const { page, errors } = await setup(1440);
+    await page.getByRole("button", { name: "Set up later" }).click();
+    await optionalTools(page);
+    await createProject(page);
+
+    // Fail Settings-*.css once, verify retry re-fetches it and applies scoped Settings styles.
+    let cssAttempts = 0;
+    await page.route("**/assets/Settings-*.css", async (route) => {
+      cssAttempts++;
+      if (cssAttempts === 1) await route.fulfill({ status: 500, body: "css failed" });
+      else await route.continue();
+    });
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    expect(cssAttempts).toBe(1);
+
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+    await page.unroute("**/assets/Settings-*.css");
+
+    expect(cssAttempts).toBe(2);
+    const styles = await page.evaluate(() => {
+      const nav = document.querySelector('nav[aria-label="Settings sections"]');
+      const h1 = nav?.querySelector("h1");
+      const link = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="Settings-"]');
+      return {
+        navDisplay: nav ? getComputedStyle(nav).display : null,
+        navWidth: nav ? getComputedStyle(nav).width : null,
+        h1FontSize: h1 ? getComputedStyle(h1).fontSize : null,
+        hasSheet: link?.sheet != null,
+      };
+    });
+    expect(styles).toEqual({ navDisplay: "flex", navWidth: "220px", h1FontSize: "15px", hasSheet: true });
+    expect(errors).toEqual([]);
+  });
+
+  it("reloads failed lazy-route stylesheets after Workspace remounts on sign-out and sign-in", async () => {
+    const { page, errors } = await setup(1440);
+    await page.getByRole("button", { name: "Set up later" }).click();
+    await optionalTools(page);
+    await createProject(page);
+
+    let cssAttempts = 0;
+    await page.route("**/assets/Settings-*.css", async (route) => {
+      cssAttempts++;
+      if (cssAttempts === 1) await route.fulfill({ status: 500, body: "css failed" });
+      else await route.continue();
+    });
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    expect(cssAttempts).toBe(1);
+
+    // Trigger 401 signed_out so App unmounts Workspace without reloading the page.
+    let expireOnce = true;
+    await page.route("**/api/projects", async (route) => {
+      if (expireOnce) {
+        expireOnce = false;
+        await route.fulfill({ status: 401, json: { error: "signed_out", message: "sign in to Pal first" } });
+      } else {
+        await route.continue();
+      }
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.getByRole("button", { name: "Sign in" }).waitFor();
+    await page.unroute("**/api/projects");
+
+    // Sign back in without reloading: the fresh Workspace must not render unstyled Settings; Try again reloads cleanly.
+    await page.getByLabel("Passphrase", { exact: true }).fill("correct horse battery");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+    await page.unroute("**/assets/Settings-*.css");
+
+    expect(cssAttempts).toBe(2);
+    const styles = await page.evaluate(() => {
+      const nav = document.querySelector('nav[aria-label="Settings sections"]');
+      const h1 = nav?.querySelector("h1");
+      const link = document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="Settings-"]');
+      return {
+        navDisplay: nav ? getComputedStyle(nav).display : null,
+        navWidth: nav ? getComputedStyle(nav).width : null,
+        h1FontSize: h1 ? getComputedStyle(h1).fontSize : null,
+        hasSheet: link?.sheet != null,
+      };
+    });
+    expect(styles).toEqual({ navDisplay: "flex", navWidth: "220px", h1FontSize: "15px", hasSheet: true });
+    expect(errors).toEqual([]);
+  });
+
+  it("recovers from a failed shared dependency chunk when opening Settings", async () => {
+    const { page, errors } = await setup(1440);
+    await page.getByRole("button", { name: "Set up later" }).click();
+    await optionalTools(page);
+    await createProject(page);
+
+    let sharedAttempts = 0;
+    await page.route("**/assets/WorkspaceCleanup-*.js", async (route) => {
+      sharedAttempts++;
+      if (sharedAttempts === 1) await route.fulfill({ status: 500, body: "shared chunk failed" });
+      else await route.continue();
+    });
+
+    // Reload so the shared chunk is not already cached in the module map from Onboarding.
+    await page.reload();
+    await page.getByRole("heading", { name: "Start the conversation" }).waitFor();
+    expect(sharedAttempts).toBe(0);
+
+    await page.getByRole("button", { name: "Settings" }).click();
+    await page.getByRole("alert").filter({ hasText: "Couldn't load settings:" }).waitFor();
+    expect(sharedAttempts).toBe(1);
+
+    await page.getByRole("button", { name: "Try again" }).click();
+    await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+    await page.unroute("**/assets/WorkspaceCleanup-*.js");
+
+    expect(sharedAttempts).toBe(2);
+    expect(errors).toEqual([]);
+  });
 });

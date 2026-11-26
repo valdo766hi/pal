@@ -8,6 +8,7 @@ import { createInterface } from "node:readline";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
 import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { ChatService } from "../src/core/chats.ts";
 import { migrate, MIGRATIONS } from "../src/storage/migrations.ts";
@@ -375,6 +376,142 @@ describe("store", () => {
       ]),
     ).toEqual(migrated);
     expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
+  });
+
+  it("adds project-list indexes in schema 27 without losing rows, and older builds refuse it unchanged", async () => {
+    const database = await openDatabase(join(await tempDir(), "pal.sqlite"));
+    cleanups.push(() => database.close());
+    await migrate(database, MIGRATIONS.slice(0, 26));
+    await database.run(
+      "INSERT INTO pal_projects (id, request_id, digest, name, mode, state, root, created_at) VALUES ('p1', 'rp1', 'd', 'One', 'managed', 'ready', '/tmp/p1', 100)",
+    );
+    await database.run(
+      "INSERT INTO pal_chats (id, request_id, digest, intent, state, conversation_id, created_at, project_id, title, deleted_at, command_mode) VALUES ('c1', 'rc1', 'd', '{}', 'ready', 1, 200, 'p1', 'First', NULL, 'auto')",
+    );
+    await database.run(
+      "INSERT INTO pal_admissions (seq, chat_id, request_id, digest, intent, state, submission_id, created_at, blocked) VALUES (1, 'c1', 'ra1', 'd', '{\"text\":\"wait\"}', 'admitting', NULL, 210, 'missing attachment')",
+    );
+    const beforeChats = await database.all("SELECT * FROM pal_chats ORDER BY id");
+    const beforeAdmissions = await database.all("SELECT * FROM pal_admissions ORDER BY seq");
+
+    await migrate(database);
+
+    expect(await database.all("SELECT * FROM pal_chats ORDER BY id")).toEqual(beforeChats);
+    expect(await database.all("SELECT * FROM pal_admissions ORDER BY seq")).toEqual(beforeAdmissions);
+    const indexes = (
+      await database.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name")
+    ).map((row) => row.name);
+    expect(indexes).toContain("pal_chats_project_ready");
+    expect(indexes).toContain("pal_admissions_pending");
+
+    const plan = await database.all<{ detail: string }>(
+      `EXPLAIN QUERY PLAN
+       SELECT c.id, c.title, c.conversation_id, c.created_at, c.intent, c.command_mode,
+         (SELECT json_object('requestId', a.request_id, 'text', json_extract(a.intent, '$.text'), 'reason', a.blocked)
+          FROM pal_admissions a WHERE a.chat_id = c.id AND a.state = 'admitting' AND a.blocked IS NOT NULL) AS blocked,
+         CASE WHEN p.id IS NOT NULL THEN w.id END AS workspace_id,
+         w.project_id AS workspace_project_id, w.mode AS workspace_mode, w.root AS workspace_root,
+         w.source AS workspace_source, w.plan AS workspace_plan, w.state AS workspace_state, w.error AS workspace_error
+       FROM pal_chats c
+       LEFT JOIN pal_workspaces w ON w.chat_id = c.id
+       LEFT JOIN pal_projects p ON p.id = w.project_id AND p.removed_at IS NULL AND p.state = 'ready'
+       WHERE c.project_id = ? AND c.state = 'ready' AND c.deleted_at IS NULL
+       ORDER BY c.created_at DESC, c.rowid DESC`,
+      "p1",
+    );
+    const details = plan.map((row) => row.detail).join("\n");
+    expect(details).toContain("pal_chats_project_ready");
+    expect(details).toContain("pal_admissions_pending");
+    expect(details).not.toMatch(/TEMP B-TREE/i);
+
+    const migrated = await Promise.all([
+      database.all("SELECT type, name, sql FROM sqlite_master ORDER BY type, name"),
+      database.all("SELECT version, name, applied_at FROM pal_migrations ORDER BY version"),
+    ]);
+    await expect(migrate(database, MIGRATIONS.slice(0, 26))).rejects.toThrow(
+      /migration 27 'project_list_indexes'.*does not know/,
+    );
+    expect(
+      await Promise.all([
+        database.all("SELECT type, name, sql FROM sqlite_master ORDER BY type, name"),
+        database.all("SELECT version, name, applied_at FROM pal_migrations ORDER BY version"),
+      ]),
+    ).toEqual(migrated);
+    expect(await database.get("PRAGMA integrity_check")).toEqual({ integrity_check: "ok" });
+  });
+
+  it("refuses schema 27 migration while unfinished work is pending, leaving schema 26 intact for the retained build", async () => {
+    const dataRoot = await tempDir();
+    // Create a store at schema 26 with Pi's tables, then interrupt an input at the input-recorded barrier.
+    const initDb = await openDatabase(join(dataRoot, "pal.sqlite"));
+    await migrate(initDb, MIGRATIONS.slice(0, 26));
+    await initDb.close();
+
+    const openAt26 = async (barrier?: (point: string) => void) => {
+      const database = await openDatabase(join(dataRoot, "pal.sqlite"));
+      await migrate(database, MIGRATIONS.slice(0, 26));
+      const storage = await SqliteStorage.open(database, { prefix: "pi_" });
+      const faux = fauxProvider();
+      const models = createModels();
+      models.setProvider(faux.provider);
+      faux.setResponses([fauxAssistantMessage(fauxText("ok"))]);
+      const model = faux.getModel();
+      const harness = await Harness.open(storage, { models, registry: createRegistry() }, context);
+      const chats = await ChatService.open(
+        {
+          database,
+          harness,
+          agentFor: async () => ({ model: { provider: model.provider, modelId: model.id } }),
+          ...(barrier === undefined ? {} : { barrier }),
+        },
+        context,
+      );
+      return {
+        database,
+        harness,
+        chats,
+        close: async () => {
+          await harness.close(context);
+          await storage.close(context);
+        },
+      };
+    };
+
+    const stop = new Error("crash at input-recorded");
+    const first = await openAt26((point) => {
+      if (point === "input-recorded") throw stop;
+    });
+    const chat = await first.chats.createChat("req-chat-26", { projectId: "project-1" }, context);
+    await expect(first.chats.submit(chat.id, "req-input-26", { text: "finish me" }, context)).rejects.toBe(stop);
+    await first.close();
+
+    const beforeDb = await openDatabase(join(dataRoot, "pal.sqlite"));
+    const beforeSnapshot = await snapshot(beforeDb);
+    const beforeAdmissions = await beforeDb.all("SELECT * FROM pal_admissions ORDER BY seq");
+    expect(await beforeDb.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({ n: 26 });
+    expect(beforeAdmissions).toMatchObject([{ chat_id: chat.id, request_id: "req-input-26", state: "admitting" }]);
+    await beforeDb.close();
+
+    // Upgrading directly to schema 27 must refuse without changing the database.
+    await expect(openStore(dataRoot)).rejects.toThrow(/unfinished work needs its retained Pal release/);
+    const afterRefusal = await openDatabase(join(dataRoot, "pal.sqlite"));
+    expect(await snapshot(afterRefusal)).toEqual(beforeSnapshot);
+    expect(await afterRefusal.all("SELECT * FROM pal_admissions ORDER BY seq")).toEqual(beforeAdmissions);
+    await afterRefusal.close();
+
+    // The retained schema 26 build can still reopen and finish the interrupted input.
+    const retained = await openAt26();
+    const conversation = await retained.harness.conversation(chat.conversationId, context);
+    await conversation?.waitForIdle(context);
+    expect(await retained.database.all("SELECT state FROM pal_admissions")).toEqual([{ state: "admitted" }]);
+    await retained.close();
+
+    // Once idle, upgrading to schema 27 succeeds.
+    const upgraded = await openStore(dataRoot);
+    expect(await upgraded.database.get("SELECT max(version) AS n FROM pal_migrations")).toEqual({
+      n: MIGRATIONS.at(-1)?.version,
+    });
+    await upgraded.close();
   });
 
   it("numbers migrations consecutively from 1", () => {

@@ -24,7 +24,7 @@
   import { copyText } from "../lib/copy.ts";
   import { app, navigate, refreshChatGPT, refreshProjects, viewport } from "../lib/state.svelte.ts";
   import { loadFailures, renderer, slots } from "../lib/plugins.ts";
-  import { build, type PieceFor, place, type Row } from "../lib/projection.ts";
+  import { build, group, type PieceFor, place } from "../lib/projection.ts";
 
   let {
     chat,
@@ -217,7 +217,7 @@
     return ids.join(" ");
   });
   const retried = $derived(new Set(retriedIds.split(" ")));
-  const historyRows = $derived(historyItems.reduce<Row[]>((rows, item) => place(rows, item, retried), []));
+  const historyRows = $derived(group(historyItems, retried));
   // Only the last line changes while a turn streams; the rows before it keep their identity.
   const rows = $derived(
     build([], stream?.partial, [], pieceFor).reduce((rows, item) => place(rows, item, retried), [...historyRows]),

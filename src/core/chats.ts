@@ -17,7 +17,8 @@ import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import { type Static, Type } from "typebox";
 import { InvalidRequest, normalize, RequestConflict, validate } from "./requests.ts";
 import { extensionScope, selectedExtensions, type ExtensionScope } from "./extensions.ts";
-import { WorkspaceMode, workspaceMode } from "./workspaces.ts";
+import type { CommandMode } from "./approvals.ts";
+import { type Workspace, WorkspaceMode, workspaceMode, workspaceView } from "./workspaces.ts";
 import { HttpError } from "./http.ts";
 import type { Changes } from "./changes.ts";
 import { type AttachmentLabel, UploadError } from "./uploads.ts";
@@ -91,6 +92,8 @@ export type ChatSummary = Chat & {
   readonly extensions: ExtensionScope["selected"];
   /** The input holding this chat back, until the owner retries or withdraws it. */
   readonly blocked: BlockedInput | null;
+  readonly workspace: Workspace | null;
+  readonly commandMode: CommandMode;
 };
 export type BlockedInput = { readonly requestId: string; readonly text: string; readonly reason: string };
 export type Admission = { readonly chatId: string; readonly requestId: string; readonly submissionId: SubmissionId };
@@ -190,27 +193,12 @@ export class ChatService {
 
   async list(projectId: string): Promise<ChatSummary[]> {
     const rows = await this.#guard((db) =>
-      db.all<{
-        id: string;
-        title: string | null;
-        conversation_id: ConversationId;
-        created_at: number;
-        intent: string;
-        blocked: string | null;
-      }>(
-        `SELECT id, title, conversation_id, created_at, intent, ${BLOCKED} FROM pal_chats WHERE project_id = ? AND state = 'ready' AND deleted_at IS NULL ORDER BY created_at DESC, rowid DESC`,
+      db.all<SummaryRow>(
+        `${SUMMARY_QUERY} WHERE c.project_id = ? AND c.state = 'ready' AND c.deleted_at IS NULL ORDER BY c.created_at DESC, c.rowid DESC`,
         projectId,
       ),
     );
-    return rows.map((row) => ({
-      id: row.id,
-      projectId,
-      title: row.title,
-      conversationId: row.conversation_id,
-      createdAt: row.created_at,
-      extensions: selectedExtensions(extensionScope(row.intent)),
-      blocked: blockedInput(row.blocked),
-    }));
+    return rows.map(chatSummary);
   }
 
   /** The project a conversation's chat belongs to. */
@@ -226,29 +214,9 @@ export class ChatService {
 
   async get(chatId: string): Promise<ChatSummary | undefined> {
     const row = await this.#guard((db) =>
-      db.get<{
-        project_id: string;
-        title: string | null;
-        conversation_id: ConversationId;
-        created_at: number;
-        intent: string;
-        blocked: string | null;
-      }>(
-        `SELECT project_id, title, conversation_id, created_at, intent, ${BLOCKED} FROM pal_chats WHERE id = ? AND state = 'ready' AND deleted_at IS NULL`,
-        chatId,
-      ),
+      db.get<SummaryRow>(`${SUMMARY_QUERY} WHERE c.id = ? AND c.state = 'ready' AND c.deleted_at IS NULL`, chatId),
     );
-    return row === undefined
-      ? undefined
-      : {
-          id: chatId,
-          projectId: row.project_id,
-          title: row.title,
-          conversationId: row.conversation_id,
-          createdAt: row.created_at,
-          extensions: selectedExtensions(extensionScope(row.intent)),
-          blocked: blockedInput(row.blocked),
-        };
+    return row === undefined ? undefined : chatSummary(row);
   }
 
   async rename(chatId: string, input: unknown): Promise<ChatSummary> {
@@ -256,20 +224,17 @@ export class ChatService {
     const title = body.title.trim();
     if (title === "") throw new InvalidRequest("enter a chat name");
     const renamed = await this.#guard((db) =>
-      db.get<Omit<ChatSummary, "extensions" | "blocked"> & { intent: string }>(
-        "UPDATE pal_chats SET title = ? WHERE id = ? AND state = 'ready' AND deleted_at IS NULL AND title IS ? RETURNING id, project_id AS projectId, conversation_id AS conversationId, title, created_at AS createdAt, intent",
+      db.get<{ id: string }>(
+        "UPDATE pal_chats SET title = ? WHERE id = ? AND state = 'ready' AND deleted_at IS NULL AND title IS ? RETURNING id",
         title,
         chatId,
         body.expectedTitle,
       ),
     );
     if (renamed !== undefined) {
-      const { intent, ...chat } = renamed;
-      return {
-        ...chat,
-        extensions: selectedExtensions(extensionScope(intent)),
-        blocked: (await this.get(chatId))?.blocked ?? null,
-      };
+      const current = await this.get(chatId);
+      if (current === undefined) throw new ChatNotFound("no such chat");
+      return current;
     }
     if ((await this.get(chatId)) === undefined) throw new ChatNotFound("no such chat");
     throw new RequestConflict("The chat name changed. Close and reopen this dialog before trying again.");
@@ -811,10 +776,61 @@ type AdmissionRow = {
   state: "admitting" | "admitted" | "withdrawn";
   submission_id: SubmissionId | null;
 };
+type SummaryRow = {
+  id: string;
+  project_id: string;
+  title: string | null;
+  conversation_id: ConversationId;
+  created_at: number;
+  intent: string;
+  command_mode: CommandMode;
+  blocked: string | null;
+  workspace_id: string | null;
+  workspace_project_id: string | null;
+  workspace_mode: WorkspaceMode | null;
+  workspace_root: string | null;
+  workspace_source: string | null;
+  workspace_plan: string | null;
+  workspace_state: Workspace["state"] | null;
+  workspace_error: string | null;
+};
 /** Inputs are admitted in order, so at most one per chat is blocked. */
 const BLOCKED =
-  "(SELECT json_object('requestId', a.request_id, 'text', json_extract(a.intent, '$.text'), 'reason', a.blocked) FROM pal_admissions a WHERE a.chat_id = pal_chats.id AND a.state = 'admitting' AND a.blocked IS NOT NULL) AS blocked";
+  "(SELECT json_object('requestId', a.request_id, 'text', json_extract(a.intent, '$.text'), 'reason', a.blocked) FROM pal_admissions a WHERE a.chat_id = c.id AND a.state = 'admitting' AND a.blocked IS NOT NULL) AS blocked";
+const SUMMARY_QUERY = `SELECT c.id, c.project_id, c.title, c.conversation_id, c.created_at, c.intent, c.command_mode, ${BLOCKED}, CASE WHEN p.id IS NOT NULL THEN w.id END AS workspace_id, w.project_id AS workspace_project_id, w.mode AS workspace_mode, w.root AS workspace_root, w.source AS workspace_source, w.plan AS workspace_plan, w.state AS workspace_state, w.error AS workspace_error FROM pal_chats c LEFT JOIN pal_workspaces w ON w.chat_id = c.id LEFT JOIN pal_projects p ON p.id = w.project_id AND p.removed_at IS NULL AND p.state = 'ready'`;
 const blockedInput = (raw: string | null) => (raw === null ? null : (JSON.parse(raw) as BlockedInput));
+function chatSummary(row: SummaryRow): ChatSummary {
+  const workspace =
+    row.workspace_id === null ||
+    row.workspace_project_id === null ||
+    row.workspace_mode === null ||
+    row.workspace_root === null ||
+    row.workspace_source === null ||
+    row.workspace_state === null
+      ? null
+      : workspaceView({
+          id: row.workspace_id,
+          project_id: row.workspace_project_id,
+          chat_id: row.id,
+          mode: row.workspace_mode,
+          root: row.workspace_root,
+          source: row.workspace_source,
+          plan: row.workspace_plan,
+          state: row.workspace_state,
+          error: row.workspace_error,
+        });
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    conversationId: row.conversation_id,
+    createdAt: row.created_at,
+    extensions: selectedExtensions(extensionScope(row.intent)),
+    blocked: blockedInput(row.blocked),
+    workspace,
+    commandMode: row.command_mode,
+  };
+}
 
 /** A chat's first input names it: its first line, shortened at a word boundary. */
 function untitledName(text: string): string {

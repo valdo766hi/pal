@@ -1,3 +1,18 @@
+<script module lang="ts">
+  // Vite's preload cache and Chromium's ES module map outlive Workspace remounts; once a route asset fails,
+  // keep failing closed until a full reload resets both caches so a remount cannot render an unstyled route.
+  let assetFailure: unknown;
+
+  function loadRoute<T>(load: () => Promise<T>): Promise<T> {
+    if (assetFailure !== undefined) return Promise.reject(assetFailure);
+    const promise = load();
+    promise.catch((failure: unknown) => {
+      assetFailure = failure;
+    });
+    return promise;
+  }
+</script>
+
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, ApiError, type ChatSummary, requestId, type WorkspaceMode } from "../lib/api.ts";
@@ -17,10 +32,8 @@
   } from "../lib/state.svelte.ts";
   import ChatView from "./ChatView.svelte";
   import CreateProject from "./CreateProject.svelte";
-  import Onboarding from "./Onboarding.svelte";
   import ProjectMcpSettings from "./ProjectMcpSettings.svelte";
   import RenameChat from "./RenameChat.svelte";
-  import Settings from "./Settings.svelte";
   import Sidebar from "./Sidebar.svelte";
   import { panels } from "../lib/plugins.ts";
   import type { IconName } from "../lib/icons.ts";
@@ -40,6 +53,18 @@
   let renaming: ChatSummary | undefined = $state.raw();
   let error: string | undefined = $state();
   let loaded = $state(false);
+  type SettingsModule = typeof import("./Settings.svelte");
+  type OnboardingModule = typeof import("./Onboarding.svelte");
+  let settingsLoad: Promise<SettingsModule> | undefined = $state.raw();
+  let onboardingLoad: Promise<OnboardingModule> | undefined = $state.raw();
+  $effect(() => {
+    if (loaded && app.projects.length === 0 && onboardingLoad === undefined)
+      onboardingLoad = loadRoute(() => import("./Onboarding.svelte"));
+  });
+  $effect(() => {
+    if (loaded && app.projects.length > 0 && app.route.view === "settings" && settingsLoad === undefined)
+      settingsLoad = loadRoute(() => import("./Settings.svelte"));
+  });
   let panelRoute: Route | undefined = $state();
   const panel = $derived(panelRoute === app.route);
   const changesPanel = () => import("./ChangesPanel.svelte");
@@ -235,7 +260,22 @@
     <button class="b" onclick={() => location.reload()}>Try again</button>
   </div>
 {:else if app.projects.length === 0}
-  <Onboarding onCreateProject={() => (creating = true)} />
+  {#if onboardingLoad !== undefined}
+    {#await onboardingLoad}
+      <div class="center" role="status">Loading setup…</div>
+    {:then { default: Onboarding }}
+      <Onboarding onCreateProject={() => (creating = true)} />
+    {:catch failure}
+      <div class="center">
+        <div class="callout er" role="alert">
+          Couldn't load setup: {failure instanceof Error ? failure.message : String(failure)}
+        </div>
+        <button class="b" onclick={() => location.reload()}>Try again</button>
+      </div>
+    {/await}
+  {:else}
+    <div class="center" role="status">Loading setup…</div>
+  {/if}
 {:else}
   <div class="shell">
     <!-- A phone shows one panel at a time, full screen with its own header. -->
@@ -292,7 +332,22 @@
       <main>
         {#if error !== undefined}<div class="callout er banner" role="alert">{error}</div>{/if}
         {#if app.route.view === "settings"}
-          <Settings tab={app.route.tab} {onSignOut} />
+          {#if settingsLoad !== undefined}
+            {#await settingsLoad}
+              <div class="center" role="status">Loading settings…</div>
+            {:then { default: Settings }}
+              <Settings tab={app.route.tab} {onSignOut} />
+            {:catch failure}
+              <div class="center">
+                <div class="callout er" role="alert">
+                  Couldn't load settings: {failure instanceof Error ? failure.message : String(failure)}
+                </div>
+                <button class="b" onclick={() => location.reload()}>Try again</button>
+              </div>
+            {/await}
+          {:else}
+            <div class="center" role="status">Loading settings…</div>
+          {/if}
         {:else if located !== undefined}
           {@const root = located.chat.workspace?.root ?? located.project.root}
           {#if size !== "phone"}<header class="chathead">

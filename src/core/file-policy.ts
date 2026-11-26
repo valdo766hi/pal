@@ -25,18 +25,26 @@ export class PrivateFiles {
   }
 
   static async open(paths: readonly string[]) {
+    const objects = await Promise.all(paths.map(objectAt));
     const startup = new Set<string>();
-    for (const path of paths) {
-      const object = await objectAt(path);
-      if (object !== undefined) startup.add(object);
-    }
+    for (const object of objects) if (object !== undefined) startup.add(object);
     return new PrivateFiles(paths, startup);
   }
 
   async contains(info: FileObject): Promise<boolean> {
     const object = identity(info);
     if (this.#startup.has(object)) return true;
-    for (const path of this.#paths) if ((await objectAt(path)) === object) return true;
+    if (this.#paths.length === 0) return false;
+    const results = await Promise.allSettled(this.#paths.map(objectAt));
+    let failure: unknown;
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        if (result.value === object) return true;
+      } else if (failure === undefined) {
+        failure = result.reason;
+      }
+    }
+    if (failure !== undefined) throw failure;
     return false;
   }
 }

@@ -569,7 +569,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
           projects: await Promise.all(
             projects.map(async (project) => ({
               ...project,
-              chats: await Promise.all((await pal.chats.list(project.id)).map(describeChat)),
+              chats: await pal.chats.list(project.id),
             })),
           ),
         });
@@ -736,7 +736,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         }
         const summary = await pal.chats.get(chat.id);
         if (summary === undefined) throw new HttpError(404, "not_found", "the chat was removed");
-        return send(200, { chat: await describeChat(summary) });
+        return send(200, { chat: summary });
       }
       if (id !== undefined && action === undefined && method === "DELETE") {
         const workspace = await pal.workspaces.info(id);
@@ -748,7 +748,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
       const chat = id === undefined ? undefined : await pal.chats.get(id);
       if (chat === undefined) throw new HttpError(404, "not_found", "no such chat");
       if (action === "title" && path.length === 3 && method === "PUT")
-        return send(200, { chat: await describeChat(await pal.chats.rename(chat.id, await readJson(request))) });
+        return send(200, { chat: await pal.chats.rename(chat.id, await readJson(request)) });
       if (action === "command-mode" && path.length === 3 && method === "PUT") {
         const { mode } = validate(CommandModeBody, await readJson(request));
         await pal.chats.change(chat.id, () => pal.approvals.setMode(chat.id, mode), context);
@@ -777,7 +777,7 @@ export function createApi(pal: Pal, publicOrigin?: string, releases?: Pick<Relea
         const model =
           agent.model === undefined ? undefined : pal.models.getModel(agent.model.provider, agent.model.modelId);
         return send(200, {
-          chat: await describeChat(chat),
+          chat,
           model: agent.model?.modelId ?? null,
           provider: agent.model?.provider ?? null,
           effort: model === undefined ? "off" : clampThinkingLevel(model, agent.thinkingLevel),
